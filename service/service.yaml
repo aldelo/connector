@@ -1,5 +1,4 @@
 grpc:
-  connect_timeout: 15
   connection_timeout: 15
   keepalive_inactive_ping_time_trigger: 0
   keepalive_inactive_ping_timeout: 0
@@ -21,15 +20,15 @@ instance:
   instance_id: ""
   instance_port: 0
   instance_prefix: ams-
-  instance_timeout: 5
+  launch_timeout: 5
   instance_version: v0.0.1
   internal_health_frequency: 1
 namespace:
-  ns_id:
-  ns_name:
+  ns_id: ns-hhetxbxwyamihs7d
+  ns_name: aldelo.internal
 service:
-  sv_id:
-  sv_name:
+  sv_id: srv-afkfwcfdyv32jqno
+  sv_name: msautoservice
 service_auto_create:
   sac_dns_routing: multivalue
   sac_dns_ttl: 90

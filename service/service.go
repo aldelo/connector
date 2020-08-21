@@ -496,8 +496,8 @@ func (s *Service) autoCreateService() error {
 
 			var timeoutDuration []time.Duration
 
-			if s._config.Instance.Timeout > 0 {
-				timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.Timeout) * time.Second)
+			if s._config.Instance.LaunchTimeout > 0 {
+				timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.LaunchTimeout) * time.Second)
 			}
 
 			if svcId, err := registry.CreateService(s._sd,
@@ -534,8 +534,8 @@ func (s *Service) registerInstance(ip string, port uint, healthy bool, version s
 	if s._sd != nil && s._config != nil && len(s._config.Service.Id) > 0 {
 		var timeoutDuration []time.Duration
 
-		if s._config.Instance.Timeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.Timeout) * time.Second)
+		if s._config.Instance.LaunchTimeout > 0 {
+			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.LaunchTimeout) * time.Second)
 		}
 
 		// if prior instance id already exist, deregister prior first (clean up prior in case instance ghosted)
@@ -593,8 +593,8 @@ func (s *Service) updateHealth(healthy bool) error {
 	if s._sd != nil && s._config != nil && util.LenTrim(s._config.Service.Id) > 0 && util.LenTrim(s._config.Instance.Id) > 0 {
 		var timeoutDuration []time.Duration
 
-		if s._config.Instance.Timeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.Timeout) * time.Second)
+		if s._config.Instance.LaunchTimeout > 0 {
+			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.LaunchTimeout) * time.Second)
 		}
 
 		err := registry.UpdateHealthStatus(s._sd, s._config.Instance.Id, s._config.Service.Id, healthy)
@@ -611,8 +611,8 @@ func (s *Service) deregisterInstance() error {
 
 		var timeoutDuration []time.Duration
 
-		if s._config.Instance.Timeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.Timeout) * time.Second)
+		if s._config.Instance.LaunchTimeout > 0 {
+			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.LaunchTimeout) * time.Second)
 		}
 
 		if operationId, err := registry.DeregisterInstance(s._sd, s._config.Instance.Id, s._config.Service.Id, timeoutDuration...); err != nil {

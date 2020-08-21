@@ -68,7 +68,7 @@ type InstanceData struct {
 	Prefix string					`mapstructure:"instance_prefix"`
 	InitialUnhealthy bool			`mapstructure:"initial_unhealthy"`
 	Id string						`mapstructure:"instance_id"`
-	Timeout uint					`mapstructure:"instance_timeout"`
+	LaunchTimeout uint				`mapstructure:"launch_timeout"`
 	InternalHealthFrequency uint	`mapstructure:"internal_health_frequency"`
 }
 
@@ -217,10 +217,10 @@ func (c *Config) SetInstanceId(s string) {
 	}
 }
 
-func (c *Config) SetInstanceTimeout(i uint) {
+func (c *Config) SetLaunchTimeout(i uint) {
 	if c._v != nil {
-		c._v.Set("instance.instance_timeout", i)
-		c.Instance.Timeout = i
+		c._v.Set("instance.launch_timeout", i)
+		c.Instance.LaunchTimeout = i
 	}
 }
 
@@ -233,7 +233,7 @@ func (c *Config) SetInternalHealthFrequency(i uint) {
 
 func (c *Config) SetGrpcConnectTimeout(i uint) {
 	if c._v != nil {
-		c._v.Set("grpc.connect_timeout", i)
+		c._v.Set("grpc.connection_timeout", i)
 		c.Grpc.ConnectionTimeout = i
 	}
 }
@@ -388,9 +388,9 @@ func (c *Config) Read() error {
 		"instance.instance_prefix", "ms-").Default(						// instance id creation prefix, leave blank if no prefix
 		"instance.initial_unhealthy", false).Default(						// instance launch initial health state when registered, true or false
 		"instance.instance_id", "").Default(								// instance id currently launched
-		"instance.instance_timeout", 5).Default(							// instance launch timeout seconds
+		"instance.launch_timeout", 5).Default(							// instance launch timeout seconds  (for cloudmap register, health update, deregister)
 		"instance.internal_health_frequency", 5).Default(					// instance internal grpc health check frequency in seconds
-		"grpc.connect_timeout", 15).Default(								// grpc connection attempt time out in seconds, 0 for default of 120 seconds
+		"grpc.connection_timeout", 15).Default(							// grpc connection attempt time out in seconds, 0 for default of 120 seconds
 		"grpc.x509_cert_file", "").Default(								// grpc tls setup, path to cert pem file
 		"grpc.x509_key_file", "").Default(								// grpc tls setup, path to key pem file
 		"grpc.keepalive_min_wait", 0).Default(							// grpc keep-alive enforcement policy, minimum seconds before client may send keepalive, 0 for default 300 seconds
