@@ -15,10 +15,14 @@
     </option>
   </component>
   <component name="GOROOT" path="/usr/local/go" />
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
   <component name="GoLibraries">
     <option name="indexEntireGoPath" value="false" />
   </component>
   <component name="ProjectId" id="1g1h8T6lbrbOo50ZdmZBURGRkpc" />
+  <component name="ProjectLevelVcsManager" settingsEditedManually="true" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
@@ -30,7 +34,7 @@
     <property name="WebServerToolWindowFactoryState" value="false" />
     <property name="go.import.settings.migrated" value="true" />
     <property name="last_opened_file_path" value="$USER_HOME$" />
-    <property name="settings.editor.selected.configurable" value="goland.project.structure" />
+    <property name="settings.editor.selected.configurable" value="vcs.Git" />
   </component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
@@ -157,10 +161,11 @@
       <screen x="0" y="23" width="2560" height="1362" />
     </state>
     <state width="2516" height="479" key="GridCell.Tab.1.right/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597648726582" />
-    <state x="788" y="343" key="SettingsEditor" timestamp="1597609600776">
-      <screen x="0" y="23" width="2560" height="1362" />
+    <state x="788" y="343" key="SettingsEditor" timestamp="1597995303961">
+      <screen x="0" y="23" width="2560" height="1363" />
     </state>
     <state x="788" y="343" key="SettingsEditor/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597609600776" />
+    <state x="788" y="343" key="SettingsEditor/0.23.2560.1363/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1363" timestamp="1597995303961" />
     <state x="943" y="332" width="672" height="679" key="search.everywhere.popup" timestamp="1597959107256">
       <screen x="0" y="23" width="2560" height="1363" />
     </state>
