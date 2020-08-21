@@ -1,0 +1,1 @@
+protoc --go_out=$GOPATH/src --go-grpc_out=$GOPATH/src ./*.proto

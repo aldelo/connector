@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package test;
+
+option go_package = "github.com/nxpharryt/connector/internal/proto/test";
+
+message Question {
+  string question = 1;
+}
+
+message Answer {
+  string answer = 1;
+}
+
+service AnswerService {
+  rpc Greeting (Question) returns (Answer) {}
+}

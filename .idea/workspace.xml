@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ChangeListManager">
+    <list default="true" id="344fef11-285f-4beb-82bb-697d3a1e3fde" name="Default Changelist" comment="" />
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Go File" />
+      </list>
+    </option>
+  </component>
+  <component name="GOROOT" path="/usr/local/go" />
+  <component name="GoLibraries">
+    <option name="indexEntireGoPath" value="false" />
+  </component>
+  <component name="ProjectId" id="1g1h8T6lbrbOo50ZdmZBURGRkpc" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+    <option name="showMembers" value="true" />
+  </component>
+  <component name="PropertiesComponent">
+    <property name="DefaultGoTemplateProperty" value="Go File" />
+    <property name="RunOnceActivity.OpenProjectViewOnStart" value="true" />
+    <property name="WebServerToolWindowFactoryState" value="false" />
+    <property name="go.import.settings.migrated" value="true" />
+    <property name="last_opened_file_path" value="$USER_HOME$" />
+    <property name="settings.editor.selected.configurable" value="goland.project.structure" />
+  </component>
+  <component name="RecentsManager">
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/../common/wrapper/aws" />
+      <recent name="$PROJECT_DIR$/../common/wrapper" />
+      <recent name="$PROJECT_DIR$/../common" />
+      <recent name="$PROJECT_DIR$/features" />
+    </key>
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/internal/wrapper/sns" />
+      <recent name="$PROJECT_DIR$/internal/wrapper/hystrixgo" />
+      <recent name="$PROJECT_DIR$/internal/wrapper/hystrix" />
+      <recent name="$PROJECT_DIR$/internal/wrapper/ratelimiter" />
+      <recent name="$PROJECT_DIR$/internal/wrapper/zap" />
+    </key>
+  </component>
+  <component name="RunManager" selected="Go Test.TestService_Serve in github.com/aldelo/connector/service (2)">
+    <configuration name="TestService_Serve in github.com/aldelo/connector/service (1)" type="GoTestRunConfiguration" factoryName="Go Test" temporary="true" nameIsGenerated="true">
+      <module name="connector" />
+      <working_directory value="$PROJECT_DIR$/service" />
+      <framework value="gotest" />
+      <kind value="PACKAGE" />
+      <package value="github.com/aldelo/connector/service" />
+      <directory value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <filePath value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <pattern value="^\QTestService_Serve\E$" />
+      <method v="2" />
+    </configuration>
+    <configuration name="TestService_Serve in github.com/aldelo/connector/service (2)" type="GoTestRunConfiguration" factoryName="Go Test" temporary="true" nameIsGenerated="true">
+      <module name="connector" />
+      <working_directory value="$PROJECT_DIR$/service" />
+      <framework value="gotest" />
+      <kind value="PACKAGE" />
+      <package value="github.com/aldelo/connector/service" />
+      <directory value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <filePath value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <pattern value="^\QTestService_Serve\E$" />
+      <method v="2" />
+    </configuration>
+    <configuration name="TestService_Serve in github.com/aldelo/connector/service (4)" type="GoTestRunConfiguration" factoryName="Go Test" temporary="true" nameIsGenerated="true">
+      <module name="connector" />
+      <working_directory value="$PROJECT_DIR$/service" />
+      <framework value="gotest" />
+      <kind value="PACKAGE" />
+      <package value="github.com/aldelo/connector/service" />
+      <directory value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <filePath value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <pattern value="^\QTestService_Serve\E$" />
+      <method v="2" />
+    </configuration>
+    <configuration name="TestService_Serve in github.com/aldelo/connector/service (5)" type="GoTestRunConfiguration" factoryName="Go Test" temporary="true" nameIsGenerated="true">
+      <module name="connector" />
+      <working_directory value="$PROJECT_DIR$/service" />
+      <framework value="gotest" />
+      <kind value="PACKAGE" />
+      <package value="github.com/aldelo/connector/service" />
+      <directory value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <filePath value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <pattern value="^\QTestService_Serve\E$" />
+      <method v="2" />
+    </configuration>
+    <configuration name="TestService_Serve in github.com/aldelo/connector/service" type="GoTestRunConfiguration" factoryName="Go Test" temporary="true" nameIsGenerated="true">
+      <module name="connector" />
+      <working_directory value="$PROJECT_DIR$/service" />
+      <framework value="gotest" />
+      <kind value="PACKAGE" />
+      <package value="github.com/aldelo/connector/service" />
+      <directory value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <filePath value="$PROJECT_DIR$/../../../aldelo.com/util" />
+      <pattern value="^\QTestService_Serve\E$" />
+      <method v="2" />
+    </configuration>
+    <recent_temporary>
+      <list>
+        <item itemvalue="Go Test.TestService_Serve in github.com/aldelo/connector/service (2)" />
+        <item itemvalue="Go Test.TestService_Serve in github.com/aldelo/connector/service (1)" />
+        <item itemvalue="Go Test.TestService_Serve in github.com/aldelo/connector/service" />
+        <item itemvalue="Go Test.TestService_Serve in github.com/aldelo/connector/service (5)" />
+        <item itemvalue="Go Test.TestService_Serve in github.com/aldelo/connector/service (4)" />
+      </list>
+    </recent_temporary>
+  </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="VgoProject">
+    <integration-enabled>true</integration-enabled>
+  </component>
+  <component name="WindowStateProjectService">
+    <state width="2516" height="387" key="GridCell.Tab.0.bottom" timestamp="1597907346973">
+      <screen x="0" y="23" width="2560" height="1362" />
+    </state>
+    <state width="2516" height="387" key="GridCell.Tab.0.bottom/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597907346973" />
+    <state width="2516" height="387" key="GridCell.Tab.0.bottom/0.23.2560.1363/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1363" timestamp="1597875650131" />
+    <state width="2516" height="387" key="GridCell.Tab.0.center" timestamp="1597907346971">
+      <screen x="0" y="23" width="2560" height="1362" />
+    </state>
+    <state width="2516" height="387" key="GridCell.Tab.0.center/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597907346971" />
+    <state width="2516" height="387" key="GridCell.Tab.0.center/0.23.2560.1363/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1363" timestamp="1597875650130" />
+    <state width="2516" height="387" key="GridCell.Tab.0.left" timestamp="1597907346971">
+      <screen x="0" y="23" width="2560" height="1362" />
+    </state>
+    <state width="2516" height="387" key="GridCell.Tab.0.left/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597907346971" />
+    <state width="2516" height="387" key="GridCell.Tab.0.left/0.23.2560.1363/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1363" timestamp="1597875650129" />
+    <state width="2516" height="387" key="GridCell.Tab.0.right" timestamp="1597907346972">
+      <screen x="0" y="23" width="2560" height="1362" />
+    </state>
+    <state width="2516" height="387" key="GridCell.Tab.0.right/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597907346972" />
+    <state width="2516" height="387" key="GridCell.Tab.0.right/0.23.2560.1363/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1363" timestamp="1597875650130" />
+    <state width="2516" height="479" key="GridCell.Tab.1.bottom" timestamp="1597648726583">
+      <screen x="0" y="23" width="2560" height="1362" />
+    </state>
+    <state width="2516" height="479" key="GridCell.Tab.1.bottom/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597648726583" />
+    <state width="2516" height="479" key="GridCell.Tab.1.center" timestamp="1597648726582">
+      <screen x="0" y="23" width="2560" height="1362" />
+    </state>
+    <state width="2516" height="479" key="GridCell.Tab.1.center/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597648726582" />
+    <state width="2516" height="479" key="GridCell.Tab.1.left" timestamp="1597648726582">
+      <screen x="0" y="23" width="2560" height="1362" />
+    </state>
+    <state width="2516" height="479" key="GridCell.Tab.1.left/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597648726582" />
+    <state width="2516" height="479" key="GridCell.Tab.1.right" timestamp="1597648726582">
+      <screen x="0" y="23" width="2560" height="1362" />
+    </state>
+    <state width="2516" height="479" key="GridCell.Tab.1.right/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597648726582" />
+    <state x="788" y="343" key="SettingsEditor" timestamp="1597609600776">
+      <screen x="0" y="23" width="2560" height="1362" />
+    </state>
+    <state x="788" y="343" key="SettingsEditor/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597609600776" />
+    <state x="943" y="332" width="672" height="679" key="search.everywhere.popup" timestamp="1597959107256">
+      <screen x="0" y="23" width="2560" height="1363" />
+    </state>
+    <state x="943" y="332" width="672" height="678" key="search.everywhere.popup/0.23.2560.1362/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1362" timestamp="1597647622249" />
+    <state x="943" y="332" width="672" height="679" key="search.everywhere.popup/0.23.2560.1363/2560.23.1680.1027/-2560.23.2560.1417@0.23.2560.1363" timestamp="1597959107256" />
+  </component>
+</project>
