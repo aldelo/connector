@@ -17,8 +17,10 @@ package service
  */
 
 import (
+	"context"
 	"fmt"
 	util "github.com/aldelo/common"
+	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/common/wrapper/cloudmap/sdhealthchecktype"
@@ -26,6 +28,7 @@ import (
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/tap"
@@ -60,6 +63,10 @@ type Service struct {
 	//			},
 	RegisterServiceHandlers func(grpcServer *grpc.Server)
 
+	// setup optional health check handlers
+	DefaultHealthCheckHandler func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	ServiceHealthCheckHandlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+
 	// one or more unary server interceptors for handling wrapping actions
 	UnaryServerInterceptors []grpc.UnaryServerInterceptor
 
@@ -75,6 +82,18 @@ type Service struct {
 	// handler for unknown requests rather than sending back an error
 	UnknownStreamHandler grpc.StreamHandler
 
+	// handler to invoke before gRPC server is to start
+	BeforeServerStart func(svc *Service)
+
+	// handler to invoke after gRPC server started
+	AfterServerStart func(svc *Service)
+
+	// handler to invoke before gRPC server is to shutdown
+	BeforeServerShutdown func(svc *Service)
+
+	// handler to invoke after gRPC server has shutdown
+	AfterServerShutdown func(svc *Service)
+
 	// read or persist service config settings
 	_config *Config
 
@@ -84,6 +103,15 @@ type Service struct {
 	// instantiated internal objects
 	_grpcServer *grpc.Server
 	_localAddress string
+}
+
+// create service
+func NewService(appName string, configFileName string, registerServiceHandlers func(grpcServer *grpc.Server)) *Service {
+	return &Service{
+		AppName: appName,
+		ConfigFileName: configFileName,
+		RegisterServiceHandlers: registerServiceHandlers,
+	}
 }
 
 // readConfig will read in config data
@@ -273,6 +301,16 @@ func (s *Service) connectSd() error {
 	return nil
 }
 
+func (s *Service) startHealthChecker() error {
+	if s._grpcServer == nil {
+		return fmt.Errorf("Health Check Server Can't Start: gRPC Server Not Started")
+	}
+
+	grpc_health_v1.RegisterHealthServer(s._grpcServer, health.NewHealthServer(s.DefaultHealthCheckHandler, s.ServiceHealthCheckHandlers))
+
+	return nil
+}
+
 // startServer will start and serve grpc services, it will run in goroutine until terminated
 func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 	if s._grpcServer == nil {
@@ -288,12 +326,21 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 				// quit is invoked
 				log.Println("gRPC Server Quit Invoked")
 				s._grpcServer.Stop()
+				_ = lis.Close()
 				return
 
 			default:
 				// start gRPC server
 				if !gRPCServerInvoked {
 					gRPCServerInvoked = true
+
+					if s.BeforeServerStart != nil {
+						log.Println("Before gRPC Server Starts Begin...")
+
+						s.BeforeServerStart(s)
+
+						log.Println("... Before gRPC Server Starts End")
+					}
 
 					log.Println("Starting gRPC Server...")
 
@@ -305,7 +352,24 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 						}
 					}()
 
-					log.Println("...gRPC Server Started")
+					log.Println("... gRPC Server Started")
+
+					if s.AfterServerStart != nil {
+						log.Println("After gRPC Server Started Begin...")
+
+						s.AfterServerStart(s)
+
+						log.Println("... After gRPC Server Started End")
+					}
+
+					// start health checker services
+					log.Println("Starting gRPC Health Server...")
+
+					if err := s.startHealthChecker(); err != nil {
+						log.Println("!!! gRPC Health Server Fail To Start: " + err.Error() + " !!!")
+					} else {
+						log.Println("... gRPC Health Server Started")
+					}
 				}
 			}
 
@@ -337,8 +401,8 @@ func (s *Service) registerSd(ip string, port uint) error {
 	return nil
 }
 
-// osSigHandler handles os exit event for clean up
-func (s *Service) osSigHandler() {
+// awaitOsSigExit handles os exit event for clean up
+func (s *Service) awaitOsSigExit() {
 	// watch for os sigint or sigterm exit conditions for cleanup
 	sigs := make(chan os.Signal, 1)
 	done := make(chan bool, 1)
@@ -347,15 +411,15 @@ func (s *Service) osSigHandler() {
 
 	go func() {
 		sig := <-sigs
-		log.Println("Service Shutdown Command: ", sig)
+		log.Println("OS Sig Exit Command: ", sig)
 		done <- true
 	}()
 
-	log.Println("=== To Shutdown Service, Press 'Ctrl + C' ===")
+	log.Println("=== Press 'Ctrl + C' to Shutdown ===")
 	<-done
 
 	// blocked until signal
-	log.Println("!!! Shutting Down Service !!!")
+	log.Println("*** Shutdown Invoked ***")
 }
 
 // Serve will setup grpc service and start serving
@@ -399,13 +463,29 @@ func (s *Service) Serve() error {
 	}
 
 	// halt until os exit signal
-	s.osSigHandler()
+	s.awaitOsSigExit()
+
+	if s.BeforeServerShutdown != nil {
+		log.Println("Before gRPC Server Shutdown Begin...")
+
+		s.BeforeServerShutdown(s)
+
+		log.Println("... Before gRPC Server Shutdown End")
+	}
 
 	// shut down gRPC server command invoke
 	quit <- true
 
 	// stopping services
 	s.ImmediateStop()
+
+	if s.AfterServerShutdown != nil {
+		log.Println("After gRPC Server Shutdown Begin...")
+
+		s.AfterServerShutdown(s)
+
+		log.Println("... After gRPC Server Shutdown End")
+	}
 
 	return nil
 }
@@ -496,8 +576,8 @@ func (s *Service) autoCreateService() error {
 
 			var timeoutDuration []time.Duration
 
-			if s._config.Instance.LaunchTimeout > 0 {
-				timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.LaunchTimeout) * time.Second)
+			if s._config.Instance.SdTimeout > 0 {
+				timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout) * time.Second)
 			}
 
 			if svcId, err := registry.CreateService(s._sd,
@@ -534,8 +614,8 @@ func (s *Service) registerInstance(ip string, port uint, healthy bool, version s
 	if s._sd != nil && s._config != nil && len(s._config.Service.Id) > 0 {
 		var timeoutDuration []time.Duration
 
-		if s._config.Instance.LaunchTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.LaunchTimeout) * time.Second)
+		if s._config.Instance.SdTimeout > 0 {
+			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout) * time.Second)
 		}
 
 		// if prior instance id already exist, deregister prior first (clean up prior in case instance ghosted)
@@ -593,12 +673,11 @@ func (s *Service) updateHealth(healthy bool) error {
 	if s._sd != nil && s._config != nil && util.LenTrim(s._config.Service.Id) > 0 && util.LenTrim(s._config.Instance.Id) > 0 {
 		var timeoutDuration []time.Duration
 
-		if s._config.Instance.LaunchTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.LaunchTimeout) * time.Second)
+		if s._config.Instance.SdTimeout > 0 {
+			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout) * time.Second)
 		}
 
-		err := registry.UpdateHealthStatus(s._sd, s._config.Instance.Id, s._config.Service.Id, healthy)
-		return err
+		return registry.UpdateHealthStatus(s._sd, s._config.Instance.Id, s._config.Service.Id, healthy)
 	} else {
 		return nil
 	}
@@ -611,13 +690,13 @@ func (s *Service) deregisterInstance() error {
 
 		var timeoutDuration []time.Duration
 
-		if s._config.Instance.LaunchTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.LaunchTimeout) * time.Second)
+		if s._config.Instance.SdTimeout > 0 {
+			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout) * time.Second)
 		}
 
 		if operationId, err := registry.DeregisterInstance(s._sd, s._config.Instance.Id, s._config.Service.Id, timeoutDuration...); err != nil {
 			log.Println("... De-Register Instance Failed: " + err.Error())
-			return err
+			return fmt.Errorf("De-Register Instance Fail: %s", err.Error())
 		} else {
 			tryCount := 0
 
@@ -626,7 +705,7 @@ func (s *Service) deregisterInstance() error {
 			for {
 				if status, e := registry.GetOperationStatus(s._sd, operationId, timeoutDuration...); e != nil {
 					log.Println("... De-Register Instance Failed: " + e.Error())
-					return e
+					return fmt.Errorf("De-Register Instance Fail: %s", e.Error())
 				} else {
 					if status == sdoperationstatus.Success {
 						log.Println("... De-Register Instance OK")
@@ -635,7 +714,7 @@ func (s *Service) deregisterInstance() error {
 
 						if e2 := s._config.Save(); e2 != nil {
 							log.Println("... Update Config with De-Registered Instance Failed: " + e2.Error())
-							return fmt.Errorf("De-register Instance Fail When Save Config Errored: %s", e2.Error())
+							return fmt.Errorf("De-Register Instance Fail When Save Config Errored: %s", e2.Error())
 						} else {
 							log.Println("... Update Config with De-Registered Instance OK")
 							return nil

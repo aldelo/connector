@@ -1,0 +1,64 @@
+target:
+  # required, this client app's name
+  app_name: connector.client
+  # required, defines target service discovery method
+  # valid values: srv, a, api, direct
+  service_discovery_type: "srv"
+  # if service_discovery_type = direct
+  # specify a direct ip and port (###.###.###.###:####) to directly connect
+  # (direct connect is intended for testing use only, do not use for production)
+  direct_connect_ip_port: ""
+  # if service_discovery_type = srv, a or api
+  # target service name as registered with aws cloud map
+  # both service_name and namespace_name are required when srv, a or api
+  service_name: ""
+  # if service_discovery_type = srv, a or api
+  # target namespace name as registered with aws cloud map
+  # both service_name and namespace_name are required when srv, a or api
+  namespace_name: ""
+  # if service_discovery_type = api
+  # target service's aws region, must be valid aws regions supported
+  # (us-east-1, us-west-2, etc, see github.com/aldelo/common/wrapper/aws/awsregion)
+  # region is required when api
+  region: us-east-1
+  # if service_discovery_type = api
+  # target instance filter to given version only (optional)
+  instance_version: ""
+  # if service_discovery_type = a
+  # indicates a specific port being used on service endpoint when sd = a
+  # 0 means do not use fixed port, honor service discovery port returned instead
+  instance_port: 0
+  # timeout seconds for service discovery actions, 0 to turn off timeout
+  sd_timeout: 5
+  # service discovery endpoints cache expires seconds, 0 defaults to 300 seconds
+  sd_endpoint_cache_expires: 300
+  # service discovery endpoints cache probe frequency seconds, 0 defaults to each 30 seconds
+  sd_endpoint_probe_frequency: 30
+  # service discovery api maximum instance count returned during discovery call, 0 defaults to 100
+  sd_instance_max_result: 100
+grpc:
+  # grpc tls setup, path to ca cert pem file
+  x509_ca_cert_file: ""
+  # define user agent string for all RPCs
+  user_agent: ""
+  # indicates round robin load balancer is to be used, default is true
+  use_load_balancer: true
+  # indicates health check for server serving status is enabled, default is true
+  use_health_check: true
+  # indicates grpc dial will block until dial completion if true; otherwise, dial async and immediately returns, defaults to true
+  dial_with_block: true
+  # indicates the minimum connect timeout seconds for the dial action
+  dial_min_connect_timeout: 5
+  # grpc keep-alive option,
+  # max seconds of no activity before client pings server, 0 for default of 30 seconds
+  keepalive_inactive_ping_time_trigger: 0
+  # grpc keep-alive option,
+  # max seconds of timeout during client to server ping, where no response closes connection, 0 for default of 20 seconds
+  keepalive_inactive_ping_timeout: 0
+  # grpc keep-alive enforcement policy,
+  # allow client to keepalive if no stream, false is default
+  keepalive_permit_without_stream: false
+  # 0 for default 32 kb = 1024 * 32
+  read_buffer_size: 0
+  # 0 for default 32 kb = 1024 * 32
+  write_buffer_size: 0

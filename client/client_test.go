@@ -19,18 +19,19 @@ package client
 import (
 	"context"
 	"fmt"
-	"google.golang.org/grpc"
+	"github.com/aldelo/connector/adapters/health"
+	testpb "github.com/aldelo/connector/example/proto/test"
 	"testing"
-	testpb "github.com/aldelo/connector/internal/proto/test"
+	"time"
 )
 
 func TestClient_Dial(t *testing.T) {
 	cli := &Client{
-		ServiceName: "ms.aldelo.helloservice",
-		ServiceAddr: "",
+		AppName: "connector.client",
+		ConfigFileName: "client",
 	}
 
-	if err := cli.Dial(grpc.WithInsecure()); err != nil {
+	if err := cli.Dial(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -42,5 +43,18 @@ func TestClient_Dial(t *testing.T) {
 		t.Error(e)
 	} else {
 		fmt.Println("Answer = " + result.Answer + ", From = " + cli.RemoteAddress())
+	}
+
+
+	hc, _ := health.NewHealthClient(cli._conn)
+	for {
+		if hcResp, err := hc.Check(""); err != nil {
+			fmt.Println("Health Check Fail: " + err.Error())
+			break
+		} else {
+			fmt.Println("Health Check Result = " + hcResp.String())
+		}
+
+		time.Sleep(1 * time.Second)
 	}
 }

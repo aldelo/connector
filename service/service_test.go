@@ -19,13 +19,13 @@ package service
 import (
 	"context"
 	util "github.com/aldelo/common"
-	testpb "github.com/aldelo/connector/internal/proto/test"
+	"github.com/aldelo/common/wrapper/aws/awsregion"
+	"github.com/aldelo/common/wrapper/cloudmap"
+	testpb "github.com/aldelo/connector/example/proto/test"
 	"google.golang.org/grpc"
 	"log"
 	"net"
 	"testing"
-	"github.com/aldelo/common/wrapper/cloudmap"
-	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"time"
 )
 

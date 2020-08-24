@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package test;
 
-option go_package = "github.com/nxpharryt/connector/internal/proto/test";
+option go_package = "github.com/aldelo/connector/example/proto/test";
 
 message Question {
   string question = 1;

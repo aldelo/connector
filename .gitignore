@@ -40,6 +40,8 @@
 *.ipr
 
 .DS_Store
+service/service.yaml
+client/client.yaml
 
 # CMake
 cmake-build-*/

@@ -38,8 +38,8 @@ instance:
   instance_version: v0.0.1
   # instance launch initial health state when registered, true or false
   initial_unhealthy: true
-  # instance launch timeout seconds (for cloudmap register, health update, deregister)
-  launch_timeout: 5
+  # service discovery actions timeout seconds (for cloudmap register, health update, deregister)
+  sd_timeout: 5
   # instance internal grpc health check frequency in seconds
   internal_health_frequency: 1
   # instance id currently launched
@@ -70,7 +70,7 @@ grpc:
   # max seconds of no activity before server pings client, 0 for default of 2 hours
   keepalive_inactive_ping_time_trigger: 0
   # grpc keep-alive option,
-  # max seconds of timeout during server to client ping, where no repsonse closes connection, 0 for default of 20 seconds
+  # max seconds of timeout during server to client ping, where no response closes connection, 0 for default of 20 seconds
   keepalive_inactive_ping_timeout: 0
   # 0 for default 32 kb = 1024 * 32
   read_buffer_size: 0

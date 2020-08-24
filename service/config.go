@@ -68,7 +68,7 @@ type InstanceData struct {
 	Prefix string					`mapstructure:"instance_prefix"`
 	InitialUnhealthy bool			`mapstructure:"initial_unhealthy"`
 	Id string						`mapstructure:"instance_id"`
-	LaunchTimeout uint				`mapstructure:"launch_timeout"`
+	SdTimeout uint					`mapstructure:"sd_timeout"`
 	InternalHealthFrequency uint	`mapstructure:"internal_health_frequency"`
 }
 
@@ -217,10 +217,10 @@ func (c *Config) SetInstanceId(s string) {
 	}
 }
 
-func (c *Config) SetLaunchTimeout(i uint) {
+func (c *Config) SetSdTimeout(i uint) {
 	if c._v != nil {
-		c._v.Set("instance.launch_timeout", i)
-		c.Instance.LaunchTimeout = i
+		c._v.Set("instance.sd_timeout", i)
+		c.Instance.SdTimeout = i
 	}
 }
 
@@ -301,42 +301,42 @@ func (c *Config) SetKeepAliveInactivePingTimeout(i uint) {
 	}
 }
 
-func (c *Config) ReadBufferSize(i uint) {
+func (c *Config) SetReadBufferSize(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.read_buffer_size", i)
 		c.Grpc.ReadBufferSize = i
 	}
 }
 
-func (c *Config) WriteBufferSize(i uint) {
+func (c *Config) SetWriteBufferSize(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.write_buffer_size", i)
 		c.Grpc.WriteBufferSize = i
 	}
 }
 
-func (c *Config) MaxReceiveMessageSize(i uint) {
+func (c *Config) SetMaxReceiveMessageSize(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.max_recv_msg_size", i)
 		c.Grpc.MaxReceiveMessageSize = i
 	}
 }
 
-func (c *Config) MaxSendMessageSize(i uint) {
+func (c *Config) SetMaxSendMessageSize(i uint) {
 	if c._v	!= nil {
 		c._v.Set("grpc.max_send_msg_size", i)
 		c.Grpc.MaxSendMessageSize = i
 	}
 }
 
-func (c *Config) MaxConcurrentStreams(i uint) {
+func (c *Config) SetMaxConcurrentStreams(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.max_concurrent_streams", i)
 		c.Grpc.MaxConcurrentStreams = i
 	}
 }
 
-func (c *Config) NumStreamWorkers(i uint) {
+func (c *Config) SetNumStreamWorkers(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.num_stream_workers", i)
 		c.Grpc.NumStreamWorkers = i
@@ -351,6 +351,7 @@ func (c *Config) Read() error {
 	c.Service = ServiceData{}
 	c.SvcCreateData = ServiceAutoCreate{}
 	c.Instance = InstanceData{}
+	c.Grpc = GrpcData{}
 
 	if util.LenTrim(c.AppName) == 0 {
 		return fmt.Errorf("App Name is Required")
@@ -366,7 +367,7 @@ func (c *Config) Read() error {
 		CustomConfigPath: c.CustomConfigPath,
 
 		UseYAML: true,
-		UseAutomaticEnvVar: true,
+		UseAutomaticEnvVar: false,
 	}
 
 	c._v.Default(
@@ -388,7 +389,7 @@ func (c *Config) Read() error {
 		"instance.instance_prefix", "ms-").Default(						// instance id creation prefix, leave blank if no prefix
 		"instance.initial_unhealthy", false).Default(						// instance launch initial health state when registered, true or false
 		"instance.instance_id", "").Default(								// instance id currently launched
-		"instance.launch_timeout", 5).Default(							// instance launch timeout seconds  (for cloudmap register, health update, deregister)
+		"instance.sd_timeout", 5).Default(								// service discovery actions timeout seconds  (for cloudmap register, health update, deregister)
 		"instance.internal_health_frequency", 5).Default(					// instance internal grpc health check frequency in seconds
 		"grpc.connection_timeout", 15).Default(							// grpc connection attempt time out in seconds, 0 for default of 120 seconds
 		"grpc.x509_cert_file", "").Default(								// grpc tls setup, path to cert pem file
