@@ -33,6 +33,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/tap"
+	_ "google.golang.org/grpc/encoding/gzip"
 	"log"
 	"net"
 	"os"

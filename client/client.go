@@ -41,6 +41,12 @@ import (
 )
 
 // Client represents a gRPC client's connection and entry point
+//
+// note:
+//		1) Using Compressor with RPC
+//			a) import "google.golang.org/grpc/encoding/gzip"
+//			b) in RPC Call, pass grpc.UseCompressor(gzip.Name)) in the third parameter
+//					example: RPCCall(ctx, &pb.Request{...}, grpc.UseCompressor(gzip.Name))
 type Client struct {
 	// client properties
 	AppName string
