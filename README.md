@@ -1,5 +1,51 @@
 # Project Overview
- Golang based gRPC server and client connectors, for microservice development
+connector intends to provide a simpler coding experience with gRPC, and microservices development.
+
+When it comes to setting up gRPC server, connecting from gRPC client, as well as supporting microservices related needs,
+instead of creating a large framework or package, with many features that we may not use, an emphasis is placed on coding
+productivity as well as reducing amount of repetitive typing / boilerplate coding.
+
+On the server end, the entry point is /service folder's Service struct. 
+On the client side, the entry point is /client folder's Client struct.
+Both server and client supports config file based setup.
+
+Since we use AWS extensively, many features integrates with AWS: (Goal is for these features to work automatically with minimum configuration)
+
+- Service Discovery
+    - connector's service upon launch, auto registers with AWS cloud map for service discovery
+    - On the client side, service discovery is automatic, see config for discovery options
+- Health Checks
+    - service instance health is integrated with cloud map's health check status
+    - auto register and deregister on service discovery based on instance health
+    - container level service serving status utilizes the gRPC health v1
+    - config can be set on client to auto health check for serving status, as well as manual health probe
+    - TODO: need to create out of process health witness for instance health management
+- Load Balancing
+    - client side name resolver is setup to retrieve multiple service endpoints and perform round robin load balancing
+- Metadata
+    - Metadata helper methods provided
+- RpcError
+    - Rpc Error helper methods provided
+- Auth
+    - TODO: will integrate via interceptor
+- Circuit Breaker
+    - TODO: will integrate via interceptor on client side
+- Rate Limiter
+    - ToDO: will integrate via interceptor on service side
+- Logger
+    - TODO: Currently local logging using log.* but will update to zap
+- Monitoring
+    - TODO: looking to use prometheus, but might end up using something else
+- Tracer
+    - TODO: planning on using aws xray
+- Queue
+    - TODO: SQS
+- Notification
+    - TODO: SNS
+- Systemd
+    - TODO: will provide wrapper code to run built-service as a systemd service
+
+#### project currently under development and not considered stable, please do not use under production environment at this point until this warning is removed
 
 # Service connector
 #### Overview
