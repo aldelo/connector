@@ -24,6 +24,7 @@ import (
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/common/wrapper/cloudmap/sdhealthchecktype"
+	"github.com/aldelo/connector/adapters/metadata"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"google.golang.org/grpc"
@@ -103,6 +104,9 @@ type Service struct {
 	// instantiated internal objects
 	_grpcServer *grpc.Server
 	_localAddress string
+
+	// *** Set After Server Serving ***
+	MetadataHelper *metadata.MetaServer
 }
 
 // create service
@@ -351,6 +355,8 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 							log.Println("... gRPC Server Quit Command Received")
 						}
 					}()
+
+					s.MetadataHelper = new(metadata.MetaServer)
 
 					log.Println("... gRPC Server Started")
 

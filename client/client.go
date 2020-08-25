@@ -24,6 +24,7 @@ import (
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/connector/adapters/loadbalancer"
+	"github.com/aldelo/connector/adapters/metadata"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"google.golang.org/grpc"
@@ -67,10 +68,6 @@ type Client struct {
 	// handler to invoke after gRPC client connection has closed
 	AfterClientClose func(cli *Client)
 
-	// upon dial completion successfully,
-	// auto instantiate a manual help checker
-	HealthManualChecker *health.HealthClient
-
 	// read or persist client config settings
 	_config *Config
 
@@ -83,6 +80,15 @@ type Client struct {
 	// instantiated internal objects
 	_conn *grpc.ClientConn
 	_remoteAddress string
+
+	// upon dial completion successfully,
+	// auto instantiate a manual help checker
+	_healthManualChecker *health.HealthClient
+
+	// *** Setup by Dial Action ***
+	// helper for creating metadata context,
+	// and evaluate metadata header or trailer value when received from rpc
+	MetadataHelper *metadata.MetaClient
 }
 
 // ServiceEndpoint represents a specific service endpoint connection target
@@ -339,6 +345,8 @@ func (c *Client) Dial(ctx context.Context) error {
 				c.setupHealthManualChecker()
 			}
 
+			c.MetadataHelper = new(metadata.MetaClient)
+
 			log.Println("... gRPC Service @ " + target + " [" + c._remoteAddress + "] Connected")
 			return nil
 		}
@@ -351,16 +359,16 @@ func (c *Client) setupHealthManualChecker() {
 		return
 	}
 
-	c.HealthManualChecker, _ = health.NewHealthClient(c._conn)
+	c._healthManualChecker, _ = health.NewHealthClient(c._conn)
 }
 
 // HealthProbe manually checks service serving health status
 func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) {
-	if c.HealthManualChecker == nil {
+	if c._healthManualChecker == nil {
 		if c._conn != nil {
 			c.setupHealthManualChecker()
 
-			if c.HealthManualChecker == nil {
+			if c._healthManualChecker == nil {
 				return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: (Auto Instantiate) %s", "Health Manual Checker is Nil")
 			}
 		} else {
@@ -371,7 +379,7 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 	log.Println("Health Probe - Manual Check Begin...")
 	defer log.Println("... Health Probe - Manual Check End")
 
-	return c.HealthManualChecker.Check(serviceName, timeoutDuration...)
+	return c._healthManualChecker.Check(serviceName, timeoutDuration...)
 }
 
 // GetState returns the current grpc client connection's state
