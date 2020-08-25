@@ -26,6 +26,9 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
     - Metadata helper methods provided
 - RpcError
     - Rpc Error helper methods provided
+- Compressor
+    - gzip decompressor supported on service level
+    - note added on client struct for passing gzip compressor via RPC call
 - Auth
     - TODO: will integrate via interceptor
 - Circuit Breaker
