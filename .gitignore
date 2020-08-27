@@ -42,6 +42,10 @@
 .DS_Store
 service/service.yaml
 client/client.yaml
+client/testclient.log
+client/testclient-internal-err.log
+service/testservice.log
+service/testservice-internal-err.log
 
 # CMake
 cmake-build-*/
