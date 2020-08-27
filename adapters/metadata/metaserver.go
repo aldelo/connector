@@ -34,23 +34,13 @@ type MetaServer struct {}
 //		m, err := ms.FromIncomingMetadataContext(ctx)
 //		v1 := m["xyz"]
 //		v2 := m["efg"]
-func (s *MetaServer) FromIncomingMetadataContext(sourceCtx context.Context) (kv map[string]string, err error) {
+func (s *MetaServer) FromIncomingMetadataContext(sourceCtx context.Context) (kv map[string][]string, err error) {
 	if sourceCtx == nil {
 		return nil, fmt.Errorf("Retrieve Kv Pairs From Incoming Metadata Context Failed: %s", "Source Context is Required")
 	}
 
 	if md, ok := metadata.FromIncomingContext(sourceCtx); ok {
-		kv = make(map[string]string)
-
-		for k, v := range md {
-			if len(v) > 0 {
-				kv[k] = v[0]
-			} else {
-				kv[k] = ""
-			}
-		}
-
-		return kv, nil
+		return md, nil
 	} else {
 		return nil, fmt.Errorf("Retrieve Kv Pairs From Incoming Metadata Context Failed: (Code: %d) %s", codes.DataLoss, "DataLoss - Fail To Get Metadata")
 	}

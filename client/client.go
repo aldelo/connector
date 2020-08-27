@@ -22,9 +22,16 @@ import (
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
+	"github.com/aldelo/common/wrapper/sns"
+	"github.com/aldelo/common/wrapper/sqs"
+	data "github.com/aldelo/common/wrapper/zap"
+	"github.com/aldelo/connector/adapters/circuitbreaker"
+	"github.com/aldelo/connector/adapters/circuitbreaker/plugins"
 	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/connector/adapters/loadbalancer"
 	"github.com/aldelo/connector/adapters/metadata"
+	"github.com/aldelo/connector/adapters/notification"
+	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"google.golang.org/grpc"
@@ -53,6 +60,11 @@ type Client struct {
 	ConfigFileName string
 	CustomConfigPath string
 
+	// define oauth2 token fetch handler - if client use oauth2 to authorize per rpc call
+	// once this handler is set, dial option will be configured for per rpc auth action
+	// FetchOAuth2Token func() *oauth2.Token
+	// TODO:
+
 	// one or more unary client interceptors for handling wrapping actions
 	UnaryClientInterceptors []grpc.UnaryClientInterceptor
 
@@ -79,6 +91,11 @@ type Client struct {
 
 	// service discovery object cached
 	_sd *cloudmap.CloudMap
+	_sqs *sqs.SQS
+	_sns *sns.SNS
+
+	// define circuit breaker commands
+	_circuitBreakers map[string]circuitbreaker.CircuitBreakerIFace
 
 	// discovered endpoints for client load balancer use
 	_endpoints []*ServiceEndpoint
@@ -163,6 +180,17 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		opts = append(opts, grpc.WithInsecure())
 	}
 
+	/*
+	// set per rpc auth via oauth2
+	if c.FetchOAuth2Token != nil {
+		perRpc := oauth.NewOauthAccess(c.FetchOAuth2Token())
+
+		if perRpc != nil {
+			opts = append(opts, grpc.WithPerRPCCredentials(perRpc))
+		}
+	}
+	*/
+
 	// set user agent if defined
 	if util.LenTrim(c._config.Grpc.UserAgent) > 0 {
 		opts = append(opts, grpc.WithUserAgent(c._config.Grpc.UserAgent))
@@ -170,9 +198,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// set with block option,
 	// with block will halt code execution until after dial completes
-	if c._config.Grpc.DialWithBlock {
-		opts = append(opts, grpc.WithBlock())
-	}
+	opts = append(opts, grpc.WithBlock())
 
 	// set default server config for load balancer and/or health check
 	defSvrConf := ""
@@ -230,6 +256,11 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	opts = append(opts, grpc.WithDisableRetry())
 
 	// add unary client interceptors
+	if c._config.Grpc.CircuitBreakerEnabled {
+		log.Println("Setup Unary Circuit Breaker Interceptor")
+		c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryCircuitBreakerHandler)
+	}
+
 	count := len(c.UnaryClientInterceptors)
 
 	if count == 1 {
@@ -239,6 +270,11 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	}
 
 	// add stream client interceptors
+	if c._config.Grpc.CircuitBreakerEnabled {
+		log.Println("Setup Stream Circuit Breaker Interceptor")
+		c.StreamClientInterceptors = append(c.StreamClientInterceptors, c.streamCircuitBreakerHandler)
+	}
+
 	count = len(c.StreamClientInterceptors)
 
 	if count == 1 {
@@ -269,6 +305,18 @@ func (c *Client) Dial(ctx context.Context) error {
 	}
 
 	log.Println("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
+
+	// setup sqs and sns if configured
+	if c._config.Grpc.UseSQS {
+		c._sqs, _ = queue.NewQueueAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil)
+	}
+
+	if c._config.Grpc.UseSNS {
+		c._sns, _ = notification.NewNotificationAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil)
+	}
+
+	// circuit breakers prep
+	c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
 
 	// connect sd
 	if err := c.connectSd(); err != nil {
@@ -307,7 +355,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	if c._config.Target.ServiceDiscoveryType != "direct" {
 		var err error
 
-		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin("CustomResolver", fmt.Sprintf("clb.%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
+		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(fmt.Sprintf("roundrobin.%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
 
 		if err != nil {
 			return fmt.Errorf("Build Client Load Balancer Failed: " + err.Error())
@@ -341,16 +389,26 @@ func (c *Client) Dial(ctx context.Context) error {
 
 		log.Println("Dialing gRPC Service @ " + target + "...")
 
-		if c._conn, err = grpc.DialContext(ctx, target, opts...); err != nil {
+		dialSec := c._config.Grpc.DialMinConnectTimeout
+		if dialSec == 0 {
+			dialSec = 5
+		}
+
+		ctxWithTimeout, cancel := context.WithTimeout(ctx, time.Duration(dialSec)*time.Second)
+		defer cancel()
+
+		if c._conn, err = grpc.DialContext(ctxWithTimeout, target, opts...); err != nil {
+			log.Println("Dial Failed: " + err.Error())
 			return fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: %s", target, err.Error())
 		} else {
 			// dial grpc service endpoint success
+			log.Println("Dial Successful")
+
 			c._remoteAddress = target
 
-			if c._config.Grpc.DialWithBlock {
-				c.setupHealthManualChecker()
-			}
+			log.Println("Remote Address = " + target)
 
+			c.setupHealthManualChecker()
 			c.MetadataHelper = new(metadata.MetaClient)
 
 			log.Println("... gRPC Service @ " + target + " [" + c._remoteAddress + "] Connected")
@@ -418,6 +476,18 @@ func (c *Client) Close() {
 	}()
 
 	c._remoteAddress = ""
+
+	if c._sqs != nil {
+		c._sqs.Disconnect()
+	}
+
+	if c._sns != nil {
+		c._sns.Disconnect()
+	}
+
+	if c._sd != nil {
+		c._sd.Disconnect()
+	}
 
 	if c._conn != nil {
 		_ = c._conn.Close()
@@ -735,4 +805,74 @@ func (c *Client) deregisterInstance(p *ServiceEndpoint) error {
 	}
 }
 
+func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	if c._config.Grpc.CircuitBreakerEnabled {
+		log.Println("In - Unary Circuit Breaker Handler: " + method)
+
+		cb := c._circuitBreakers[method]
+
+		if cb == nil {
+			log.Println("... Creating Circuit Breaker for: " + method)
+
+			z := &data.ZapLog{
+				DisableLogger: false,
+				OutputToConsole: false,
+				AppName: c.AppName,
+			}
+
+			_ = z.Init()
+
+			var e error
+			if cb, e = plugins.NewHystrixGoPlugin(method,
+											   int(c._config.Grpc.CircuitBreakerTimeout),
+											   int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
+											   int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
+											   int(c._config.Grpc.CircuitBreakerSleepWindow),
+											   int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
+											   z); e != nil {
+				log.Println("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+				log.Println("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+
+				return invoker(ctx, method, req, reply, cc, opts...)
+			} else {
+				log.Println("... Circuit Breaker Created for: " + method)
+
+				c._circuitBreakers[method] = cb
+			}
+		} else {
+			log.Println("... Using Cached Circuit Breaker Command: " + method)
+		}
+
+		_, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
+								log.Println("Run Circuit Breaker Action for: " + method + "...")
+
+								err = invoker(ctx, method, req, reply, cc, opts...)
+
+								if err != nil {
+									log.Println("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+								} else {
+									log.Println("... Circuit Breaker Action for " + method + " Invoked")
+								}
+								return nil, err
+
+							}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
+								log.Println("Circuit Breaker Action for " + method + " Fallback...")
+								log.Println("... Error = " + errIn.Error())
+
+								return nil, errIn
+							}, nil)
+
+		return gerr
+	} else {
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+}
+
+func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	log.Println("In - Stream Circuit Breaker Handler")
+
+	// TODO:
+
+	return streamer(ctx, desc, cc, method, opts...)
+}
 

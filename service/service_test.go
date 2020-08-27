@@ -21,8 +21,10 @@ import (
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
+	"github.com/aldelo/connector/adapters/metadata"
 	testpb "github.com/aldelo/connector/example/proto/test"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"log"
 	"net"
 	"testing"
@@ -39,13 +41,63 @@ func (a *AnswerServiceImpl) Greeting(ctx context.Context, q *testpb.Question) (*
 }
 
 func TestService_Serve(t *testing.T) {
-	svc := &Service{
-		AppName: "msautoservice",
-		ConfigFileName: "service",
+	svc := NewService("testservice", "service", func(grpcServer *grpc.Server) {
+		testpb.RegisterAnswerServiceServer(grpcServer, &AnswerServiceImpl{})
+	})
 
-		RegisterServiceHandlers: func(grpcServer *grpc.Server) {
-			testpb.RegisterAnswerServiceServer(grpcServer, &AnswerServiceImpl{})
+	svc.BeforeServerStart = func(svc *Service) {
+		log.Println("In - Before Server Start")
+	}
+
+	svc.AfterServerStart = func(svc *Service) {
+		log.Println("In - After Server Start")
+	}
+
+	svc.BeforeServerShutdown = func(svc *Service) {
+		log.Println("In - Before Server Shutdown")
+	}
+
+	svc.AfterServerShutdown = func(svc *Service) {
+		log.Println("In - After Server Shutdown")
+	}
+
+	svc.DefaultHealthCheckHandler = func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus {
+		log.Println("In - Default Health Check")
+		return grpc_health_v1.HealthCheckResponse_SERVING
+	}
+
+	svc.ServiceHealthCheckHandlers = map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus{
+		"Test": func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus {
+			log.Println("In - Service Health Check")
+			return grpc_health_v1.HealthCheckResponse_SERVING
 		},
+	}
+
+	svc.UnaryServerInterceptors = []grpc.UnaryServerInterceptor{
+		func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+			log.Println("In - Unary Server Interceptor: " + info.FullMethod)
+
+			meta := &metadata.MetaServer{}
+			meta.SendHeader(ctx, map[string]string{
+				"server": svc._localAddress,
+			})
+
+			return handler(ctx, req)
+		},
+	}
+
+	svc.StreamServerInterceptors = []grpc.StreamServerInterceptor{
+		func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+			log.Println("In - Stream Server Interceptor: " + info.FullMethod)
+			return handler(srv, ss)
+		},
+	}
+
+	// svc.StatsHandler = grpc.StatsHandler()
+
+	svc.UnknownStreamHandler = func(srv interface{}, stream grpc.ServerStream) error {
+		log.Println("In - Unknown Stream Handler")
+		return nil
 	}
 
 	if err := svc.Serve(); err != nil {

@@ -44,6 +44,8 @@ instance:
   internal_health_frequency: 1
   # instance id currently launched
   instance_id: ""
+  # automatically deregister prior instance id if found during launch
+  auto_deregister_prior: true
 grpc:
   # grpc connection attempt time out in seconds, 0 for default of 120 seconds
   connection_timeout: 15
@@ -86,6 +88,12 @@ grpc:
   # defines max of stream workers rather than new goroutine per stream,
   # 0 for default of new per routine, if > 0, match to cpu core count for most performant
   num_stream_workers: 0
+  # define rate limit per second, 0 turns off
+  rate_limit_per_second: 0
+  # indicate if sqs queue will be used if applicable, default true
+  use_sqs: true
+  # indicate if sns notification will be used if applicable, default true
+  use_sns: true
 
 
 

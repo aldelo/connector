@@ -1,4 +1,4 @@
-package resolver
+package notification
 
 /*
  * Copyright 2020 Aldelo, LP
@@ -17,35 +17,21 @@ package resolver
  */
 
 import (
-	"fmt"
-	"google.golang.org/grpc/resolver"
-	"google.golang.org/grpc/resolver/manual"
+	awshttp2 "github.com/aldelo/common/wrapper/aws"
+	"github.com/aldelo/common/wrapper/aws/awsregion"
+	"github.com/aldelo/common/wrapper/sns"
 )
 
-func NewManualResolver(endpointAddrs []string) error {
-	if len(endpointAddrs) == 0 {
-		return fmt.Errorf("Endpoint Address is Required")
+// NewNotificationAdapter creates a new sns service provider, and auto connect for use
+func NewNotificationAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2.HttpClientSettings) (*sns.SNS, error) {
+	n := &sns.SNS{
+		AwsRegion: awsRegion,
+		HttpOptions: httpOptions,
 	}
 
-	r, _ := manual.GenerateAndRegisterManualResolver()
-
-	addrs := []resolver.Address{}
-
-	for _, v := range endpointAddrs {
-		addrs = append(addrs, resolver.Address{
-			Addr: v,
-		})
+	if err := n.Connect(); err != nil {
+		return nil, err
+	} else {
+		return n, nil
 	}
-
-	r.InitialState(resolver.State{
-		Addresses: addrs,
-	})
-
-	var builder resolver.Builder
-	builder = r
-
-	resolver.Register(builder)
-	resolver.SetDefaultScheme(builder.Scheme())
-
-	return nil
 }

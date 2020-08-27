@@ -49,17 +49,25 @@ type TargetData struct {
 }
 
 type GrpcData struct {
-	X509CaCertFile string					`mapstructure:"grpc.x509_ca_cert_file"`
-	UserAgent string						`mapstructure:"grpc.user_agent"`
-	UseLoadBalancer bool					`mapstructure:"grpc.use_load_balancer"`
-	UseHealthCheck bool						`mapstructure:"grpc.use_health_check"`
-	DialWithBlock bool						`mapstructure:"grpc.dial_with_block"`
-	DialMinConnectTimeout uint				`mapstructure:"grpc.dial_min_connect_timeout"`
-	KeepAliveInactivePingTimeTrigger uint	`mapstructure:"grpc.keepalive_inactive_ping_time_trigger"`
-	KeepAliveInactivePingTimeout uint		`mapstructure:"grpc.keepalive_inactive_ping_timeout"`
-	KeepAlivePermitWithoutStream bool		`mapstructure:"grpc.keepalive_permit_without_stream"`
-	ReadBufferSize uint						`mapstructure:"grpc.read_buffer_size"`
-	WriteBufferSize uint					`mapstructure:"grpc.write_buffer_size"`
+	X509CaCertFile string						`mapstructure:"x509_ca_cert_file"`
+	UserAgent string							`mapstructure:"user_agent"`
+	UseLoadBalancer bool						`mapstructure:"use_load_balancer"`
+	UseHealthCheck bool							`mapstructure:"use_health_check"`
+	DialMinConnectTimeout uint					`mapstructure:"dial_min_connect_timeout"`
+	KeepAliveInactivePingTimeTrigger uint		`mapstructure:"keepalive_inactive_ping_time_trigger"`
+	KeepAliveInactivePingTimeout uint			`mapstructure:"keepalive_inactive_ping_timeout"`
+	KeepAlivePermitWithoutStream bool			`mapstructure:"keepalive_permit_without_stream"`
+	ReadBufferSize uint							`mapstructure:"read_buffer_size"`
+	WriteBufferSize uint						`mapstructure:"write_buffer_size"`
+	CircuitBreakerEnabled bool					`mapstructure:"circuit_breaker_enabled"`
+	CircuitBreakerTimeout uint					`mapstructure:"circuit_breaker_timeout"`
+	CircuitBreakerMaxConcurrentRequests uint	`mapstructure:"circuit_breaker_max_concurrent_requests"`
+	CircuitBreakerRequestVolumeThreshold uint	`mapstructure:"circuit_breaker_request_volume_threshold"`
+	CircuitBreakerSleepWindow uint				`mapstructure:"circuit_breaker_sleep_window"`
+	CircuitBreakerErrorPercentThreshold uint	`mapstructure:"circuit_breaker_error_percent_threshold"`
+	CircuitBreakerLoggerEnabled bool			`mapstructure:"circuit_breaker_logger_enabled"`
+	UseSQS bool									`mapstructure:"use_sqs"`
+	UseSNS bool									`mapstructure:"use_sns"`
 }
 
 func (c *Config) SetTargetAppName(s string) {
@@ -174,13 +182,6 @@ func (c *Config) SetUseHealthCheck(b bool) {
 	}
 }
 
-func (c *Config) SetDialWithBlock(b bool) {
-	if c._v != nil {
-		c._v.Set("grpc.dial_with_block", b)
-		c.Grpc.DialWithBlock = b
-	}
-}
-
 func (c *Config) SetDialMinConnectTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.dial_min_connect_timeout", i)
@@ -220,6 +221,69 @@ func (c *Config) SetWriteBufferSize(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.write_buffer_size", i)
 		c.Grpc.WriteBufferSize = i
+	}
+}
+
+func (c *Config) SetCircuitBreakerEnabled(b bool) {
+	if c._v != nil {
+		c._v.Set("grpc.circuit_breaker_enabled", b)
+		c.Grpc.CircuitBreakerEnabled = b
+	}
+}
+
+func (c *Config) SetCircuitBreakerTimeout(i uint) {
+	if c._v != nil {
+		c._v.Set("grpc.circuit_breaker_timeout", i)
+		c.Grpc.CircuitBreakerTimeout = i
+	}
+}
+
+func (c *Config) SetCircuitBreakerMaxConcurrentRequests(i uint) {
+	if c._v != nil {
+		c._v.Set("grpc.circuit_breaker_max_concurrent_requests", i)
+		c.Grpc.CircuitBreakerMaxConcurrentRequests = i
+	}
+}
+
+func (c *Config) SetCircuitBreakerRequestVolumeThreshold(i uint) {
+	if c._v != nil {
+		c._v.Set("grpc.circuit_breaker_request_volume_threshold", i)
+		c.Grpc.CircuitBreakerRequestVolumeThreshold = i
+	}
+}
+
+func (c *Config) SetCircuitBreakerSleepWindow(i uint) {
+	if c._v != nil {
+		c._v.Set("grpc.circuit_breaker_sleep_window", i)
+		c.Grpc.CircuitBreakerSleepWindow = i
+	}
+}
+
+func (c *Config) SetCircuitBreakerErrorPercentThreshold(i uint) {
+	if c._v != nil {
+		c._v.Set("grpc.circuit_breaker_error_percent_threshold", i)
+		c.Grpc.CircuitBreakerErrorPercentThreshold = i
+	}
+}
+
+func (c *Config) SetCircuitBreakerLoggerEnabled(b bool) {
+	if c._v != nil {
+		c._v.Set("grpc.circuit_breaker_logger_enabled", b)
+		c.Grpc.CircuitBreakerLoggerEnabled = b
+	}
+}
+
+func(c *Config) SetUseSQS(b bool) {
+	if c._v != nil {
+		c._v.Set("grpc.use_sqs", b)
+		c.Grpc.UseSQS = b
+	}
+}
+
+func (c *Config) SetUseSNS(b bool) {
+	if c._v	!= nil {
+		c._v.Set("grpc.use_sns", b)
+		c.Grpc.UseSNS = b
 	}
 }
 
@@ -263,13 +327,21 @@ func (c *Config) Read() error {
 		"grpc.user_agent", "").Default(									// define user agent string for all RPCs
 		"grpc.use_load_balancer", true).Default(							// indicates round robin load balancer is to be used, default is true
 		"grpc.use_health_check", true).Default(							// indicates health check for server serving status is enabled, default is true
-		"grpc.dial_with_block", true).Default(							// indicates grpc dial will block until dial completion if true; otherwise, dial async and immediately returns, defaults to true
 		"grpc.dial_min_connect_timeout", 5).Default(						// indicates the minimum connect timeout seconds for the dial action, default is 5 seconds
 		"grpc.keepalive_inactive_ping_time_trigger", 0).Default(			// max seconds of no activity before client pings server, 0 for default of 30 seconds
 		"grpc.keepalive_inactive_ping_timeout", 0).Default( 				// max seconds of timeout during client to server ping, where no response closes connection, 0 for default of 5 seconds
 		"grpc.keepalive_permit_without_stream", false).Default(			// allow client to keepalive if no stream, false is default
 		"grpc.read_buffer_size", 0).Default(								// 0 for default 32 kb = 1024 * 32
-		"grpc.write_buffer_size", 0)										// 0 for default 32 kb = 1024 * 32
+		"grpc.write_buffer_size", 0).Default(								// 0 for default 32 kb = 1024 * 32
+		"grpc.circuit_breaker_enabled", false).Default(					// indicates if circuit breaker is enabled, default is false
+		"grpc.circuit_breaker_timeout", 1000).Default(					// how long to wait for command to complete, in milliseconds, default = 1000
+		"grpc.circuit_breaker_max_concurrent_requests", 10).Default(		// how many commands of the same type can run at the same time, default = 10
+		"grpc.circuit_breaker_request_volume_threshold", 20).Default(		// minimum number of requests needed before a circuit can be tripped due to health, default = 20
+		"grpc.circuit_breaker_sleep_window", 5000).Default(				// how long to wait after a circuit opens before testing for recovery, in milliseconds, default = 5000
+		"grpc.circuit_breaker_error_percent_threshold", 50).Default(		// causes circuits to open once the rolling measure of errors exceeds this percent of requests, default = 50
+		"grpc.circuit_breaker_logger_enabled", true).Default(				// indicates the logger that will be used to log circuit breaker action
+		"grpc.use_sqs", true).Default(									// indicates if sqs is used if applicable, default is true
+		"grpc.use_sns", true)												// indicates if sns is used if applicable, default is true
 
 
 	if ok, err := c._v.Init(); err != nil {

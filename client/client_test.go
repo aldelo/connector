@@ -18,17 +18,32 @@ package client
 
 import (
 	"context"
-	"fmt"
-	"github.com/aldelo/connector/adapters/health"
 	testpb "github.com/aldelo/connector/example/proto/test"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"log"
 	"testing"
-	"time"
 )
 
 func TestClient_Dial(t *testing.T) {
-	cli := &Client{
-		AppName: "connector.client",
-		ConfigFileName: "client",
+	cli := NewClient("testclient", "client")
+
+	// cli.StatsHandler
+
+	cli.BeforeClientDial = func(cli *Client) {
+		log.Println("In - Before Client Dial")
+	}
+
+	cli.AfterClientDial = func(cli *Client) {
+		log.Println("In - After Client Dial")
+	}
+
+	cli.BeforeClientClose = func(cli *Client) {
+		log.Println("In - Before Client Close")
+	}
+
+	cli.AfterClientClose = func(cli *Client) {
+		log.Println("In - After Client Close")
 	}
 
 	if err := cli.Dial(context.Background()); err != nil {
@@ -39,22 +54,19 @@ func TestClient_Dial(t *testing.T) {
 
 	a := testpb.NewAnswerServiceClient(cli._conn)
 
-	if result, e := a.Greeting(context.Background(), &testpb.Question{Question: "What's for dinner?"}); e != nil {
-		t.Error(e)
-	} else {
-		fmt.Println("Answer = " + result.Answer + ", From = " + cli.RemoteAddress())
+	for i := 0; i < 1000; i++ {
+		var header metadata.MD
+
+		if result, e := a.Greeting(context.Background(), &testpb.Question{Question: "What's for dinner?"}, grpc.Header(&header)); e != nil {
+			t.Error(e)
+		} else {
+			log.Println("Answer = " + result.Answer + ", From = " + cli.MetadataHelper.Value(header, "server"))
+		}
 	}
 
-
-	hc, _ := health.NewHealthClient(cli._conn)
-	for {
-		if hcResp, err := hc.Check(""); err != nil {
-			fmt.Println("Health Check Fail: " + err.Error())
-			break
-		} else {
-			fmt.Println("Health Check Result = " + hcResp.String())
-		}
-
-		time.Sleep(1 * time.Second)
+	if status, err := cli.HealthProbe(""); err != nil {
+		log.Println("Health Probe Failed: " + err.Error())
+	} else {
+		log.Println(status.String())
 	}
 }

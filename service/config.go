@@ -70,25 +70,29 @@ type InstanceData struct {
 	Id string						`mapstructure:"instance_id"`
 	SdTimeout uint					`mapstructure:"sd_timeout"`
 	InternalHealthFrequency uint	`mapstructure:"internal_health_frequency"`
+	AutoDeregisterPrior bool		`mapstructure:"auto_deregister_prior"`
 }
 
 type GrpcData struct {
-	ConnectionTimeout uint 					`mapstructure:"grpc.connection_timeout"`
-	X509CertFile string						`mapstructure:"grpc.x509_cert_file"`
-	X509KeyFile string						`mapstructure:"grpc.x509_key_file"`
-	KeepAliveMinWait uint					`mapstructure:"grpc.keepalive_min_wait"`
-	KeepAlivePermitWithoutStream bool		`mapstructure:"grpc.keepalive_permit_without_stream"`
-	KeepAliveMaxConnIdle uint				`mapstructure:"grpc.keepalive_max_conn_idle"`
-	KeepAliveMaxConnAge uint				`mapstructure:"grpc.keepalive_max_conn_age"`
-	KeepAliveMaxConnAgeGrace uint			`mapstructure:"grpc.keepalive_max_conn_age_grace"`
-	KeepAliveInactivePingTimeTrigger uint	`mapstructure:"grpc.keepalive_inactive_ping_time_trigger"`
-	KeepAliveInactivePingTimeout uint		`mapstructure:"grpc.keepalive_inactive_ping_timeout"`
-	ReadBufferSize uint						`mapstructure:"grpc.read_buffer_size"`
-	WriteBufferSize uint					`mapstructure:"grpc.write_buffer_size"`
-	MaxReceiveMessageSize uint				`mapstructure:"grpc.max_recv_msg_size"`
-	MaxSendMessageSize uint					`mapstructure:"grpc.max_send_msg_size"`
-	MaxConcurrentStreams uint				`mapstructure:"grpc.max_concurrent_streams"`
-	NumStreamWorkers uint					`mapstructure:"grpc.num_stream_workers"`
+	ConnectionTimeout uint 					`mapstructure:"connection_timeout"`
+	X509CertFile string						`mapstructure:"x509_cert_file"`
+	X509KeyFile string						`mapstructure:"x509_key_file"`
+	KeepAliveMinWait uint					`mapstructure:"keepalive_min_wait"`
+	KeepAlivePermitWithoutStream bool		`mapstructure:"keepalive_permit_without_stream"`
+	KeepAliveMaxConnIdle uint				`mapstructure:"keepalive_max_conn_idle"`
+	KeepAliveMaxConnAge uint				`mapstructure:"keepalive_max_conn_age"`
+	KeepAliveMaxConnAgeGrace uint			`mapstructure:"keepalive_max_conn_age_grace"`
+	KeepAliveInactivePingTimeTrigger uint	`mapstructure:"keepalive_inactive_ping_time_trigger"`
+	KeepAliveInactivePingTimeout uint		`mapstructure:"keepalive_inactive_ping_timeout"`
+	ReadBufferSize uint						`mapstructure:"read_buffer_size"`
+	WriteBufferSize uint					`mapstructure:"write_buffer_size"`
+	MaxReceiveMessageSize uint				`mapstructure:"max_recv_msg_size"`
+	MaxSendMessageSize uint					`mapstructure:"max_send_msg_size"`
+	MaxConcurrentStreams uint				`mapstructure:"max_concurrent_streams"`
+	NumStreamWorkers uint					`mapstructure:"num_stream_workers"`
+	RateLimitPerSecond uint 				`mapstructure:"rate_limit_per_second"`
+	UseSQS bool								`mapstructure:"use_sqs"`
+	UseSNS bool								`mapstructure:"use_sns"`
 }
 
 func (c *Config) SetTargetAppName(s string) {
@@ -231,6 +235,13 @@ func (c *Config) SetInternalHealthFrequency(i uint) {
 	}
 }
 
+func (c *Config) SetAutoDeregisterPrior(b bool) {
+	if c._v != nil {
+		c._v.Set("instance.auto_deregister_prior", b)
+		c.Instance.AutoDeregisterPrior = b
+	}
+}
+
 func (c *Config) SetGrpcConnectTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.connection_timeout", i)
@@ -343,6 +354,27 @@ func (c *Config) SetNumStreamWorkers(i uint) {
 	}
 }
 
+func (c *Config) SetRateLimitPerSecond(i uint) {
+	if c._v != nil {
+		c._v.Set("grpc.rate_limit_per_second", i)
+		c.Grpc.RateLimitPerSecond = i
+	}
+}
+
+func(c *Config) SetUseSQS(b bool) {
+	if c._v != nil {
+		c._v.Set("grpc.use_sqs", b)
+		c.Grpc.UseSQS = b
+	}
+}
+
+func (c *Config) SetUseSNS(b bool) {
+	if c._v	!= nil {
+		c._v.Set("grpc.use_sns", b)
+		c.Grpc.UseSNS = b
+	}
+}
+
 // Read will load config settings from disk
 func (c *Config) Read() error {
 	c._v = nil
@@ -391,6 +423,7 @@ func (c *Config) Read() error {
 		"instance.instance_id", "").Default(								// instance id currently launched
 		"instance.sd_timeout", 5).Default(								// service discovery actions timeout seconds  (for cloudmap register, health update, deregister)
 		"instance.internal_health_frequency", 5).Default(					// instance internal grpc health check frequency in seconds
+		"instance.auto_deregister_prior", true).Default(					// automatically deregister prior service discovery registration if exists during launch, default = true
 		"grpc.connection_timeout", 15).Default(							// grpc connection attempt time out in seconds, 0 for default of 120 seconds
 		"grpc.x509_cert_file", "").Default(								// grpc tls setup, path to cert pem file
 		"grpc.x509_key_file", "").Default(								// grpc tls setup, path to key pem file
@@ -406,7 +439,10 @@ func (c *Config) Read() error {
 		"grpc.max_recv_msg_size", 0).Default(								// 0 for default 4 mb = 1024 * 1024 * 4, maximum bytes allowed to receive from client
 		"grpc.max_send_msg_size", 0).Default(								// 0 for default maxInt32, maximum bytes allowed to send to client
 		"grpc.max_concurrent_streams", 0).Default(						// defines maximum concurrent streams server will handle, 0 for http2 transport default value of 250
-		"grpc.num_stream_workers", 0)										// defines max of stream workers rather than new goroutine per stream, 0 for default of new per routine, if > 0, match to cpu core count for most performant
+		"grpc.num_stream_workers", 0).Default(							// defines max of stream workers rather than new goroutine per stream, 0 for default of new per routine, if > 0, match to cpu core count for most performant
+		"grpc.rate_limit_per_second", 0).Default(							// indicates rate limit per second, 0 disables rate limit
+		"grpc.use_sqs", true).Default(									// indicates if sqs is used if applicable, default is true
+		"grpc.use_sns", true)												// indicates if sns is used if applicable, default is true
 
 	if ok, err := c._v.Init(); err != nil {
 		return err

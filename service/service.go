@@ -20,20 +20,25 @@ import (
 	"context"
 	"fmt"
 	util "github.com/aldelo/common"
-	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/common/wrapper/cloudmap/sdhealthchecktype"
-	"github.com/aldelo/connector/adapters/metadata"
+	"github.com/aldelo/common/wrapper/sns"
+	"github.com/aldelo/common/wrapper/sqs"
+	"github.com/aldelo/connector/adapters/health"
+	"github.com/aldelo/connector/adapters/notification"
+	"github.com/aldelo/connector/adapters/queue"
+	"github.com/aldelo/connector/adapters/ratelimiter"
+	"github.com/aldelo/connector/adapters/ratelimiter/ratelimitplugin"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	_ "google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/tap"
-	_ "google.golang.org/grpc/encoding/gzip"
 	"log"
 	"net"
 	"os"
@@ -49,6 +54,7 @@ import (
 // AppName = (required) name of this service
 // ConfigFileName = (required) config file name without .yaml extension
 // CustomConfigPath = (optional) if not specified, . is assumed
+// RegisterServiceHandlers = (required) func to register grpc service handlers
 type Service struct {
 	// service properties
 	AppName string
@@ -69,14 +75,26 @@ type Service struct {
 	DefaultHealthCheckHandler func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 	ServiceHealthCheckHandlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 
+	// setup optional auth server interceptor
+	// TODO:
+
+	// setup optional rate limit server interceptor
+	RateLimit ratelimiter.RateLimiterIFace
+
+	// setup optional monitor server interceptor
+	// TODO:
+
+	// setup optional trace server interceptor
+	// TODO:
+
+	// setup optional logging server interceptor
+	// TODO:
+
 	// one or more unary server interceptors for handling wrapping actions
 	UnaryServerInterceptors []grpc.UnaryServerInterceptor
 
 	// one or more stream server interceptors for handling wrapping actions
 	StreamServerInterceptors []grpc.StreamServerInterceptor
-
-	// typically wrapper action to handle rate limit
-	InTapHandle tap.ServerInHandle
 
 	// typically wrapper action to handle monitoring
 	StatsHandler stats.Handler
@@ -101,13 +119,12 @@ type Service struct {
 
 	// service discovery object cached
 	_sd *cloudmap.CloudMap
+	_sqs *sqs.SQS
+	_sns *sns.SNS
 
 	// instantiated internal objects
 	_grpcServer *grpc.Server
 	_localAddress string
-
-	// *** Set After Server Serving ***
-	MetadataHelper *metadata.MetaServer
 }
 
 // create service
@@ -259,9 +276,32 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			opts = append(opts, grpc.ChainStreamInterceptor(s.StreamServerInterceptors...))
 		}
 
-		// prior to stream creation intercept, for rate limit control
-		if s.InTapHandle != nil {
-			opts = append(opts, grpc.InTapHandle(s.InTapHandle))
+		// rate limit control
+		if s.RateLimit == nil {
+			// auto create rate limiter if needed
+			log.Println("Rate Limiter Nil, Checking If Need To Create...")
+
+			if s._config.Grpc.RateLimitPerSecond > 0 {
+				log.Println("Creating Default Rate Limiter...")
+
+				// default to hystrixgo
+				s.RateLimit = ratelimitplugin.NewRateLimitPlugin(int(s._config.Grpc.RateLimitPerSecond), false)
+			} else {
+				log.Println("Rate Limiter Config Per Second = ", s._config.Grpc.RateLimitPerSecond)
+			}
+		}
+
+		if s.RateLimit != nil {
+			log.Println("Setup Rate Limiter - In Tap Handle")
+
+			opts = append(opts, grpc.InTapHandle(func(ctx context.Context, info *tap.Info) (context.Context, error){
+				log.Println("Rate Limit Take = " + info.FullMethodName + "...")
+
+				t := s.RateLimit.Take()
+				log.Println("... Rate Limit Take = " + t.String())
+
+				return ctx, nil
+			}))
 		}
 
 		// for monitoring use
@@ -283,6 +323,15 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		ip = util.GetLocalIP()
 		port = util.StrToUint(util.SplitString(lis.Addr().String(), ":", -1))
 		s._localAddress = fmt.Sprintf("%s:%d", ip, port)
+
+		// setup sqs and sns if configured
+		if s._config.Grpc.UseSQS {
+			s._sqs, _ = queue.NewQueueAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil)
+		}
+
+		if s._config.Grpc.UseSNS {
+			s._sns, _ = notification.NewNotificationAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil)
+		}
 
 		err = nil
 		return
@@ -357,8 +406,6 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 						}
 					}()
 
-					s.MetadataHelper = new(metadata.MetaServer)
-
 					log.Println("... gRPC Server Started")
 
 					if s.AfterServerStart != nil {
@@ -380,7 +427,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 				}
 			}
 
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(10*time.Millisecond)
 		}
 	}()
 
@@ -626,7 +673,9 @@ func (s *Service) registerInstance(ip string, port uint, healthy bool, version s
 		}
 
 		// if prior instance id already exist, deregister prior first (clean up prior in case instance ghosted)
-		_ = s.deregisterInstance()
+		if s._config.Instance.AutoDeregisterPrior {
+			_ = s.deregisterInstance()
+		}
 
 		// now register instance
 		if instanceId, operationId, err := registry.RegisterInstance(s._sd, s._config.Service.Id, s._config.Instance.Prefix, ip, port, healthy, version, timeoutDuration...); err != nil {
@@ -762,6 +811,14 @@ func (s *Service) GracefulStop() {
 		s._sd.Disconnect()
 	}
 
+	if s._sqs != nil {
+		s._sqs.Disconnect()
+	}
+
+	if s._sns != nil {
+		s._sns.Disconnect()
+	}
+
 	if s._grpcServer != nil {
 		s._grpcServer.GracefulStop()
 	}
@@ -782,6 +839,14 @@ func (s *Service) ImmediateStop() {
 
 	if s._sd != nil {
 		s._sd.Disconnect()
+	}
+
+	if s._sqs != nil {
+		s._sqs.Disconnect()
+	}
+
+	if s._sns != nil {
+		s._sns.Disconnect()
 	}
 
 	if s._grpcServer != nil {

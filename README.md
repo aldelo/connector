@@ -29,6 +29,9 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
 - Compressor
     - gzip decompressor supported on service level
     - note added on client struct for passing gzip compressor via RPC call
+- Tls
+    - openssl self sign tls certiicate and key generation sh file in /build/openssl-pem
+    - tls key and pem, as well as ca pem are needed for grpc server and client
 - Auth
     - TODO: will integrate via interceptor
 - Circuit Breaker

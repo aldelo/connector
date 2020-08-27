@@ -45,8 +45,6 @@ grpc:
   use_load_balancer: true
   # indicates health check for server serving status is enabled, default is true
   use_health_check: true
-  # indicates grpc dial will block until dial completion if true; otherwise, dial async and immediately returns, defaults to true
-  dial_with_block: true
   # indicates the minimum connect timeout seconds for the dial action
   dial_min_connect_timeout: 5
   # grpc keep-alive option,
@@ -62,3 +60,21 @@ grpc:
   read_buffer_size: 0
   # 0 for default 32 kb = 1024 * 32
   write_buffer_size: 0
+  # indicates if circuit breaker is enabled, default is false
+  circuit_breaker_enabled: false
+  # how long to wait for command to complete, in milliseconds, default = 1000
+  circuit_breaker_timeout: 1000
+  # how many commands of the same type can run at the same time, default = 10
+  circuit_breaker_max_concurrent_requests: 10
+  # minimum number of requests needed before a circuit can be tripped due to health, default = 20
+  circuit_breaker_request_volume_threshold: 20
+  # how long to wait after a circuit opens before testing for recovery, in milliseconds, default = 5000
+  circuit_breaker_sleep_window: 5000
+  # causes circuits to open once the rolling measure of errors exceeds this percent of requests, default = 50
+  circuit_breaker_error_percent_threshold: 50
+  # indicates the logger that will be used to log circuit breaker activities
+  circuit_breaker_logger_enabled: true
+  # indicates if sqs is used for queue, if applicable, default true
+  use_sqs: true
+  # indicates if sns is used for notification, if applicable, default true
+  use_sns: true
