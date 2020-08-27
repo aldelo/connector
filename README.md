@@ -22,6 +22,7 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
     - TODO: need to create out of process health witness for instance health management
 - Load Balancing
     - client side name resolver is setup to retrieve multiple service endpoints and perform round robin load balancing
+    - load balancing is per rpc call rather than per connection
 - Metadata
     - Metadata helper methods provided
 - RpcError
@@ -35,9 +36,13 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
 - Auth
     - TODO: will integrate via interceptor
 - Circuit Breaker
-    - TODO: will integrate via interceptor on client side
+    - client side, default using Hystrix-Go package for circuit breaker
+    - circuit breaker is handled in client side unary and stream interceptors
+    = circuit breaker options configured via client config file
 - Rate Limiter
-    - ToDO: will integrate via interceptor on service side
+    - server side, default using Uber-RateLimit package for rate limiter
+    - rate limit is handled in server side In-Tap-Handle
+    - rate limit option configured via server config file
 - Logger
     - TODO: Currently local logging using log.* but will update to zap
 - Monitoring
