@@ -46,7 +46,15 @@ client/testclient.log
 client/testclient-internal-err.log
 service/testservice.log
 service/testservice-internal-err.log
-build/openssl-pem/keys/
+build/openssl-pem/keys/ca/ca_cert.pem
+build/openssl-pem/keys/ca/ca_cert.srl
+build/openssl-pem/keys/ca/private/ca_key.pem
+build/openssl-pem/keys/client/client.csr
+build/openssl-pem/keys/client/client_cert.pem
+build/openssl-pem/keys/client/private/client_key.pem
+build/openssl-pem/keys/server/server.csr
+build/openssl-pem/keys/server/server_cert.pem
+build/openssl-pem/keys/server/private/server_key.pem
 build/openssl-pem/test-pem.sh
 
 # CMake
