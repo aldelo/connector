@@ -869,10 +869,73 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 }
 
 func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-	log.Println("In - Stream Circuit Breaker Handler")
+	if c._config.Grpc.CircuitBreakerEnabled {
+		log.Println("In - Stream Circuit Breaker Handler: " + method)
 
-	// TODO:
+		cb := c._circuitBreakers[method]
 
-	return streamer(ctx, desc, cc, method, opts...)
+		if cb == nil {
+			log.Println("... Creating Circuit Breaker for: " + method)
+
+			z := &data.ZapLog{
+				DisableLogger: false,
+				OutputToConsole: false,
+				AppName: c.AppName,
+			}
+
+			_ = z.Init()
+
+			var e error
+			if cb, e = plugins.NewHystrixGoPlugin(method,
+				int(c._config.Grpc.CircuitBreakerTimeout),
+				int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
+				int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
+				int(c._config.Grpc.CircuitBreakerSleepWindow),
+				int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
+				z); e != nil {
+				log.Println("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+				log.Println("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+
+				return streamer(ctx, desc, cc, method, opts...)
+			} else {
+				log.Println("... Circuit Breaker Created for: " + method)
+
+				c._circuitBreakers[method] = cb
+			}
+		} else {
+			log.Println("... Using Cached Circuit Breaker Command: " + method)
+		}
+
+		gres, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
+			log.Println("Run Circuit Breaker Action for: " + method + "...")
+
+			dataOut, err = streamer(ctx, desc, cc, method, opts...)
+
+			if err != nil {
+				log.Println("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+			} else {
+				log.Println("... Circuit Breaker Action for " + method + " Invoked")
+			}
+			return dataOut, err
+
+		}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
+			log.Println("Circuit Breaker Action for " + method + " Fallback...")
+			log.Println("... Error = " + errIn.Error())
+
+			return nil, errIn
+		}, nil)
+
+		if gres != nil {
+			if cs, ok := gres.(grpc.ClientStream); ok {
+				return cs, gerr
+			} else {
+				return nil, fmt.Errorf("Assert grpc.ClientStream Failed")
+			}
+		} else {
+			return nil, gerr
+		}
+	} else {
+		return streamer(ctx, desc, cc, method, opts...)
+	}
 }
 
