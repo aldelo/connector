@@ -50,9 +50,11 @@ grpc:
   # grpc connection attempt time out in seconds, 0 for default of 120 seconds
   connection_timeout: 15
   # grpc tls setup, path to cert pem file
-  x509_cert_file: ""
+  server_cert_file: ""
   # grpc tls setup, path to key pem file
-  x509_key_file: ""
+  server_key_file: ""
+  # for mTLS setup, one or more client CA cert path to pem file, multiple files separated by comma
+  client_ca_cert_files: ""
   # grpc keep-alive enforcement policy,
   # minimum seconds before client may send keepalive, 0 for default 300 seconds
   keepalive_min_wait: 0

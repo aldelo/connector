@@ -75,8 +75,9 @@ type InstanceData struct {
 
 type GrpcData struct {
 	ConnectionTimeout uint 					`mapstructure:"connection_timeout"`
-	X509CertFile string						`mapstructure:"x509_cert_file"`
-	X509KeyFile string						`mapstructure:"x509_key_file"`
+	ServerCertFile string					`mapstructure:"server_cert_file"`
+	ServerKeyFile string					`mapstructure:"server_key_file"`
+	ClientCACertFiles string				`mapstructure:"client_ca_cert_files"`
 	KeepAliveMinWait uint					`mapstructure:"keepalive_min_wait"`
 	KeepAlivePermitWithoutStream bool		`mapstructure:"keepalive_permit_without_stream"`
 	KeepAliveMaxConnIdle uint				`mapstructure:"keepalive_max_conn_idle"`
@@ -249,17 +250,24 @@ func (c *Config) SetGrpcConnectTimeout(i uint) {
 	}
 }
 
-func (c *Config) SetX509CertFile(s string) {
+func (c *Config) SetServerCertFile(s string) {
 	if c._v != nil {
-		c._v.Set("grpc.x509_cert_file", s)
-		c.Grpc.X509CertFile = s
+		c._v.Set("grpc.server_cert_file", s)
+		c.Grpc.ServerCertFile = s
 	}
 }
 
-func (c *Config) SetX509KeyFile(s string) {
+func (c *Config) SetServerKeyFile(s string) {
 	if c._v != nil {
-		c._v.Set("grpc.x509_key_file", s)
-		c.Grpc.X509KeyFile = s
+		c._v.Set("grpc.server_key_file", s)
+		c.Grpc.ServerKeyFile = s
+	}
+}
+
+func (c *Config) SetClientCACertFiles(s string) {
+	if c._v != nil {
+		c._v.Set("grpc.client_ca_cert_files", s)
+		c.Grpc.ClientCACertFiles = s
 	}
 }
 
@@ -425,8 +433,9 @@ func (c *Config) Read() error {
 		"instance.internal_health_frequency", 5).Default(					// instance internal grpc health check frequency in seconds
 		"instance.auto_deregister_prior", true).Default(					// automatically deregister prior service discovery registration if exists during launch, default = true
 		"grpc.connection_timeout", 15).Default(							// grpc connection attempt time out in seconds, 0 for default of 120 seconds
-		"grpc.x509_cert_file", "").Default(								// grpc tls setup, path to cert pem file
-		"grpc.x509_key_file", "").Default(								// grpc tls setup, path to key pem file
+		"grpc.server_cert_file", "").Default(								// grpc tls setup, path to cert pem file
+		"grpc.server_key_file", "").Default(								// grpc tls setup, path to key pem file
+		"grpc.client_ca_cert_files", "").Default(							// for mTLS setup, one or more client CA cert path to pem file, multiple files separated by comma
 		"grpc.keepalive_min_wait", 0).Default(							// grpc keep-alive enforcement policy, minimum seconds before client may send keepalive, 0 for default 300 seconds
 		"grpc.keepalive_permit_without_stream", false).Default(			// grpc keep-alive enforcement policy, allow client to keepalive if no stream, false is default
 		"grpc.keepalive_max_conn_idle", 0).Default(						// grpc keep-alive option, max seconds before idle connect is closed, 0 for default of infinity

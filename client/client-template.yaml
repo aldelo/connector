@@ -37,8 +37,12 @@ target:
   # service discovery api maximum instance count returned during discovery call, 0 defaults to 100
   sd_instance_max_result: 100
 grpc:
-  # grpc tls setup, path to ca cert pem file
-  x509_ca_cert_file: ""
+  # for server TLS or mTLS setup, one or more server CA cert path to pem file, multiple files separated by comma
+  server_ca_cert_files: ""
+  # for mTLS setup, the client certificate pem file path
+  client_cert_file: ""
+  # for mTLS setup, the client certificate key file path
+  client_key_file: ""
   # define user agent string for all RPCs
   user_agent: ""
   # indicates round robin load balancer is to be used, default is true

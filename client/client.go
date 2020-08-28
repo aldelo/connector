@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	util "github.com/aldelo/common"
+	"github.com/aldelo/common/crypto"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/common/wrapper/sns"
@@ -169,11 +170,12 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	//
 
 	// set tls credential dial option
-	if util.LenTrim(c._config.Grpc.X509CaCertFile) > 0 {
-		if creds, e := credentials.NewClientTLSFromFile(c._config.Grpc.X509CaCertFile, ""); e != nil {
+	if util.LenTrim(c._config.Grpc.ServerCACertFiles) > 0 {
+		tls := new(crypto.TlsConfig)
+		if tc, e := tls.GetClientTlsConfig(strings.Split(c._config.Grpc.ServerCACertFiles, ","), c._config.Grpc.ClientCertFile, c._config.Grpc.ClientKeyFile); e != nil {
 			return []grpc.DialOption{}, fmt.Errorf("Set Dial Option Client TLS Failed: %s", e.Error())
 		} else {
-			opts = append(opts, grpc.WithTransportCredentials(creds))
+			opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
 		}
 	} else {
 		// if not tls secured, use inSecure dial option

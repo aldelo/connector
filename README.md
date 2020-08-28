@@ -30,15 +30,16 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
 - Compressor
     - gzip decompressor supported on service level
     - note added on client struct for passing gzip compressor via RPC call
-- Tls
-    - openssl self sign tls certiicate and key generation sh file in /build/openssl-pem
-    - tls key and pem, as well as ca pem are needed for grpc server and client
+- Server TLS / mTLS
+    - server TLS / mTLS is configured via service or client config file
+    - see /build/openssl-pem/make-pem.sh for CA, Server and Client Pem and Key self-signed creation  
+    - server TLS / mTLS setup in gRPC service and client is required in order to secure channel
 - Auth
     - TODO: will integrate via interceptor
 - Circuit Breaker
     - client side, default using Hystrix-Go package for circuit breaker
     - circuit breaker is handled in client side unary and stream interceptors
-    = circuit breaker options configured via client config file
+    - circuit breaker options configured via client config file
 - Rate Limiter
     - server side, default using Uber-RateLimit package for rate limiter
     - rate limit is handled in server side In-Tap-Handle
@@ -53,8 +54,6 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
     - TODO: SQS
 - Notification
     - TODO: SNS
-- Systemd
-    - TODO: will provide wrapper code to run built-service as a systemd service
 
 #### project currently under development and not considered stable, please do not use under production environment at this point until this warning is removed
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	util "github.com/aldelo/common"
+	"github.com/aldelo/common/crypto"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/common/wrapper/cloudmap/sdhealthchecktype"
@@ -181,11 +182,12 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			opts = append(opts, grpc.ConnectionTimeout(time.Duration(s._config.Grpc.ConnectionTimeout) * time.Second))
 		}
 
-		if util.LenTrim(s._config.Grpc.X509CertFile) > 0 && util.LenTrim(s._config.Grpc.X509KeyFile) > 0 {
-			if creds, err := credentials.NewServerTLSFromFile(s._config.Grpc.X509CertFile, s._config.Grpc.X509KeyFile); err != nil {
-				log.Fatal("Setup gRPC Server TLS Failed: " + err.Error())
+		if util.LenTrim(s._config.Grpc.ServerCertFile) > 0 && util.LenTrim(s._config.Grpc.ServerKeyFile) > 0 {
+			tls := new(crypto.TlsConfig)
+			if tc, e := tls.GetServerTlsConfig(s._config.Grpc.ServerCertFile, s._config.Grpc.ServerKeyFile, strings.Split(s._config.Grpc.ClientCACertFiles, ",")); e != nil {
+				log.Fatal("Setup gRPC Server TLS Failed: " + e.Error())
 			} else {
-				opts = append(opts, grpc.Creds(creds))
+				opts = append(opts, grpc.Creds(credentials.NewTLS(tc)))
 			}
 		}
 

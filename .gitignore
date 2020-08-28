@@ -46,6 +46,8 @@ client/testclient.log
 client/testclient-internal-err.log
 service/testservice.log
 service/testservice-internal-err.log
+build/openssl-pem/keys/
+build/openssl-pem/test-pem.sh
 
 # CMake
 cmake-build-*/

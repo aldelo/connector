@@ -49,7 +49,9 @@ type TargetData struct {
 }
 
 type GrpcData struct {
-	X509CaCertFile string						`mapstructure:"x509_ca_cert_file"`
+	ServerCACertFiles string					`mapstructure:"server_ca_cert_files"`
+	ClientCertFile string						`mapstructure:"client_cert_file"`
+	ClientKeyFile string						`mapstructure:"client_key_file"`
 	UserAgent string							`mapstructure:"user_agent"`
 	UseLoadBalancer bool						`mapstructure:"use_load_balancer"`
 	UseHealthCheck bool							`mapstructure:"use_health_check"`
@@ -154,10 +156,24 @@ func (c *Config) SetSdInstanceMaxResult(i uint) {
 	}
 }
 
-func (c *Config) SetX509CaCertFile(s string) {
+func (c *Config) SetServerCACertFiles(s string) {
 	if c._v != nil {
-		c._v.Set("grpc.x509_ca_cert_file", s)
-		c.Grpc.X509CaCertFile = s
+		c._v.Set("grpc.server_ca_cert_files", s)
+		c.Grpc.ServerCACertFiles = s
+	}
+}
+
+func (c *Config) SetClientCertFile(s string) {
+	if c._v != nil {
+		c._v.Set("grpc.client_cert_file", s)
+		c.Grpc.ClientCertFile = s
+	}
+}
+
+func (c *Config) SetClientKeyFile(s string) {
+	if c._v != nil {
+		c._v.Set("grpc.client_key_file", s)
+		c.Grpc.ClientKeyFile = s
 	}
 }
 
@@ -323,7 +339,9 @@ func (c *Config) Read() error {
 		"target.sd_endpoint_cache_expires", 300).Default(					// service discovery endpoints cache expires seconds, 0 for default of 300 seconds
 		"target.sd_endpoint_probe_frequency", 30).Default(				// service discovery endpoints cache health probe frequency seconds, 0 for default of 30 seconds
 		"target.sd_instance_max_result", 100).Default(					// service discovery api returns maximum instances count from discovery call, 0 for default of 100
-		"grpc.x509_ca_cert_file", "").Default(							// grpc tls setup, path to ca cert pem file
+		"grpc.server_ca_cert_files", "").Default(							// for server TLS or mTLS setup, one or more server CA cert path to pem file, multiple files separated by comma
+		"grpc.client_cert_file", "").Default(								// for mTLS setup, the client certificate pem file path
+		"grpc.client_key_file", "").Default(								// for mTLS setup, the client certificate key file path
 		"grpc.user_agent", "").Default(									// define user agent string for all RPCs
 		"grpc.use_load_balancer", true).Default(							// indicates round robin load balancer is to be used, default is true
 		"grpc.use_health_check", true).Default(							// indicates health check for server serving status is enabled, default is true
