@@ -17,7 +17,7 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
 - Health Checks
     - service instance health is integrated with cloud map's health check status
     - auto register and deregister on service discovery based on instance health
-    - container level service serving status utilizes the gRPC health v1
+    - container-level service serving status utilizes the gRPC health v1
     - config can be set on client to auto health check for serving status, as well as manual health probe
     - TODO: need to create out of process health witness for instance health management
 - Load Balancing
@@ -55,17 +55,28 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
 - Notification
     - TODO: SNS
 
-#### project currently under development and not considered stable, please do not use under production environment at this point until this warning is removed
-
 # Service connector
 #### Overview
+/service folder contains the gRPC service (server) wrapper.  
 #### Example of Use
+See /example/cmd/server for a working gRPC server setup that serves test service
 #### Notes
+- TLS self sign certificates must be setup and placed into x509 sub folder
+- Use /build/openssl-pem/make-pem.sh to create self-signed openssl ca, cert and key
+- the service.yaml config file must be set properly and aws resources enabled
+- to save aws access id and secret key, use aws cli => aws configure
 
 # Client connector
 #### Overview
+/client folder contains the gRPC client (dialer) wrapper.
 #### Example of Use
+See /example/cmd/client for a working gRPC client setup to consume the gRPC service server
 #### Notes
+- Each gRPC server service that client needs to consume, create its own service yaml in /endpoint folder
+- Each target gRPC service is described via service yaml config file in endpoint, so be sure to correctly define its config values
+- TLS self sign certificates must be setup and placed into x509 sub folder
+- Use /build/openssl-pem/make-pem.sh to create self-signed openssl ca, cert and key
+- to save aws access id and secret key, use aws cli => aws configure
 
 # Pre-Requisites
 #### 1) Install ***protoc***

@@ -1,0 +1,36 @@
+grpc:
+  dial_blocking_mode: true
+  circuit_breaker_enabled: true
+  circuit_breaker_error_percent_threshold: 50
+  circuit_breaker_logger_enabled: true
+  circuit_breaker_max_concurrent_requests: 100
+  circuit_breaker_request_volume_threshold: 20
+  circuit_breaker_sleep_window: 5000
+  circuit_breaker_timeout: 1000
+  dial_min_connect_timeout: 5
+  keepalive_inactive_ping_time_trigger: 0
+  keepalive_inactive_ping_timeout: 0
+  keepalive_permit_without_stream: false
+  read_buffer_size: 0
+  use_health_check: true
+  use_load_balancer: true
+  use_sns: true
+  use_sqs: true
+  user_agent: Example-Server
+  write_buffer_size: 0
+  server_ca_cert_files: x509/ca_cert.pem
+  client_cert_file: x509/client_cert.pem
+  client_key_file: x509/client_key.pem
+target:
+  app_name: ExampleClient
+  direct_connect_ip_port: ""
+  instance_port: 0
+  instance_version: ""
+  namespace_name: aldelo.internal
+  region: us-east-1
+  sd_endpoint_cache_expires: 300
+  sd_endpoint_probe_frequency: 30
+  sd_instance_max_result: 100
+  sd_timeout: 5
+  service_discovery_type: api
+  service_name: msautoservice

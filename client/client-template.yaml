@@ -37,6 +37,8 @@ target:
   # service discovery api maximum instance count returned during discovery call, 0 defaults to 100
   sd_instance_max_result: 100
 grpc:
+  # dial grpc in blocking mode if true, otherwise, non-blocking, default is blocking mode
+  dial_blocking_mode: true
   # for server TLS or mTLS setup, one or more server CA cert path to pem file, multiple files separated by comma
   server_ca_cert_files: ""
   # for mTLS setup, the client certificate pem file path

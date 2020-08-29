@@ -1,0 +1,47 @@
+grpc:
+  client_ca_cert_files: x509/ca_cert.pem
+  connection_timeout: 5
+  keepalive_inactive_ping_time_trigger: 0
+  keepalive_inactive_ping_timeout: 0
+  keepalive_max_conn_age: 0
+  keepalive_max_conn_age_grace: 0
+  keepalive_max_conn_idle: 0
+  keepalive_min_wait: 0
+  keepalive_permit_without_stream: false
+  max_concurrent_streams: 0
+  max_recv_msg_size: 0
+  max_send_msg_size: 0
+  num_stream_workers: 0
+  rate_limit_per_second: 1000
+  read_buffer_size: 0
+  server_cert_file: x509/server_cert.pem
+  server_key_file: x509/server_key.pem
+  use_sns: true
+  use_sqs: true
+  write_buffer_size: 0
+instance:
+  auto_deregister_prior: true
+  initial_unhealthy: false
+  instance_id: ""
+  instance_port: 0
+  instance_prefix: x-
+  instance_version: v0.0.1
+  internal_health_frequency: 1
+  sd_timeout: 5
+namespace:
+  ns_id: ns-hhetxbxwyamihs7d
+  ns_name: aldelo.internal
+service:
+  sv_id: srv-ofodglo7suebvmpc
+  sv_name: example
+service_auto_create:
+  sac_dns_routing: multivalue
+  sac_dns_ttl: 15
+  sac_dns_type: srv
+  sac_health_custom: true
+  sac_health_failthreshold: 1
+  sac_health_pubdns_path: ""
+  sac_health_pubdns_type: ""
+target:
+  app_name: ExampleServer
+  region: us-east-1

@@ -116,7 +116,7 @@ type Service struct {
 	AfterServerShutdown func(svc *Service)
 
 	// read or persist service config settings
-	_config *Config
+	_config *config
 
 	// service discovery object cached
 	_sd *cloudmap.CloudMap
@@ -129,17 +129,18 @@ type Service struct {
 }
 
 // create service
-func NewService(appName string, configFileName string, registerServiceHandlers func(grpcServer *grpc.Server)) *Service {
+func NewService(appName string, configFileName string, customConfigPath string, registerServiceHandlers func(grpcServer *grpc.Server)) *Service {
 	return &Service{
 		AppName: appName,
 		ConfigFileName: configFileName,
+		CustomConfigPath: customConfigPath,
 		RegisterServiceHandlers: registerServiceHandlers,
 	}
 }
 
 // readConfig will read in config data
 func (s *Service) readConfig() error {
-	s._config = &Config{
+	s._config = &config{
 		AppName: s.AppName,
 		ConfigFileName: s.ConfigFileName,
 		CustomConfigPath: s.CustomConfigPath,
@@ -187,6 +188,12 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			if tc, e := tls.GetServerTlsConfig(s._config.Grpc.ServerCertFile, s._config.Grpc.ServerKeyFile, strings.Split(s._config.Grpc.ClientCACertFiles, ",")); e != nil {
 				log.Fatal("Setup gRPC Server TLS Failed: " + e.Error())
 			} else {
+				if len(s._config.Grpc.ClientCACertFiles) == 0 {
+					log.Println("^^^ Server On TLS ^^^")
+				} else {
+					log.Println("^^^ Server On mTLS ^^^")
+				}
+
 				opts = append(opts, grpc.Creds(credentials.NewTLS(tc)))
 			}
 		}
@@ -542,6 +549,9 @@ func (s *Service) Serve() error {
 
 		log.Println("... After gRPC Server Shutdown End")
 	}
+
+	// ensure service cleans up and exits fully
+	os.Exit(0)
 
 	return nil
 }

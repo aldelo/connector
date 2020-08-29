@@ -22,37 +22,37 @@ import (
 	data "github.com/aldelo/common/wrapper/viper"
 )
 
-type Config struct {
+type config struct {
 	AppName string					`mapstructure:"-"`
 	ConfigFileName string			`mapstructure:"-"`
 	CustomConfigPath string			`mapstructure:"-"`
 
 	_v *data.ViperConf				`mapstructure:"-"`
 
-	Target TargetData				`mapstructure:"target"`
-	Namespace NamespaceData			`mapstructure:"namespace"`
-	Service ServiceData				`mapstructure:"service"`
-	SvcCreateData ServiceAutoCreate	`mapstructure:"service_auto_create"`
-	Instance InstanceData			`mapstructure:"instance"`
-	Grpc GrpcData					`mapstructure:"grpc"`
+	Target targetData				`mapstructure:"target"`
+	Namespace namespaceData			`mapstructure:"namespace"`
+	Service serviceData				`mapstructure:"service"`
+	SvcCreateData serviceAutoCreate	`mapstructure:"service_auto_create"`
+	Instance instanceData			`mapstructure:"instance"`
+	Grpc grpcData					`mapstructure:"grpc"`
 }
 
-type TargetData struct {
+type targetData struct {
 	AppName string					`mapstructure:"app_name"`
 	Region string					`mapstructure:"region"`
 }
 
-type NamespaceData struct {
+type namespaceData struct {
 	Id string						`mapstructure:"ns_id"`
 	Name string						`mapstructure:"ns_name"`
 }
 
-type ServiceData struct {
+type serviceData struct {
 	Id string						`mapstructure:"sv_id"`
 	Name string						`mapstructure:"sv_name"`
 }
 
-type ServiceAutoCreate struct {
+type serviceAutoCreate struct {
 	DnsTTL uint						`mapstructure:"sac_dns_ttl"`
 	DnsType string					`mapstructure:"sac_dns_type"`
 	DnsRouting string				`mapstructure:"sac_dns_routing"`
@@ -62,7 +62,7 @@ type ServiceAutoCreate struct {
 	HealthPubDnsPath string			`mapstructure:"sac_health_pubdns_path"`
 }
 
-type InstanceData struct {
+type instanceData struct {
 	Port uint						`mapstructure:"instance_port"`
 	Version string					`mapstructure:"instance_version"`
 	Prefix string					`mapstructure:"instance_prefix"`
@@ -73,7 +73,7 @@ type InstanceData struct {
 	AutoDeregisterPrior bool		`mapstructure:"auto_deregister_prior"`
 }
 
-type GrpcData struct {
+type grpcData struct {
 	ConnectionTimeout uint 					`mapstructure:"connection_timeout"`
 	ServerCertFile string					`mapstructure:"server_cert_file"`
 	ServerKeyFile string					`mapstructure:"server_key_file"`
@@ -96,287 +96,287 @@ type GrpcData struct {
 	UseSNS bool								`mapstructure:"use_sns"`
 }
 
-func (c *Config) SetTargetAppName(s string) {
+func (c *config) SetTargetAppName(s string) {
 	if c._v != nil {
 		c._v.Set("target.app_name", s)
 		c.Target.AppName = s
 	}
 }
 
-func (c *Config) SetTargetRegion(s string) {
+func (c *config) SetTargetRegion(s string) {
 	if c._v != nil {
 		c._v.Set("target.region", s)
 		c.Target.Region = s
 	}
 }
 
-func (c *Config) SetNamespaceId(s string) {
+func (c *config) SetNamespaceId(s string) {
 	if c._v != nil {
 		c._v.Set("namespace.ns_id", s)
 		c.Namespace.Id = s
 	}
 }
 
-func (c *Config) SetNamespaceName(s string) {
+func (c *config) SetNamespaceName(s string) {
 	if c._v != nil {
 		c._v.Set("namespace.ns_name", s)
 		c.Namespace.Name = s
 	}
 }
 
-func (c *Config) SetServiceId(s string) {
+func (c *config) SetServiceId(s string) {
 	if c._v != nil {
 		c._v.Set("service.sv_id", s)
 		c.Service.Id = s
 	}
 }
 
-func (c *Config) SetServiceName(s string) {
+func (c *config) SetServiceName(s string) {
 	if c._v != nil {
 		c._v.Set("service.sv_name", s)
 		c.Service.Name = s
 	}
 }
 
-func (c *Config) SetSvcCreateDnsTTL(i uint) {
+func (c *config) SetSvcCreateDnsTTL(i uint) {
 	if c._v != nil {
 		c._v.Set("service_auto_create.sac_dns_ttl", i)
 		c.SvcCreateData.DnsTTL = i
 	}
 }
 
-func (c *Config) SetSvcCreateDnsType(s string) {
+func (c *config) SetSvcCreateDnsType(s string) {
 	if c._v != nil {
 		c._v.Set("service_auto_create.sac_dns_type", s)
 		c.SvcCreateData.DnsType = s
 	}
 }
 
-func (c *Config) SetSvcCreateDnsRouting(s string) {
+func (c *config) SetSvcCreateDnsRouting(s string) {
 	if c._v != nil {
 		c._v.Set("service_auto_create.sac_dns_routing", s)
 		c.SvcCreateData.DnsRouting = s
 	}
 }
 
-func (c *Config) SetSvcCreateHealthCustom(b bool) {
+func (c *config) SetSvcCreateHealthCustom(b bool) {
 	if c._v != nil {
 		c._v.Set("service_auto_create.sac_health_custom", b)
 		c.SvcCreateData.HealthCustom = b
 	}
 }
 
-func (c *Config) SetSvcCreateHealthFailthreshold(i uint) {
+func (c *config) SetSvcCreateHealthFailthreshold(i uint) {
 	if c._v != nil {
 		c._v.Set("service_auto_create.sac_health_failthreshold", i)
 		c.SvcCreateData.HealthFailThreshold = i
 	}
 }
 
-func (c *Config) SetSvcCreateHealthPubDnsType(s string) {
+func (c *config) SetSvcCreateHealthPubDnsType(s string) {
 	if c._v != nil {
 		c._v.Set("service_auto_create.sac_health_pubdns_type", s)
 		c.SvcCreateData.HealthPubDnsType = s
 	}
 }
 
-func (c *Config) SetSvcCreateHealthPubDnsPath(s string) {
+func (c *config) SetSvcCreateHealthPubDnsPath(s string) {
 	if c._v != nil {
 		c._v.Set("service_auto_create.sac_health_pubdns_path", s)
 		c.SvcCreateData.HealthPubDnsPath = s
 	}
 }
 
-func (c *Config) SetInstancePort(i uint) {
+func (c *config) SetInstancePort(i uint) {
 	if c._v != nil {
 		c._v.Set("instance.instance_port", i)
 		c.Instance.Port = i
 	}
 }
 
-func (c *Config) SetInstanceVersion(s string) {
+func (c *config) SetInstanceVersion(s string) {
 	if c._v != nil {
 		c._v.Set("instance.instance_version", s)
 		c.Instance.Version = s
 	}
 }
 
-func (c *Config) SetInstancePrefix(s string) {
+func (c *config) SetInstancePrefix(s string) {
 	if c._v != nil {
 		c._v.Set("instance.instance_prefix", s)
 		c.Instance.Prefix = s
 	}
 }
 
-func (c *Config) SetInitialUnhealthy(b bool) {
+func (c *config) SetInitialUnhealthy(b bool) {
 	if c._v != nil {
 		c._v.Set("instance.initial_unhealthy", b)
 		c.Instance.InitialUnhealthy = b
 	}
 }
 
-func (c *Config) SetInstanceId(s string) {
+func (c *config) SetInstanceId(s string) {
 	if c._v != nil {
 		c._v.Set("instance.instance_id", s)
 		c.Instance.Id = s
 	}
 }
 
-func (c *Config) SetSdTimeout(i uint) {
+func (c *config) SetSdTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("instance.sd_timeout", i)
 		c.Instance.SdTimeout = i
 	}
 }
 
-func (c *Config) SetInternalHealthFrequency(i uint) {
+func (c *config) SetInternalHealthFrequency(i uint) {
 	if c._v != nil {
 		c._v.Set("instance.internal_health_frequency", i)
 		c.Instance.InternalHealthFrequency = i
 	}
 }
 
-func (c *Config) SetAutoDeregisterPrior(b bool) {
+func (c *config) SetAutoDeregisterPrior(b bool) {
 	if c._v != nil {
 		c._v.Set("instance.auto_deregister_prior", b)
 		c.Instance.AutoDeregisterPrior = b
 	}
 }
 
-func (c *Config) SetGrpcConnectTimeout(i uint) {
+func (c *config) SetGrpcConnectTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.connection_timeout", i)
 		c.Grpc.ConnectionTimeout = i
 	}
 }
 
-func (c *Config) SetServerCertFile(s string) {
+func (c *config) SetServerCertFile(s string) {
 	if c._v != nil {
 		c._v.Set("grpc.server_cert_file", s)
 		c.Grpc.ServerCertFile = s
 	}
 }
 
-func (c *Config) SetServerKeyFile(s string) {
+func (c *config) SetServerKeyFile(s string) {
 	if c._v != nil {
 		c._v.Set("grpc.server_key_file", s)
 		c.Grpc.ServerKeyFile = s
 	}
 }
 
-func (c *Config) SetClientCACertFiles(s string) {
+func (c *config) SetClientCACertFiles(s string) {
 	if c._v != nil {
 		c._v.Set("grpc.client_ca_cert_files", s)
 		c.Grpc.ClientCACertFiles = s
 	}
 }
 
-func (c *Config) SetKeepAliveMinWait(i uint) {
+func (c *config) SetKeepAliveMinWait(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_min_wait", i)
 		c.Grpc.KeepAliveMinWait = i
 	}
 }
 
-func (c *Config) SetKeepAlivePermitWithoutStream(b bool) {
+func (c *config) SetKeepAlivePermitWithoutStream(b bool) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_permit_without_stream", b)
 		c.Grpc.KeepAlivePermitWithoutStream = b
 	}
 }
 
-func (c *Config) SetKeepAliveMaxConnIdle(i uint) {
+func (c *config) SetKeepAliveMaxConnIdle(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_max_conn_idle", i)
 		c.Grpc.KeepAliveMaxConnIdle = i
 	}
 }
 
-func (c *Config) SetKeepAliveMaxConnAge(i uint) {
+func (c *config) SetKeepAliveMaxConnAge(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_max_conn_age", i)
 		c.Grpc.KeepAliveMaxConnAge = i
 	}
 }
 
-func (c *Config) SetKeepAliveMaxConnAgeGrace(i uint) {
+func (c *config) SetKeepAliveMaxConnAgeGrace(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_max_conn_age_grace", i)
 		c.Grpc.KeepAliveMaxConnAgeGrace = i
 	}
 }
 
-func (c *Config) SetKeepAliveInactivePingTimeTrigger(i uint) {
+func (c *config) SetKeepAliveInactivePingTimeTrigger(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_inactive_ping_time_trigger", i)
 		c.Grpc.KeepAliveInactivePingTimeTrigger = i
 	}
 }
 
-func (c *Config) SetKeepAliveInactivePingTimeout(i uint) {
+func (c *config) SetKeepAliveInactivePingTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_inactive_ping_timeout", i)
 		c.Grpc.KeepAliveInactivePingTimeout = i
 	}
 }
 
-func (c *Config) SetReadBufferSize(i uint) {
+func (c *config) SetReadBufferSize(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.read_buffer_size", i)
 		c.Grpc.ReadBufferSize = i
 	}
 }
 
-func (c *Config) SetWriteBufferSize(i uint) {
+func (c *config) SetWriteBufferSize(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.write_buffer_size", i)
 		c.Grpc.WriteBufferSize = i
 	}
 }
 
-func (c *Config) SetMaxReceiveMessageSize(i uint) {
+func (c *config) SetMaxReceiveMessageSize(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.max_recv_msg_size", i)
 		c.Grpc.MaxReceiveMessageSize = i
 	}
 }
 
-func (c *Config) SetMaxSendMessageSize(i uint) {
+func (c *config) SetMaxSendMessageSize(i uint) {
 	if c._v	!= nil {
 		c._v.Set("grpc.max_send_msg_size", i)
 		c.Grpc.MaxSendMessageSize = i
 	}
 }
 
-func (c *Config) SetMaxConcurrentStreams(i uint) {
+func (c *config) SetMaxConcurrentStreams(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.max_concurrent_streams", i)
 		c.Grpc.MaxConcurrentStreams = i
 	}
 }
 
-func (c *Config) SetNumStreamWorkers(i uint) {
+func (c *config) SetNumStreamWorkers(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.num_stream_workers", i)
 		c.Grpc.NumStreamWorkers = i
 	}
 }
 
-func (c *Config) SetRateLimitPerSecond(i uint) {
+func (c *config) SetRateLimitPerSecond(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.rate_limit_per_second", i)
 		c.Grpc.RateLimitPerSecond = i
 	}
 }
 
-func(c *Config) SetUseSQS(b bool) {
+func(c *config) SetUseSQS(b bool) {
 	if c._v != nil {
 		c._v.Set("grpc.use_sqs", b)
 		c.Grpc.UseSQS = b
 	}
 }
 
-func (c *Config) SetUseSNS(b bool) {
+func (c *config) SetUseSNS(b bool) {
 	if c._v	!= nil {
 		c._v.Set("grpc.use_sns", b)
 		c.Grpc.UseSNS = b
@@ -384,14 +384,14 @@ func (c *Config) SetUseSNS(b bool) {
 }
 
 // Read will load config settings from disk
-func (c *Config) Read() error {
+func (c *config) Read() error {
 	c._v = nil
-	c.Target = TargetData{}
-	c.Namespace = NamespaceData{}
-	c.Service = ServiceData{}
-	c.SvcCreateData = ServiceAutoCreate{}
-	c.Instance = InstanceData{}
-	c.Grpc = GrpcData{}
+	c.Target = targetData{}
+	c.Namespace = namespaceData{}
+	c.Service = serviceData{}
+	c.SvcCreateData = serviceAutoCreate{}
+	c.Instance = instanceData{}
+	c.Grpc = grpcData{}
 
 	if util.LenTrim(c.AppName) == 0 {
 		return fmt.Errorf("App Name is Required")
@@ -473,7 +473,7 @@ func (c *Config) Read() error {
 }
 
 // Save persists config settings to disk
-func (c *Config) Save() error {
+func (c *config) Save() error {
 	if c._v != nil {
 		return c._v.Save()
 	} else {

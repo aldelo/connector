@@ -20,11 +20,10 @@ import (
 	"fmt"
 	util "github.com/aldelo/common"
 	res "github.com/aldelo/connector/adapters/resolver"
-	"google.golang.org/grpc/resolver"
 )
 
 // WithRoundRobin returns gRPC dial target, and defaultServiceConfig set for Round Robin client side load balancer
-func WithRoundRobin(serviceName string, endpointAddrs []string) (target string, loadBalancerPolicy string, err error) {
+func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []string) (target string, loadBalancerPolicy string, err error) {
 	if util.LenTrim(serviceName) == 0 {
 		return "", "", fmt.Errorf("Resolver Service Name is Required")
 	}
@@ -33,9 +32,9 @@ func WithRoundRobin(serviceName string, endpointAddrs []string) (target string, 
 		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required")
 	}
 
-	_ = res.NewManualResolver(endpointAddrs)
+	_ = res.NewManualResolver(schemeName, endpointAddrs)
 
 	// note: load balancer round robin is per call, rather than per connection
 	// this means, load balancer will connect to all discovered ip and perform per call actions in round robin fashion across all channels
-	return fmt.Sprintf("%s:///%s", resolver.GetDefaultScheme(), serviceName), `"loadBalancingPolicy":"round_robin"`, nil
+	return fmt.Sprintf("%s:///%s", schemeName, serviceName), `"loadBalancingPolicy":"round_robin"`, nil
 }

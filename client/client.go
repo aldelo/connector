@@ -88,7 +88,7 @@ type Client struct {
 	AfterClientClose func(cli *Client)
 
 	// read or persist client config settings
-	_config *Config
+	_config *config
 
 	// service discovery object cached
 	_sd *cloudmap.CloudMap
@@ -99,7 +99,7 @@ type Client struct {
 	_circuitBreakers map[string]circuitbreaker.CircuitBreakerIFace
 
 	// discovered endpoints for client load balancer use
-	_endpoints []*ServiceEndpoint
+	_endpoints []*serviceEndpoint
 
 	// instantiated internal objects
 	_conn *grpc.ClientConn
@@ -115,8 +115,8 @@ type Client struct {
 	MetadataHelper *metadata.MetaClient
 }
 
-// ServiceEndpoint represents a specific service endpoint connection target
-type ServiceEndpoint struct {
+// serviceEndpoint represents a specific service endpoint connection target
+type serviceEndpoint struct {
 	SdType string	// srv, api, direct
 	Host string
 	Port uint
@@ -133,16 +133,17 @@ type ServiceEndpoint struct {
 }
 
 // create client
-func NewClient(appName string, configFileName string) *Client {
+func NewClient(appName string, configFileName string, customConfigPath string) *Client {
 	return &Client{
 		AppName: appName,
 		ConfigFileName: configFileName,
+		CustomConfigPath: customConfigPath,
 	}
 }
 
 // readConfig will read in config data
 func (c *Client) readConfig() error {
-	c._config = &Config{
+	c._config = &config{
 		AppName: c.AppName,
 		ConfigFileName: c.ConfigFileName,
 		CustomConfigPath: c.CustomConfigPath,
@@ -200,7 +201,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// set with block option,
 	// with block will halt code execution until after dial completes
-	opts = append(opts, grpc.WithBlock())
+	if c._config.Grpc.DialBlockingMode {
+		opts = append(opts, grpc.WithBlock())
+	}
 
 	// set default server config for load balancer and/or health check
 	defSvrConf := ""
@@ -357,7 +360,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	if c._config.Target.ServiceDiscoveryType != "direct" {
 		var err error
 
-		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(fmt.Sprintf("roundrobin.%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
+		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin("clb", fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
 
 		if err != nil {
 			return fmt.Errorf("Build Client Load Balancer Failed: " + err.Error())
@@ -496,6 +499,11 @@ func (c *Client) Close() {
 	}
 }
 
+// ClientConnection returns the currently loaded grpc client connection
+func (c *Client) ClientConnection() grpc.ClientConnInterface{
+	return c._conn
+}
+
 // RemoteAddress gets the remote endpoint address currently connected to
 func (c *Client) RemoteAddress() string {
 	return c._remoteAddress
@@ -524,7 +532,7 @@ func (c *Client) discoverEndpoints() error {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
 
-	c._endpoints = []*ServiceEndpoint{}
+	c._endpoints = []*serviceEndpoint{}
 
 	cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
 	if cacheExpSeconds == 0 {
@@ -565,7 +573,7 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 		return fmt.Errorf("Direct Connect IP or Port Not Defined in Config")
 	}
 
-	c._endpoints = append(c._endpoints, &ServiceEndpoint{
+	c._endpoints = append(c._endpoints, &serviceEndpoint{
 		SdType:  "direct",
 		Host: ip,
 		Port: port,
@@ -625,7 +633,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 				port = c._config.Target.InstancePort
 			}
 
-			c._endpoints = append(c._endpoints, &ServiceEndpoint{
+			c._endpoints = append(c._endpoints, &serviceEndpoint{
 				SdType:  sdType,
 				Host: ip,
 				Port: port,
@@ -675,7 +683,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		return fmt.Errorf("Service Discovery By API Failed: " + err.Error())
 	} else {
 		for _, v := range instanceList {
-			c._endpoints = append(c._endpoints, &ServiceEndpoint{
+			c._endpoints = append(c._endpoints, &serviceEndpoint{
 				SdType:  "api",
 				Host: v.InstanceIP,
 				Port: v.InstancePort,
@@ -694,17 +702,17 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 }
 
 // findUnhealthyInstances will call cloud map sd to discover unhealthy instances, a slice of unhealthy instances is returned
-func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint) (unhealthyList []*ServiceEndpoint, err error) {
+func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint) (unhealthyList []*serviceEndpoint, err error) {
 	if c._sd == nil {
-		return []*ServiceEndpoint{}, fmt.Errorf("Service Discovery Client Not Connected")
+		return []*serviceEndpoint{}, fmt.Errorf("Service Discovery Client Not Connected")
 	}
 
 	if util.LenTrim(serviceName) == 0 {
-		return []*ServiceEndpoint{}, fmt.Errorf("Service Name Not Defined in Config (API SD)")
+		return []*serviceEndpoint{}, fmt.Errorf("Service Name Not Defined in Config (API SD)")
 	}
 
 	if util.LenTrim(namespaceName) == 0 {
-		return []*ServiceEndpoint{}, fmt.Errorf("Namespace Name Not Defined in Config (API SD)")
+		return []*serviceEndpoint{}, fmt.Errorf("Namespace Name Not Defined in Config (API SD)")
 	}
 
 	if maxCount == 0 {
@@ -726,10 +734,10 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 	}
 
 	if instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, false, customAttr, &maxCount, timeoutDuration...); err != nil {
-		return []*ServiceEndpoint{}, fmt.Errorf("Service Discovery By API Failed: " + err.Error())
+		return []*serviceEndpoint{}, fmt.Errorf("Service Discovery By API Failed: " + err.Error())
 	} else {
 		for _, v := range instanceList {
-			unhealthyList = append(unhealthyList, &ServiceEndpoint{
+			unhealthyList = append(unhealthyList, &serviceEndpoint{
 				SdType:  "api",
 				Host: v.InstanceIP,
 				Port: v.InstancePort,
@@ -748,7 +756,7 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 }
 
 // updateHealth will update instance health
-func (c *Client) updateHealth(p *ServiceEndpoint, healthy bool) error {
+func (c *Client) updateHealth(p *serviceEndpoint, healthy bool) error {
 	if c._sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
 		var timeoutDuration []time.Duration
 
@@ -763,7 +771,7 @@ func (c *Client) updateHealth(p *ServiceEndpoint, healthy bool) error {
 }
 
 // deregisterInstance will remove instance from cloudmap and route 53
-func (c *Client) deregisterInstance(p *ServiceEndpoint) error {
+func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 	if c._sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
 		log.Println("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Begin...")
 

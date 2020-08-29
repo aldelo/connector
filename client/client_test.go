@@ -26,7 +26,7 @@ import (
 )
 
 func TestClient_Dial(t *testing.T) {
-	cli := NewClient("testclient", "client")
+	cli := NewClient("testclient", "client", "")
 
 	// cli.StatsHandler
 

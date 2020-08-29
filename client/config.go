@@ -22,18 +22,18 @@ import (
 	data "github.com/aldelo/common/wrapper/viper"
 )
 
-type Config struct {
+type config struct {
 	AppName string					`mapstructure:"-"`
 	ConfigFileName string			`mapstructure:"-"`
 	CustomConfigPath string			`mapstructure:"-"`
 
 	_v *data.ViperConf				`mapstructure:"-"`
 
-	Target TargetData				`mapstructure:"target"`
-	Grpc GrpcData					`mapstructure:"grpc"`
+	Target targetData				`mapstructure:"target"`
+	Grpc grpcData					`mapstructure:"grpc"`
 }
 
-type TargetData struct {
+type targetData struct {
 	AppName string					`mapstructure:"app_name"`
 	ServiceDiscoveryType string		`mapstructure:"service_discovery_type"`
 	DirectConnectIpPort string		`mapstructure:"direct_connect_ip_port"`
@@ -48,7 +48,8 @@ type TargetData struct {
 	SdInstanceMaxResult uint		`mapstructure:"sd_instance_max_result"`
 }
 
-type GrpcData struct {
+type grpcData struct {
+	DialBlockingMode bool						`mapstructure:"dial_blocking_mode"`
 	ServerCACertFiles string					`mapstructure:"server_ca_cert_files"`
 	ClientCertFile string						`mapstructure:"client_cert_file"`
 	ClientKeyFile string						`mapstructure:"client_key_file"`
@@ -72,231 +73,238 @@ type GrpcData struct {
 	UseSNS bool									`mapstructure:"use_sns"`
 }
 
-func (c *Config) SetTargetAppName(s string) {
+func (c *config) SetTargetAppName(s string) {
 	if c._v != nil {
 		c._v.Set("target.app_name", s)
 		c.Target.AppName = s
 	}
 }
 
-func (c *Config) SetServiceDiscoveryType(s string) {
+func (c *config) SetServiceDiscoveryType(s string) {
 	if c._v != nil {
 		c._v.Set("target.service_discovery_type", s)
 		c.Target.ServiceDiscoveryType = s
 	}
 }
 
-func (c *Config) SetDirectConnectIpPort(s string) {
+func (c *config) SetDirectConnectIpPort(s string) {
 	if c._v != nil {
 		c._v.Set("target.direct_connect_ip_port", s)
 		c.Target.DirectConnectIpPort = s
 	}
 }
 
-func (c *Config) SetServiceName(s string) {
+func (c *config) SetServiceName(s string) {
 	if c._v != nil {
 		c._v.Set("target.service_name", s)
 		c.Target.ServiceName = s
 	}
 }
 
-func (c *Config) SetNamespaceName(s string) {
+func (c *config) SetNamespaceName(s string) {
 	if c._v != nil {
 		c._v.Set("target.namespace_name", s)
 		c.Target.NamespaceName = s
 	}
 }
 
-func (c *Config) SetTargetRegion(s string) {
+func (c *config) SetTargetRegion(s string) {
 	if c._v != nil {
 		c._v.Set("target.region", s)
 		c.Target.Region = s
 	}
 }
 
-func (c *Config) SetInstanceVersion(s string) {
+func (c *config) SetInstanceVersion(s string) {
 	if c._v != nil {
 		c._v.Set("target.instance_version", s)
 		c.Target.InstanceVersion = s
 	}
 }
 
-func (c *Config) SetInstancePort(i uint) {
+func (c *config) SetInstancePort(i uint) {
 	if c._v != nil {
 		c._v.Set("target.instance_port", i)
 		c.Target.InstancePort = i
 	}
 }
 
-func (c *Config) SetSdTimeout(i uint) {
+func (c *config) SetSdTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("target.sd_timeout", i)
 		c.Target.SdTimeout = i
 	}
 }
 
-func (c *Config) SetSdEndpointCacheExpires(i uint) {
+func (c *config) SetSdEndpointCacheExpires(i uint) {
 	if c._v != nil {
 		c._v.Set("target.sd_endpoint_cache_expires", i)
 		c.Target.SdEndpointCacheExpires = i
 	}
 }
 
-func (c *Config) SetSdEndpointProbeFrequency(i uint) {
+func (c *config) SetSdEndpointProbeFrequency(i uint) {
 	if c._v != nil {
 		c._v.Set("target.sd_endpoint_probe_frequency", i)
 		c.Target.SdEndpointProbeFrequency = i
 	}
 }
 
-func (c *Config) SetSdInstanceMaxResult(i uint) {
+func (c *config) SetSdInstanceMaxResult(i uint) {
 	if c._v != nil {
 		c._v.Set("target.sd_instance_max_result", i)
 		c.Target.SdInstanceMaxResult = i
 	}
 }
 
-func (c *Config) SetServerCACertFiles(s string) {
+func (c *config) SetDialBlockingMode(b bool) {
+	if c._v != nil {
+		c._v.Set("grpc.dial_blocking_mode", b)
+		c.Grpc.DialBlockingMode = b
+	}
+}
+
+func (c *config) SetServerCACertFiles(s string) {
 	if c._v != nil {
 		c._v.Set("grpc.server_ca_cert_files", s)
 		c.Grpc.ServerCACertFiles = s
 	}
 }
 
-func (c *Config) SetClientCertFile(s string) {
+func (c *config) SetClientCertFile(s string) {
 	if c._v != nil {
 		c._v.Set("grpc.client_cert_file", s)
 		c.Grpc.ClientCertFile = s
 	}
 }
 
-func (c *Config) SetClientKeyFile(s string) {
+func (c *config) SetClientKeyFile(s string) {
 	if c._v != nil {
 		c._v.Set("grpc.client_key_file", s)
 		c.Grpc.ClientKeyFile = s
 	}
 }
 
-func (c *Config) SetUserAgent(s string) {
+func (c *config) SetUserAgent(s string) {
 	if c._v != nil {
 		c._v.Set("grpc.user_agent", s)
 		c.Grpc.UserAgent = s
 	}
 }
 
-func (c *Config) SetUseLoadBalancer(b bool) {
+func (c *config) SetUseLoadBalancer(b bool) {
 	if c._v != nil {
 		c._v.Set("grpc.use_load_balancer", b)
 		c.Grpc.UseLoadBalancer = b
 	}
 }
 
-func (c *Config) SetUseHealthCheck(b bool) {
+func (c *config) SetUseHealthCheck(b bool) {
 	if c._v != nil {
 		c._v.Set("grpc.use_health_check", b)
 		c.Grpc.UseHealthCheck = b
 	}
 }
 
-func (c *Config) SetDialMinConnectTimeout(i uint) {
+func (c *config) SetDialMinConnectTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.dial_min_connect_timeout", i)
 		c.Grpc.DialMinConnectTimeout = i
 	}
 }
 
-func (c *Config) SetKeepAliveInactivePingTimeTrigger(i uint) {
+func (c *config) SetKeepAliveInactivePingTimeTrigger(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_inactive_ping_time_trigger", i)
 		c.Grpc.KeepAliveInactivePingTimeTrigger = i
 	}
 }
 
-func (c *Config) SetKeepAliveInactivePingTimeout(i uint) {
+func (c *config) SetKeepAliveInactivePingTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_inactive_ping_timeout", i)
 		c.Grpc.KeepAliveInactivePingTimeout = i
 	}
 }
 
-func (c *Config) SetKeepAlivePermitWithoutStream(b bool) {
+func (c *config) SetKeepAlivePermitWithoutStream(b bool) {
 	if c._v != nil {
 		c._v.Set("grpc.keepalive_permit_without_stream", b)
 		c.Grpc.KeepAlivePermitWithoutStream = b
 	}
 }
 
-func (c *Config) SetReadBufferSize(i uint) {
+func (c *config) SetReadBufferSize(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.read_buffer_size", i)
 		c.Grpc.ReadBufferSize = i
 	}
 }
 
-func (c *Config) SetWriteBufferSize(i uint) {
+func (c *config) SetWriteBufferSize(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.write_buffer_size", i)
 		c.Grpc.WriteBufferSize = i
 	}
 }
 
-func (c *Config) SetCircuitBreakerEnabled(b bool) {
+func (c *config) SetCircuitBreakerEnabled(b bool) {
 	if c._v != nil {
 		c._v.Set("grpc.circuit_breaker_enabled", b)
 		c.Grpc.CircuitBreakerEnabled = b
 	}
 }
 
-func (c *Config) SetCircuitBreakerTimeout(i uint) {
+func (c *config) SetCircuitBreakerTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.circuit_breaker_timeout", i)
 		c.Grpc.CircuitBreakerTimeout = i
 	}
 }
 
-func (c *Config) SetCircuitBreakerMaxConcurrentRequests(i uint) {
+func (c *config) SetCircuitBreakerMaxConcurrentRequests(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.circuit_breaker_max_concurrent_requests", i)
 		c.Grpc.CircuitBreakerMaxConcurrentRequests = i
 	}
 }
 
-func (c *Config) SetCircuitBreakerRequestVolumeThreshold(i uint) {
+func (c *config) SetCircuitBreakerRequestVolumeThreshold(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.circuit_breaker_request_volume_threshold", i)
 		c.Grpc.CircuitBreakerRequestVolumeThreshold = i
 	}
 }
 
-func (c *Config) SetCircuitBreakerSleepWindow(i uint) {
+func (c *config) SetCircuitBreakerSleepWindow(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.circuit_breaker_sleep_window", i)
 		c.Grpc.CircuitBreakerSleepWindow = i
 	}
 }
 
-func (c *Config) SetCircuitBreakerErrorPercentThreshold(i uint) {
+func (c *config) SetCircuitBreakerErrorPercentThreshold(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.circuit_breaker_error_percent_threshold", i)
 		c.Grpc.CircuitBreakerErrorPercentThreshold = i
 	}
 }
 
-func (c *Config) SetCircuitBreakerLoggerEnabled(b bool) {
+func (c *config) SetCircuitBreakerLoggerEnabled(b bool) {
 	if c._v != nil {
 		c._v.Set("grpc.circuit_breaker_logger_enabled", b)
 		c.Grpc.CircuitBreakerLoggerEnabled = b
 	}
 }
 
-func(c *Config) SetUseSQS(b bool) {
+func(c *config) SetUseSQS(b bool) {
 	if c._v != nil {
 		c._v.Set("grpc.use_sqs", b)
 		c.Grpc.UseSQS = b
 	}
 }
 
-func (c *Config) SetUseSNS(b bool) {
+func (c *config) SetUseSNS(b bool) {
 	if c._v	!= nil {
 		c._v.Set("grpc.use_sns", b)
 		c.Grpc.UseSNS = b
@@ -304,10 +312,10 @@ func (c *Config) SetUseSNS(b bool) {
 }
 
 // Read will load config settings from disk
-func (c *Config) Read() error {
+func (c *config) Read() error {
 	c._v = nil
-	c.Target = TargetData{}
-	c.Grpc = GrpcData{}
+	c.Target = targetData{}
+	c.Grpc = grpcData{}
 
 	if util.LenTrim(c.AppName) == 0 {
 		return fmt.Errorf("App Name is Required")
@@ -339,6 +347,7 @@ func (c *Config) Read() error {
 		"target.sd_endpoint_cache_expires", 300).Default(					// service discovery endpoints cache expires seconds, 0 for default of 300 seconds
 		"target.sd_endpoint_probe_frequency", 30).Default(				// service discovery endpoints cache health probe frequency seconds, 0 for default of 30 seconds
 		"target.sd_instance_max_result", 100).Default(					// service discovery api returns maximum instances count from discovery call, 0 for default of 100
+		"grpc.dial_blocking_mode", true).Default(							// indicate if grpc dial is blocking mode or not, default is true
 		"grpc.server_ca_cert_files", "").Default(							// for server TLS or mTLS setup, one or more server CA cert path to pem file, multiple files separated by comma
 		"grpc.client_cert_file", "").Default(								// for mTLS setup, the client certificate pem file path
 		"grpc.client_key_file", "").Default(								// for mTLS setup, the client certificate key file path
@@ -382,7 +391,7 @@ func (c *Config) Read() error {
 }
 
 // Save persists config settings to disk
-func (c *Config) Save() error {
+func (c *config) Save() error {
 	if c._v != nil {
 		return c._v.Save()
 	} else {

@@ -41,7 +41,7 @@ func (a *AnswerServiceImpl) Greeting(ctx context.Context, q *testpb.Question) (*
 }
 
 func TestService_Serve(t *testing.T) {
-	svc := NewService("testservice", "service", func(grpcServer *grpc.Server) {
+	svc := NewService("testservice", "service", "", func(grpcServer *grpc.Server) {
 		testpb.RegisterAnswerServiceServer(grpcServer, &AnswerServiceImpl{})
 	})
 
@@ -106,7 +106,7 @@ func TestService_Serve(t *testing.T) {
 }
 
 func TestConfig(t *testing.T) {
-	cfg := &Config{
+	cfg := &config{
 		AppName: "test-connector-service",
 		ConfigFileName: "service",
 	}
@@ -123,7 +123,7 @@ func TestConfig(t *testing.T) {
 }
 
 func TestCloudMap(t *testing.T) {
-	cfg := &Config{
+	cfg := &config{
 		AppName: "test-connector-service",
 		ConfigFileName: "service",
 	}

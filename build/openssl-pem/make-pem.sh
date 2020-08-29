@@ -6,8 +6,10 @@ STATE="CA"
 CITY="Pleasanton"
 COMPANY="Example Company"
 CN="*.example.com"
-SERVERSAN="DNS:localhost,IP:0.0.0.0,IP:127.0.0.1"
-CLIENTSAN="DNS:localhost,IP:0.0.0.0,IP:127.0.0.1"
+
+# SAN must contain the same DNS domain as in CN for gRPC TLS to work
+SERVERSAN="DNS:localhost,DNS:*.example.com,IP:0.0.0.0,IP:127.0.0.1"
+CLIENTSAN="DNS:localhost,DNS:*.example.com,IP:0.0.0.0,IP:127.0.0.1"
 
 ### CREATE PEM SCRIPT BELOW ###
 mkdir keys

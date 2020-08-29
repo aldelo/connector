@@ -18,16 +18,23 @@ package resolver
 
 import (
 	"fmt"
+	util "github.com/aldelo/common"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/resolver/manual"
 )
 
-func NewManualResolver(endpointAddrs []string) error {
+func NewManualResolver(schemeName string, endpointAddrs []string) error {
+	if util.LenTrim(schemeName) == 0 {
+		schemeName = "clb"
+	}
+
 	if len(endpointAddrs) == 0 {
 		return fmt.Errorf("Endpoint Address is Required")
 	}
 
-	r, _ := manual.GenerateAndRegisterManualResolver()
+	// r, _ := manual.GenerateAndRegisterManualResolver()
+
+	r :=  manual.NewBuilderWithScheme(schemeName)
 
 	addrs := []resolver.Address{}
 
@@ -45,7 +52,7 @@ func NewManualResolver(endpointAddrs []string) error {
 	builder = r
 
 	resolver.Register(builder)
-	resolver.SetDefaultScheme(builder.Scheme())
+	resolver.SetDefaultScheme(schemeName)
 
 	return nil
 }
