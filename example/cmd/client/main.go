@@ -48,8 +48,8 @@ func main() {
 
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
-				// call service 100 times
-				for i := 0; i < 100; i++ {
+				// call service 10 times
+				for i := 0; i < 10; i++ {
 					if answer, e := answerClient.Greeting(ctx, &testpb.Question{
 						Question: "How is Weather Today " + util.NewULID() + "?",
 					}); e != nil {
@@ -57,6 +57,13 @@ func main() {
 					} else {
 						fmt.Println("> gRPC Service Response = " + answer.Answer)
 					}
+				}
+
+				// manual health probe
+				if status, e := cli.HealthProbe(""); e != nil {
+					log.Println("Health Check v1 Manual = (Error) " + e.Error())
+				} else {
+					log.Println("Health Check v1 Manual = (Status) " + status.String())
 				}
 
 				// clean up

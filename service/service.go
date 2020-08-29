@@ -539,9 +539,6 @@ func (s *Service) Serve() error {
 	// shut down gRPC server command invoke
 	quit <- true
 
-	// stopping services
-	s.ImmediateStop()
-
 	if s.AfterServerShutdown != nil {
 		log.Println("After gRPC Server Shutdown Begin...")
 
@@ -549,9 +546,6 @@ func (s *Service) Serve() error {
 
 		log.Println("... After gRPC Server Shutdown End")
 	}
-
-	// ensure service cleans up and exits fully
-	os.Exit(0)
 
 	return nil
 }
@@ -813,26 +807,32 @@ func (s *Service) GracefulStop() {
 	// de-register instance from cloud map
 	log.Println("Stopping gRPC Server (Graceful)")
 
-	if err := s.deregisterInstance(); err != nil {
-		log.Println("De-Register Instance Failed From GracefulStop: " + err.Error())
-	} else {
-		log.Println("De-Register Instance OK From GracefulStop")
+	if s._sd != nil {
+		if err := s.deregisterInstance(); err != nil {
+			log.Println("De-Register Instance Failed From GracefulStop: " + err.Error())
+		} else {
+			log.Println("De-Register Instance OK From GracefulStop")
+		}
 	}
 
 	if s._sd != nil {
 		s._sd.Disconnect()
+		s._sd = nil
 	}
 
 	if s._sqs != nil {
 		s._sqs.Disconnect()
+		s._sqs = nil
 	}
 
 	if s._sns != nil {
 		s._sns.Disconnect()
+		s._sns = nil
 	}
 
 	if s._grpcServer != nil {
 		s._grpcServer.GracefulStop()
+		s._grpcServer = nil
 	}
 }
 
@@ -843,26 +843,32 @@ func (s *Service) ImmediateStop() {
 	// de-register instance from cloud map
 	log.Println("Stopping gRPC Server (Immediate)")
 
-	if err := s.deregisterInstance(); err != nil {
-		log.Println("De-Register Instance Failed From ImmediateStop: " + err.Error())
-	} else {
-		log.Println("De-Register Instance OK From ImmediateStop")
+	if s._sd != nil {
+		if err := s.deregisterInstance(); err != nil {
+			log.Println("De-Register Instance Failed From ImmediateStop: " + err.Error())
+		} else {
+			log.Println("De-Register Instance OK From ImmediateStop")
+		}
 	}
 
 	if s._sd != nil {
 		s._sd.Disconnect()
+		s._sd = nil
 	}
 
 	if s._sqs != nil {
 		s._sqs.Disconnect()
+		s._sqs = nil
 	}
 
 	if s._sns != nil {
 		s._sns.Disconnect()
+		s._sns = nil
 	}
 
 	if s._grpcServer != nil {
 		s._grpcServer.Stop()
+		s._grpcServer = nil
 	}
 }
 

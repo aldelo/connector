@@ -1,5 +1,5 @@
 grpc:
-  dial_blocking_mode: false
+  dial_blocking_mode: true
   circuit_breaker_enabled: true
   circuit_breaker_error_percent_threshold: 50
   circuit_breaker_logger_enabled: true
