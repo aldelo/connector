@@ -49,6 +49,15 @@ import (
 	"time"
 )
 
+//
+// client side cache
+//
+var _cache *Cache
+
+func init() {
+	_cache = new(Cache)
+}
+
 // Client represents a gRPC client's connection and entry point
 //
 // note:
@@ -472,7 +481,7 @@ func (c *Client) WaitForReady(timeoutDuration ...time.Duration) error {
 				}
 			}
 
-			time.Sleep(500*time.Millisecond)
+			time.Sleep(2500*time.Millisecond)
 		}
 	}()
 
@@ -670,6 +679,23 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 		}
 	}
 
+	//
+	// check for existing cache
+	//
+	found := _cache.GetLiveServiceEndpoints(serviceName + "." + namespaceName, "")
+
+	if len(found) > 0 {
+		c._endpoints = found
+		log.Println("Using DNS Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
+		for _, v := range c._endpoints {
+			log.Println("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
+		}
+		return nil
+	}
+
+	//
+	// acquire dns ip port from service discovery
+	//
 	if ipList, err := registry.DiscoverDnsIps(serviceName + "." + namespaceName, srv); err != nil {
 		return fmt.Errorf("Service Discovery By DNS Failed: " + err.Error())
 	} else {
@@ -713,6 +739,8 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 			})
 		}
 
+		_cache.AddServiceEndpoints(serviceName + "." + namespaceName, c._endpoints)
+
 		return nil
 	}
 }
@@ -730,6 +758,23 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		return fmt.Errorf("Namespace Name Not Defined in Config (API SD)")
 	}
 
+	//
+	// check for existing cache
+	//
+	found := _cache.GetLiveServiceEndpoints(serviceName + "." + namespaceName, version)
+
+	if len(found) > 0 {
+		c._endpoints = found
+		log.Println("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
+		for _, v := range c._endpoints {
+			log.Println("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
+		}
+		return nil
+	}
+
+	//
+	// acquire api ip port from service discovery
+	//
 	if maxCount == 0 {
 		maxCount = 100
 	}
@@ -765,6 +810,8 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 				LastHealthCheck: time.Time{},
 			})
 		}
+
+		_cache.AddServiceEndpoints(serviceName + "." + namespaceName, c._endpoints)
 
 		return nil
 	}

@@ -144,6 +144,6 @@ func startServiceHandler(port int) {
 func stopServiceHandler() {
 	if grpcServer != nil {
 		log.Println("Service Program Clean Up During Shutdown...")
-		grpcServer.ImmediateStop()
+		grpcServer.GracefulStop()
 	}
 }
