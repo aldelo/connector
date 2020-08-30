@@ -32,43 +32,51 @@ import (
 func main() {
 	fmt.Println("*** Example Client Consuming gRPC Server Services ***")
 
+	//
+	// establish grpc client connection to grpc service server - service-1.yaml connection
+	//
+	var svc1Cli *client.Client
+	var err error
+
+	if svc1Cli, err = DialService1(); err != nil {
+		log.Fatal("Start Client Failed: " + err.Error())
+	}
+	defer svc1Cli.Close()
+
+	//
+	// now operate client to service interactions
+	//
 	for {
 		choice := ""
 
 		fmt.Println("Please Select Choice:")
-		fmt.Println("... 1 = Test service-1 gRPC Server")
+		fmt.Println("... 1 = Call service-1 RPC Test Method")
 		_, _ = fmt.Scanln(&choice)
 
 		switch util.RightTrimLF(choice) {
 		case "1":
-			if cli, err := DialService1(); err != nil {
-				fmt.Println(err.Error())
-			} else {
-				answerClient := testpb.NewAnswerServiceClient(cli.ClientConnection())
+			answerClient := testpb.NewAnswerServiceClient(svc1Cli.ClientConnection())
 
+			// call service 3 times
+			for i := 0; i < 3; i++ {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
-				// call service 10 times
-				for i := 0; i < 10; i++ {
-					if answer, e := answerClient.Greeting(ctx, &testpb.Question{
-						Question: "How is Weather Today " + util.NewULID() + "?",
-					}); e != nil {
-						fmt.Println("Call gRPC Service Error: " + e.Error())
-					} else {
-						fmt.Println("> gRPC Service Response = " + answer.Answer)
-					}
-				}
-
-				// manual health probe
-				if status, e := cli.HealthProbe(""); e != nil {
-					log.Println("Health Check v1 Manual = (Error) " + e.Error())
+				if answer, e := answerClient.Greeting(ctx, &testpb.Question{
+					Question: "How is Weather Today " + util.NewULID() + "?",
+				}); e != nil {
+					fmt.Println("Call gRPC Service Error: " + e.Error())
 				} else {
-					log.Println("Health Check v1 Manual = (Status) " + status.String())
+					fmt.Println("> gRPC Service Response = " + answer.Answer)
 				}
 
-				// clean up
 				cancel()
-				cli.Close()
+			}
+
+			// manual health probe
+			if status, e := svc1Cli.HealthProbe("", 5*time.Second); e != nil {
+				log.Println("Health Check v1 Manual = (Error) " + e.Error())
+			} else {
+				log.Println("Health Check v1 Manual = (Status) " + status.String())
 			}
 
 		default:
@@ -84,6 +92,8 @@ func main() {
 // where each endpoint is separately maintained via individual yaml config files under ./endpoint
 func DialService1() (cli *client.Client, err error) {
 	cli = client.NewClient("ExampleClient", "service-1", "./endpoint")
+
+	cli.WaitForServerReady = true
 
 	cli.BeforeClientDial = func(cli *client.Client) {
 		log.Println("Before Client Dial...")

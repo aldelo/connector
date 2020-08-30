@@ -21,13 +21,11 @@ import (
 	"fmt"
 	"github.com/aldelo/common/wrapper/systemd"
 	"github.com/aldelo/connector/example/cmd/server/impl"
+	testpb "github.com/aldelo/connector/example/proto/test"
 	"github.com/aldelo/connector/service"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"log"
-	"time"
-
-	testpb "github.com/aldelo/connector/example/proto/test"
 )
 
 // define package level var for grpcServer object
@@ -110,8 +108,8 @@ func startServiceHandler(port int) {
 	grpcServer.DefaultHealthCheckHandler = func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus {
 		log.Println("Default gRPC Health Check Invoked")
 
-		// just for test, set health probe to not serving if not even second
-		if time.Now().Second() % 2 == 0 {
+		// currently serving status is set by service after grpc server starts and sd instance health update completes
+		if grpcServer.CurrentlyServing() {
 			return grpc_health_v1.HealthCheckResponse_SERVING
 		} else {
 			return grpc_health_v1.HealthCheckResponse_NOT_SERVING
@@ -122,7 +120,13 @@ func startServiceHandler(port int) {
 	grpcServer.ServiceHealthCheckHandlers = map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus{
 		"ExampleService": func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus {
 			log.Println("Service gRPC Health Check Invoked: ExampleService")
-			return grpc_health_v1.HealthCheckResponse_SERVING
+
+			// currently serving status is set by service after grpc server starts and sd instance health update completes
+			if grpcServer.CurrentlyServing() {
+				return grpc_health_v1.HealthCheckResponse_SERVING
+			} else {
+				return grpc_health_v1.HealthCheckResponse_NOT_SERVING
+			}
 		},
 	}
 
@@ -132,6 +136,8 @@ func startServiceHandler(port int) {
 	if err := grpcServer.Serve(); err != nil {
 		log.Println("Start gRPC Server Failed: " + err.Error())
 	}
+
+	// *** no code after this line, because grpcServer.Serve() will block until shutdown ***
 }
 
 // stopServiceHandler will be invoked when service program stops, for clean up actions

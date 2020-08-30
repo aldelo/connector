@@ -46,6 +46,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -126,6 +127,10 @@ type Service struct {
 	// instantiated internal objects
 	_grpcServer *grpc.Server
 	_localAddress string
+
+	// grpc serving status and mutex locking
+	_serving bool
+	_mu sync.RWMutex
 }
 
 // create service
@@ -364,6 +369,7 @@ func (s *Service) connectSd() error {
 	return nil
 }
 
+// startHealthChecker will launch the grpc health v1 health service
 func (s *Service) startHealthChecker() error {
 	if s._grpcServer == nil {
 		return fmt.Errorf("Health Check Server Can't Start: gRPC Server Not Started")
@@ -374,11 +380,23 @@ func (s *Service) startHealthChecker() error {
 	return nil
 }
 
+// CurrentlyServing indicates if this service health status indicates currently serving mode or not
+func (s *Service) CurrentlyServing() bool {
+	s._mu.RLock()
+	defer s._mu.RUnlock()
+	return s._serving
+}
+
 // startServer will start and serve grpc services, it will run in goroutine until terminated
 func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 	if s._grpcServer == nil {
 		return fmt.Errorf("gRPC Server Not Setup")
 	}
+
+	// set service default serving mode to 'not serving'
+	s._mu.Lock()
+	s._serving = false
+	s._mu.Unlock()
 
 	go func() {
 		gRPCServerInvoked := false
@@ -388,6 +406,12 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 			case <-quit:
 				// quit is invoked
 				log.Println("gRPC Server Quit Invoked")
+
+				// on exit, stop serving
+				s._mu.Lock()
+				s._serving = false
+				s._mu.Unlock()
+
 				s._grpcServer.Stop()
 				_ = lis.Close()
 				return
@@ -408,6 +432,20 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 					log.Println("Starting gRPC Server...")
 
 					go func() {
+						//
+						// start health checker services
+						//
+						log.Println("Starting gRPC Health Server...")
+
+						if err := s.startHealthChecker(); err != nil {
+							log.Println("!!! gRPC Health Server Fail To Start: " + err.Error() + " !!!")
+						} else {
+							log.Println("... gRPC Health Server Started")
+						}
+
+						//
+						// serve grpc service
+						//
 						if err := s._grpcServer.Serve(lis); err != nil {
 							log.Fatalf("Serve gRPC Service %s on %s Failed: (Server Halt) %s", s._config.AppName, s._localAddress, err.Error())
 						} else {
@@ -420,18 +458,31 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 					if s.AfterServerStart != nil {
 						log.Println("After gRPC Server Started Begin...")
 
+						// trigger sd initial health update
+						go func() {
+							waitTime := int(s._config.SvcCreateData.HealthFailThreshold*30+5)
+
+							log.Println(">>> Initial SD Instance Health Check Staged (" +  util.Itoa(waitTime) + " Seconds Warm-Up) >>>")
+							time.Sleep(time.Duration(waitTime)*time.Second)
+							log.Println("Initial SD Instance Health Check Begin...")
+
+							// on initial health update, set sd instance health status to healthy (true)
+							if err := s.updateHealth(true); err != nil {
+								log.Println("!!! Update SD Instance Health Failed: " + err.Error() + " !!!")
+							} else {
+								log.Println("... Update SD Instance Health to 'Healthy' Successful")
+
+								// set service serving mode to true (serving)
+								s._mu.Lock()
+								s._serving = true
+								s._mu.Unlock()
+							}
+						}()
+
+						// trigger after server start event
 						s.AfterServerStart(s)
 
 						log.Println("... After gRPC Server Started End")
-					}
-
-					// start health checker services
-					log.Println("Starting gRPC Health Server...")
-
-					if err := s.startHealthChecker(); err != nil {
-						log.Println("!!! gRPC Health Server Fail To Start: " + err.Error() + " !!!")
-					} else {
-						log.Println("... gRPC Health Server Started")
 					}
 				}
 			}

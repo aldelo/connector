@@ -45,6 +45,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -60,6 +61,9 @@ type Client struct {
 	AppName string
 	ConfigFileName string
 	CustomConfigPath string
+
+	// indicate if after dial, client will wait for target service health probe success before continuing to allow rpc
+	WaitForServerReady bool
 
 	// define oauth2 token fetch handler - if client use oauth2 to authorize per rpc call
 	// once this handler is set, dial option will be configured for per rpc auth action
@@ -417,8 +421,73 @@ func (c *Client) Dial(ctx context.Context) error {
 			c.MetadataHelper = new(metadata.MetaClient)
 
 			log.Println("... gRPC Service @ " + target + " [" + c._remoteAddress + "] Connected")
+
+			if c.WaitForServerReady {
+				if e := c.WaitForReady(time.Duration(dialSec)*time.Second); e != nil {
+					// health probe failed
+					_ = c._conn.Close()
+					return fmt.Errorf("gRPC Service Server Not Ready: " + e.Error())
+				}
+			}
+
 			return nil
 		}
+	}
+}
+
+// WaitForReady is called after Dial to check if target service is ready as reported by health probe
+func (c *Client) WaitForReady(timeoutDuration ...time.Duration) error {
+	var timeout time.Duration
+
+	if len(timeoutDuration) > 0 {
+		timeout = timeoutDuration[0]
+	} else {
+		timeout = 5*time.Second
+	}
+
+	//
+	// check if service is ready
+	// wait for target service to respond with serving status before moving forward
+	//
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+
+	chanErrorInfo := make(chan string)
+
+	go func() {
+		for {
+			if status, e := c.HealthProbe("", timeout); e != nil {
+				log.Println("Health Status Check Failed: " + e.Error())
+				wg.Done()
+				chanErrorInfo <- "Health Status Check Failed: " + e.Error()
+				return
+			} else {
+				if status == grpc_health_v1.HealthCheckResponse_SERVING {
+					log.Println("Serving Status Detected")
+					wg.Done()
+					chanErrorInfo <- "OK"
+					return
+				} else {
+					log.Println("Not Serving!")
+				}
+			}
+
+			time.Sleep(500*time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+
+	log.Println("Heath Status Check Finalized...")
+
+	errInfo := <-chanErrorInfo
+
+	if errInfo == "OK" {
+		// success - server service health = serving
+		return nil
+	} else {
+		// failure
+		return fmt.Errorf(errInfo)
 	}
 }
 
