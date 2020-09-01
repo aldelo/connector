@@ -34,4 +34,22 @@ func NewNotificationAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2
 	} else {
 		return n, nil
 	}
+
+/*
+	n.ListTopics()
+
+
+
+	n.CreateTopic()
+
+	n.Subscribe()
+	n.Unsubscribe()
+
+	n.Publish()
+
+
+ */
+
 }
+
+

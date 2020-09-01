@@ -30,6 +30,8 @@ type config struct {
 	_v *data.ViperConf				`mapstructure:"-"`
 
 	Target targetData				`mapstructure:"target"`
+	Queues queuesData				`mapstructure:"queues"`
+	Topics topicsData				`mapstructure:"topics"`
 	Grpc grpcData					`mapstructure:"grpc"`
 }
 
@@ -44,8 +46,25 @@ type targetData struct {
 	InstancePort uint				`mapstructure:"instance_port"`
 	SdTimeout uint					`mapstructure:"sd_timeout"`
 	SdEndpointCacheExpires uint		`mapstructure:"sd_endpoint_cache_expires"`
-	SdEndpointProbeFrequency uint	`mapstructure:"sd_endpoint_probe_frequency"`
 	SdInstanceMaxResult uint		`mapstructure:"sd_instance_max_result"`
+}
+
+type queuesData struct {
+	SqsDiscoveryQueueUrl string		`mapstructure:"sqs_discovery_queue_url"`
+	SqsMonitorQueueUrl string		`mapstructure:"sqs_monitor_queue_url"`
+	SqsTracerQueueUrl string		`mapstructure:"sqs_tracer_queue_url"`
+	SqsLoggerQueueUrl string		`mapstructure:"sqs_logger_queue_url"`
+}
+
+type topicsData struct {
+	SnsDiscoveryTopicArn string					`mapstructure:"sns_discovery_topic_arn"`
+	SnsDiscoverySubscriptionArn string			`mapstructure:"sns_discovery_subscription_arn"`
+	SnsMonitorTopicArn string					`mapstructure:"sns_monitor_topic_arn"`
+	SnsMonitorSubscriptionArn string			`mapstructure:"sns_monitor_subscription_arn"`
+	SnsTracerTopicArn string					`mapstructure:"sns_tracer_topic_arn"`
+	SnsTracerSubscriptionArn string				`mapstructure:"sns_tracer_subscription_arn"`
+	SnsLoggerTopicArn string					`mapstructure:"sns_logger_topic_arn"`
+	SnsLoggerSubscriptionArn string				`mapstructure:"sns_logger_subscription_arn"`
 }
 
 type grpcData struct {
@@ -69,8 +88,6 @@ type grpcData struct {
 	CircuitBreakerSleepWindow uint				`mapstructure:"circuit_breaker_sleep_window"`
 	CircuitBreakerErrorPercentThreshold uint	`mapstructure:"circuit_breaker_error_percent_threshold"`
 	CircuitBreakerLoggerEnabled bool			`mapstructure:"circuit_breaker_logger_enabled"`
-	UseSQS bool									`mapstructure:"use_sqs"`
-	UseSNS bool									`mapstructure:"use_sns"`
 }
 
 func (c *config) SetTargetAppName(s string) {
@@ -143,17 +160,94 @@ func (c *config) SetSdEndpointCacheExpires(i uint) {
 	}
 }
 
-func (c *config) SetSdEndpointProbeFrequency(i uint) {
-	if c._v != nil {
-		c._v.Set("target.sd_endpoint_probe_frequency", i)
-		c.Target.SdEndpointProbeFrequency = i
-	}
-}
-
 func (c *config) SetSdInstanceMaxResult(i uint) {
 	if c._v != nil {
 		c._v.Set("target.sd_instance_max_result", i)
 		c.Target.SdInstanceMaxResult = i
+	}
+}
+
+func (c *config) SetSqsDiscoveryQueueUrl(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_discovery_queue_url", s)
+		c.Queues.SqsDiscoveryQueueUrl = s
+	}
+}
+
+func (c *config) SetSqsMonitorQueueUrl(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_monitor_queue_url", s)
+		c.Queues.SqsMonitorQueueUrl = s
+	}
+}
+
+func (c *config) SetSqsTracerQueueUrl(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_tracer_queue_url", s)
+		c.Queues.SqsTracerQueueUrl = s
+	}
+}
+
+func (c *config) SetSqsLoggerQueueUrl(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_logger_queue_url", s)
+		c.Queues.SqsLoggerQueueUrl = s
+	}
+}
+
+func (c *config) SetSnsDiscoveryTopicArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_discovery_topic_arn", s)
+		c.Topics.SnsDiscoveryTopicArn = s
+	}
+}
+
+func (c *config) SetSnsDiscoverySubscriptionArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_discovery_subscription_arn", s)
+		c.Topics.SnsDiscoverySubscriptionArn = s
+	}
+}
+
+func (c *config) SetSnsMonitorTopicArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_monitor_topic_arn", s)
+		c.Topics.SnsMonitorTopicArn = s
+	}
+}
+
+func (c *config) SetSnsMonitorSubscriptionArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_monitor_subscription_arn", s)
+		c.Topics.SnsMonitorSubscriptionArn = s
+	}
+}
+
+func (c *config) SetSnsTracerTopicArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_tracer_topic_arn", s)
+		c.Topics.SnsTracerTopicArn = s
+	}
+}
+
+func (c *config) SetSnsTracerSubscriptionArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_tracer_subscription_arn", s)
+		c.Topics.SnsTracerSubscriptionArn = s
+	}
+}
+
+func (c *config) SetSnsLoggerTopicArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_logger_topic_arn", s)
+		c.Topics.SnsLoggerTopicArn = s
+	}
+}
+
+func (c *config) SetSnsLoggerSubscriptionArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_logger_subscription_arn", s)
+		c.Topics.SnsLoggerSubscriptionArn = s
 	}
 }
 
@@ -297,20 +391,6 @@ func (c *config) SetCircuitBreakerLoggerEnabled(b bool) {
 	}
 }
 
-func(c *config) SetUseSQS(b bool) {
-	if c._v != nil {
-		c._v.Set("grpc.use_sqs", b)
-		c.Grpc.UseSQS = b
-	}
-}
-
-func (c *config) SetUseSNS(b bool) {
-	if c._v	!= nil {
-		c._v.Set("grpc.use_sns", b)
-		c.Grpc.UseSNS = b
-	}
-}
-
 // Read will load config settings from disk
 func (c *config) Read() error {
 	c._v = nil
@@ -345,8 +425,19 @@ func (c *config) Read() error {
 		"target.instance_port", 0).Default(								// for sd = a: specific port being used on service endpoint
 		"target.sd_timeout", 5).Default(									// timeout seconds for service discovery actions
 		"target.sd_endpoint_cache_expires", 300).Default(					// service discovery endpoints cache expires seconds, 0 for default of 300 seconds
-		"target.sd_endpoint_probe_frequency", 30).Default(				// service discovery endpoints cache health probe frequency seconds, 0 for default of 30 seconds
 		"target.sd_instance_max_result", 100).Default(					// service discovery api returns maximum instances count from discovery call, 0 for default of 100
+		"queues.sqs_discovery_queue_url", "").Default(					// the queue url pre-created on aws sqs for the target discovery service this config file targets
+		"queues.sqs_monitor_queue_url", "").Default(						// the queue url pre-created on aws sqs for the target monitor service this config file targets
+		"queues.sqs_tracer_queue_url", "").Default(						// the queue url pre-created on aws sqs for the target tracer service this config file targets
+		"queues.sqs_logger_queue_url", "").Default(						// the queue url pre-created on aws sqs for the target logger service this config file targets
+		"topics.sns_discovery_topic_arn", "").Default(					// the topic arn pre-created on aws sns for the target discovery service this config file targets
+		"topics.sns_discovery_subscription_arn", "").Default(				// sns topic subscription arn as generated by aws during subscribe event (auto created)
+		"topics.sns_monitor_topic_arn", "").Default(						// the topic arn pre-created on aws sns for the target monitor service this config file targets
+		"topics.sns_monitor_subscription_arn", "").Default(				// sns topic subscription arn as generated by aws during subscribe event (auto created)
+		"topics.sns_tracer_topic_arn", "").Default(						// the topic arn pre-created on aws sns for the target tracer service this config file targets
+		"topics.sns_tracer_subscription_arn", "").Default(				// sns topic subscription arn as generated by aws during subscribe event (auto created)
+		"topics.sns_logger_topic_arn", "").Default(						// the topic arn pre-created on aws sns for the target logger service this config file targets
+		"topics.sns_logger_subscription_arn", "").Default(				// sns topic subscription arn as generated by aws during subscribe event (auto created)
 		"grpc.dial_blocking_mode", true).Default(							// indicate if grpc dial is blocking mode or not, default is true
 		"grpc.server_ca_cert_files", "").Default(							// for server TLS or mTLS setup, one or more server CA cert path to pem file, multiple files separated by comma
 		"grpc.client_cert_file", "").Default(								// for mTLS setup, the client certificate pem file path
@@ -366,10 +457,7 @@ func (c *config) Read() error {
 		"grpc.circuit_breaker_request_volume_threshold", 20).Default(		// minimum number of requests needed before a circuit can be tripped due to health, default = 20
 		"grpc.circuit_breaker_sleep_window", 5000).Default(				// how long to wait after a circuit opens before testing for recovery, in milliseconds, default = 5000
 		"grpc.circuit_breaker_error_percent_threshold", 50).Default(		// causes circuits to open once the rolling measure of errors exceeds this percent of requests, default = 50
-		"grpc.circuit_breaker_logger_enabled", true).Default(				// indicates the logger that will be used to log circuit breaker action
-		"grpc.use_sqs", true).Default(									// indicates if sqs is used if applicable, default is true
-		"grpc.use_sns", true)												// indicates if sns is used if applicable, default is true
-
+		"grpc.circuit_breaker_logger_enabled", true)						// indicates the logger that will be used to log circuit breaker action
 
 	if ok, err := c._v.Init(); err != nil {
 		return err

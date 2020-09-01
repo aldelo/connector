@@ -58,8 +58,8 @@ func main() {
 		case "1":
 			answerClient := testpb.NewAnswerServiceClient(svc1Cli.ClientConnection())
 
-			// call service 3 times
-			for i := 0; i < 3; i++ {
+			// call service 1000 times
+			for i := 0; i < 1000; i++ {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
 				if answer, e := answerClient.Greeting(ctx, &testpb.Question{

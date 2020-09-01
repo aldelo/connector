@@ -131,18 +131,15 @@ type Client struct {
 // serviceEndpoint represents a specific service endpoint connection target
 type serviceEndpoint struct {
 	SdType string	// srv, api, direct
+
 	Host string
 	Port uint
-
-	Healthy bool
-	ServingStatus grpc_health_v1.HealthCheckResponse_ServingStatus
 
 	InstanceId string
 	ServiceId string
 	Version string
 
 	CacheExpire time.Time
-	LastHealthCheck time.Time
 }
 
 // create client
@@ -359,8 +356,6 @@ func (c *Client) Dial(ctx context.Context) error {
 		info := strconv.Itoa(i+1) + ") "
 		info += ep.SdType + "=" + ep.Host + ":" + util.UintToStr(ep.Port) + ", "
 		info += "Version=" + ep.Version + ", "
-		info += "Status=" + ep.ServingStatus.String() + ", "
-		info += "LastHealth=" + util.FormatDateTime(ep.LastHealthCheck) + ", "
 		info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
 
 		log.Println("       - " + info)
@@ -655,10 +650,7 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 		SdType:  "direct",
 		Host: ip,
 		Port: port,
-		Healthy: true,
-		ServingStatus: grpc_health_v1.HealthCheckResponse_SERVING,		// initial discovery assumes serving
 		CacheExpire: cacheExpires,
-		LastHealthCheck: time.Time{},
 	})
 
 	return nil
@@ -732,10 +724,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 				SdType:  sdType,
 				Host: ip,
 				Port: port,
-				Healthy: true,
-				ServingStatus: grpc_health_v1.HealthCheckResponse_SERVING,		// initial discovery assumes serving
 				CacheExpire: cacheExpires,
-				LastHealthCheck: time.Time{},
 			})
 		}
 
@@ -801,13 +790,10 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 				SdType:  "api",
 				Host: v.InstanceIP,
 				Port: v.InstancePort,
-				Healthy: v.InstanceHealthy,
-				ServingStatus: grpc_health_v1.HealthCheckResponse_SERVING,		// initial discovery assumes serving
 				InstanceId: v.InstanceId,
 				ServiceId: v.ServiceId,
 				Version: v.InstanceVersion,
 				CacheExpire: cacheExpires,
-				LastHealthCheck: time.Time{},
 			})
 		}
 
@@ -857,13 +843,10 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 				SdType:  "api",
 				Host: v.InstanceIP,
 				Port: v.InstancePort,
-				Healthy: v.InstanceHealthy,
-				ServingStatus: grpc_health_v1.HealthCheckResponse_NOT_SERVING,	// upon discovery serve status is yet unknown, need health probe
 				InstanceId: v.InstanceId,
 				ServiceId: v.ServiceId,
 				Version: v.InstanceVersion,
 				CacheExpire: time.Time{},
-				LastHealthCheck: time.Time{},
 			})
 		}
 

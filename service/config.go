@@ -32,6 +32,8 @@ type config struct {
 	Target targetData				`mapstructure:"target"`
 	Namespace namespaceData			`mapstructure:"namespace"`
 	Service serviceData				`mapstructure:"service"`
+	Queues queuesData				`mapstructure:"queues"`
+	Topics topicsData				`mapstructure:"topics"`
 	SvcCreateData serviceAutoCreate	`mapstructure:"service_auto_create"`
 	Instance instanceData			`mapstructure:"instance"`
 	Grpc grpcData					`mapstructure:"grpc"`
@@ -50,6 +52,44 @@ type namespaceData struct {
 type serviceData struct {
 	Id string						`mapstructure:"sv_id"`
 	Name string						`mapstructure:"sv_name"`
+	DiscoveryUseSqsSns bool			`mapstructure:"sv_discovery_use_sqs_sns"`
+	MonitorUseSqsSns bool			`mapstrucutre:"sv_monitor_use_sqs_sns"`
+	TracerUseSqsSns bool			`mapstructure:"sv_tracer_use_sqs_sns"`
+	LoggerUseSqsSns bool			`mapstructure:"sv_logger_use_sqs_sns"`
+}
+
+type queuesData struct {
+	SqsDiscoveryQueueNamePrefix string			`mapstructure:"sqs_discovery_queue_name_prefix"`
+	SqsDiscoveryMessageRetentionSeconds uint	`mapstructure:"sqs_discovery_message_retention_seconds"`
+	SqsDiscoveryQueueUrl string					`mapstructure:"sqs_discovery_queue_url"`
+	SqsDiscoveryQueueArn string					`mapstructure:"sqs_discovery_queue_arn"`
+	SqsMonitorQueueNamePrefix string			`mapstructure:"sqs_monitor_queue_name_prefix"`
+	SqsMonitorMessageRetentionSeconds uint		`mapstructure:"sqs_monitor_message_retention_seconds"`
+	SqsMonitorQueueUrl string					`mapstructure:"sqs_monitor_queue_url"`
+	SqsMonitorQueueArn string					`mapstructure:"sqs_monitor_queue_arn"`
+	SqsTracerQueueNamePrefix string				`mapstructure:"sqs_tracer_queue_name_prefix"`
+	SqsTracerMessageRetentionSeconds uint		`mapstructure:"sqs_tracer_message_retention_seconds"`
+	SqsTracerQueueUrl string					`mapstructure:"sqs_tracer_queue_url"`
+	SqsTracerQueueArn string					`mapstructure:"sqs_tracer_queue_arn"`
+	SqsLoggerQueueNamePrefix string				`mapstructure:"sqs_logger_queue_name_prefix"`
+	SqsLoggerMessageRetentionSeconds uint		`mapstructure:"sqs_logger_message_retention_seconds"`
+	SqsLoggerQueueUrl string					`mapstructure:"sqs_logger_queue_url"`
+	SqsLoggerQueueArn string					`mapstructure:"sqs_logger_queue_arn"`
+}
+
+type topicsData struct {
+	SnsDiscoveryTopicNamePrefix string			`mapstructure:"sns_discovery_topic_name_prefix"`
+	SnsDiscoveryTopicArn string					`mapstructure:"sns_discovery_topic_arn"`
+	SnsDiscoverySubscriptionArn string			`mapstructure:"sns_discovery_subscription_arn"`
+	SnsMonitorTopicNamePrefix string			`mapstructure:"sns_monitor_topic_name_prefix"`
+	SnsMonitorTopicArn string					`mapstructure:"sns_monitor_topic_arn"`
+	SnsMonitorSubscriptionArn string			`mapstructure:"sns_monitor_subscription_arn"`
+	SnsTracerTopicNamePrefix string				`mapstructure:"sns_tracer_topic_name_prefix"`
+	SnsTracerTopicArn string					`mapstructure:"sns_tracer_topic_arn"`
+	SnsTracerSubscriptionArn string				`mapstructure:"sns_tracer_subscription_arn"`
+	SnsLoggerTopicNamePrefix string				`mapstructure:"sns_logger_topic_name_prefix"`
+	SnsLoggerTopicArn string					`mapstructure:"sns_logger_topic_arn"`
+	SnsLoggerSubscriptionArn string				`mapstructure:"sns_logger_subscription_arn"`
 }
 
 type serviceAutoCreate struct {
@@ -92,8 +132,6 @@ type grpcData struct {
 	MaxConcurrentStreams uint				`mapstructure:"max_concurrent_streams"`
 	NumStreamWorkers uint					`mapstructure:"num_stream_workers"`
 	RateLimitPerSecond uint 				`mapstructure:"rate_limit_per_second"`
-	UseSQS bool								`mapstructure:"use_sqs"`
-	UseSNS bool								`mapstructure:"use_sns"`
 }
 
 func (c *config) SetTargetAppName(s string) {
@@ -135,6 +173,230 @@ func (c *config) SetServiceName(s string) {
 	if c._v != nil {
 		c._v.Set("service.sv_name", s)
 		c.Service.Name = s
+	}
+}
+
+func (c *config) SetDiscoveryUseSqsSns(b bool) {
+	if c._v != nil {
+		c._v.Set("service.sv_discovery_use_sqs_sns", b)
+		c.Service.DiscoveryUseSqsSns = b
+	}
+}
+
+func (c *config) SetMonitorUseSqsSns(b bool) {
+	if c._v != nil {
+		c._v.Set("service.sv_monitor_use_sqs_sns", b)
+		c.Service.MonitorUseSqsSns = b
+	}
+}
+
+func (c *config) SetTracerUseSqsSns(b bool) {
+	if c._v != nil {
+		c._v.Set("service.sv_tracer_use_sqs_sns", b)
+		c.Service.TracerUseSqsSns = b
+	}
+}
+
+func (c *config) SetLoggerUseSqsSns(b bool) {
+	if c._v != nil {
+		c._v.Set("service.sv_logger_use_sqs_sns", b)
+		c.Service.LoggerUseSqsSns = b
+	}
+}
+
+func (c *config) SetSqsDiscoveryQueueNamePrefix(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_discovery_queue_name_prefix", s)
+		c.Queues.SqsDiscoveryQueueNamePrefix = s
+	}
+}
+
+func (c *config) SetSqsDiscoveryMessageRetensionSeconds(i uint) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_discovery_message_retension_seconds", i)
+		c.Queues.SqsDiscoveryMessageRetentionSeconds = i
+	}
+}
+
+func (c *config) SetSqsDiscoveryQueueUrl(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_discovery_queue_url", s)
+		c.Queues.SqsDiscoveryQueueUrl = s
+	}
+}
+
+func (c *config) SetSqsDiscoveryQueueArn(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_discovery_queue_arn", s)
+		c.Queues.SqsDiscoveryQueueArn = s
+	}
+}
+
+func (c *config) SetSqsMonitorQueueNamePrefix(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_monitor_queue_name_prefix", s)
+		c.Queues.SqsMonitorQueueNamePrefix = s
+	}
+}
+
+func (c *config) SetSqsMonitorMessageRetentionSeconds(i uint) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_monitor_message_retention_seconds", i)
+		c.Queues.SqsMonitorMessageRetentionSeconds = i
+	}
+}
+
+func (c *config) SetSqsMonitorQueueUrl(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_monitor_queue_url", s)
+		c.Queues.SqsMonitorQueueUrl = s
+	}
+}
+
+func (c *config) SetSqsMonitorQueueArn(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_monitor_queue_arn", s)
+		c.Queues.SqsMonitorQueueArn = s
+	}
+}
+
+func (c *config) SetSqsTracerQueueNamePrefix(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_tracer_queue_name_prefix", s)
+		c.Queues.SqsTracerQueueNamePrefix = s
+	}
+}
+
+func (c *config) SetSqsTracerMessageRetentionSeconds(i uint) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_tracer_message_retention_seconds", i)
+		c.Queues.SqsTracerMessageRetentionSeconds = i
+	}
+}
+
+func (c *config) SetSqsTracerQueueUrl(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_tracer_queue_url", s)
+		c.Queues.SqsTracerQueueUrl = s
+	}
+}
+
+func (c *config) SetSqsTracerQueueArn(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_tracer_queue_arn", s)
+		c.Queues.SqsTracerQueueArn = s
+	}
+}
+
+func (c *config) SetSqsLoggerQueueNamePrefix(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_logger_queue_name_prefix", s)
+		c.Queues.SqsLoggerQueueNamePrefix = s
+	}
+}
+
+func (c *config) SetSqsLoggerMessageRetentionRecords(i uint) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_logger_message_retention_seconds", i)
+		c.Queues.SqsLoggerMessageRetentionSeconds = i
+	}
+}
+
+func (c *config) SetSqsLoggerQueueUrl(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_logger_queue_url", s)
+		c.Queues.SqsLoggerQueueUrl = s
+	}
+}
+
+func (c *config) SetSqsLoggerQueueArn(s string) {
+	if c._v != nil {
+		c._v.Set("queues.sqs_logger_queue_arn", s)
+		c.Queues.SqsLoggerQueueArn = s
+	}
+}
+
+func (c *config) SetSnsDiscoveryTopicNamePrefix(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_discovery_topic_name_prefix", s)
+		c.Topics.SnsDiscoveryTopicNamePrefix = s
+	}
+}
+
+func (c *config) SetSnsDiscoveryTopicArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_discovery_topic_arn", s)
+		c.Topics.SnsDiscoveryTopicArn = s
+	}
+}
+
+func (c *config) SetSnsDiscoverySubscriptionArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_discovery_subscription_arn", s)
+		c.Topics.SnsDiscoverySubscriptionArn = s
+	}
+}
+
+func (c *config) SetSnsMonitorTopicNamePrefix(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_monitor_topic_name_prefix", s)
+		c.Topics.SnsMonitorTopicNamePrefix = s
+	}
+}
+
+func (c *config) SetSnsMonitorTopicArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_monitor_topic_arn", s)
+		c.Topics.SnsMonitorTopicArn = s
+	}
+}
+
+func (c *config) SetSnsMonitorSubscriptionArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_monitor_subscription_arn", s)
+		c.Topics.SnsMonitorSubscriptionArn = s
+	}
+}
+
+func (c *config) SetSnsTracerTopicNamePrefix(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_tracer_topic_name_prefix", s)
+		c.Topics.SnsTracerTopicNamePrefix = s
+	}
+}
+
+func (c *config) SetSnsTracerTopicArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_tracer_topic_arn", s)
+		c.Topics.SnsTracerTopicArn = s
+	}
+}
+
+func (c *config) SetSnsTracerSubscriptionArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_tracer_subscription_arn", s)
+		c.Topics.SnsTracerSubscriptionArn = s
+	}
+}
+
+func (c *config) SetSnsLoggerTopicNamePrefix(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_logger_topic_name_prefix", s)
+		c.Topics.SnsLoggerTopicNamePrefix = s
+	}
+}
+
+func (c *config) SetSnsLoggerTopicArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_logger_topic_arn", s)
+		c.Topics.SnsLoggerTopicArn = s
+	}
+}
+
+func (c *config) SetSnsLoggerSubscriptionArn(s string) {
+	if c._v != nil {
+		c._v.Set("topics.sns_logger_subscription_arn", s)
+		c.Topics.SnsLoggerSubscriptionArn = s
 	}
 }
 
@@ -369,26 +631,14 @@ func (c *config) SetRateLimitPerSecond(i uint) {
 	}
 }
 
-func(c *config) SetUseSQS(b bool) {
-	if c._v != nil {
-		c._v.Set("grpc.use_sqs", b)
-		c.Grpc.UseSQS = b
-	}
-}
-
-func (c *config) SetUseSNS(b bool) {
-	if c._v	!= nil {
-		c._v.Set("grpc.use_sns", b)
-		c.Grpc.UseSNS = b
-	}
-}
-
 // Read will load config settings from disk
 func (c *config) Read() error {
 	c._v = nil
 	c.Target = targetData{}
 	c.Namespace = namespaceData{}
 	c.Service = serviceData{}
+	c.Queues = queuesData{}
+	c.Topics = topicsData{}
 	c.SvcCreateData = serviceAutoCreate{}
 	c.Instance = instanceData{}
 	c.Grpc = grpcData{}
@@ -411,47 +661,77 @@ func (c *config) Read() error {
 	}
 
 	c._v.Default(
-		"target.app_name", "connector.service").Default(					// required, app being created, be service specific
-		"target.region", "us-east-1").Default(							// must be valid aws regions supported
-		"namespace.ns_id", "").Default(									// from aws cloud map namespace - must be pre-created first
-		"namespace.ns_name", "").Default(									// from aws cloud map namespace - must be pre-created first
-		"service.sv_id", "").Default(										// from aws cloud map or leave blank for auto creation
-		"service.sv_name", "").Default(									// from aws cloud map or leave blank for auto creation
-		"service_auto_create.sac_dns_ttl", 90).Default(					// value to use for auto service creation, in seconds
-		"service_auto_create.sac_dns_type", "srv").Default(				// value to use for auto service creation, srv or a
-		"service_auto_create.sac_dns_routing", "multivalue").Default(		// value to use for auto service creation, multivalue or weighted
-		"service_auto_create.sac_health_custom", true).Default(			// value to use for auto service creation, true or false
-		"service_auto_create.sac_health_failthreshold", 1).Default(		// value to use for auto service creation, uint
-		"service_auto_create.sac_health_pubdns_type", "").Default(		// value to use for auto service creation, http, https, or tcp
-		"service_auto_create.sac_health_pubdns_path", "").Default(		// value to use for auto service creation, http or https health check resource path
-		"instance.instance_port", 0).Default(								// instance launch tcp port, leave 0 as dynamic
-		"instance.instance_version", "v1.0.0").Default(					// instance classification, vx.x.x style
-		"instance.instance_prefix", "ms-").Default(						// instance id creation prefix, leave blank if no prefix
-		"instance.initial_unhealthy", false).Default(						// instance launch initial health state when registered, true or false
-		"instance.instance_id", "").Default(								// instance id currently launched
-		"instance.sd_timeout", 5).Default(								// service discovery actions timeout seconds  (for cloudmap register, health update, deregister)
-		"instance.internal_health_frequency", 5).Default(					// instance internal grpc health check frequency in seconds
-		"instance.auto_deregister_prior", true).Default(					// automatically deregister prior service discovery registration if exists during launch, default = true
-		"grpc.connection_timeout", 15).Default(							// grpc connection attempt time out in seconds, 0 for default of 120 seconds
-		"grpc.server_cert_file", "").Default(								// grpc tls setup, path to cert pem file
-		"grpc.server_key_file", "").Default(								// grpc tls setup, path to key pem file
-		"grpc.client_ca_cert_files", "").Default(							// for mTLS setup, one or more client CA cert path to pem file, multiple files separated by comma
-		"grpc.keepalive_min_wait", 0).Default(							// grpc keep-alive enforcement policy, minimum seconds before client may send keepalive, 0 for default 300 seconds
-		"grpc.keepalive_permit_without_stream", false).Default(			// grpc keep-alive enforcement policy, allow client to keepalive if no stream, false is default
-		"grpc.keepalive_max_conn_idle", 0).Default(						// grpc keep-alive option, max seconds before idle connect is closed, 0 for default of infinity
-		"grpc.keepalive_max_conn_age", 0).Default(						// grpc keep-alive option, max seconds a connection may exist before closed, 0 for default of infinity
-		"grpc.keepalive_max_conn_age_grace", 0).Default(					// grpc keep-alive option, max seconds added to max_conn_age to forcefully close, 0 for default of infinity
-		"grpc.keepalive_inactive_ping_time_trigger", 0).Default(			// grpc keep-alive option, max seconds of no activity before server pings client, 0 for default of 2 hours
-		"grpc.keepalive_inactive_ping_timeout", 0).Default( 				// grpc keep-alive option, max seconds of timeout during server to client ping, where no repsonse closes connection, 0 for default of 20 seconds
-		"grpc.read_buffer_size", 0).Default(								// 0 for default 32 kb = 1024 * 32
-		"grpc.write_buffer_size", 0).Default(								// 0 for default 32 kb = 1024 * 32
-		"grpc.max_recv_msg_size", 0).Default(								// 0 for default 4 mb = 1024 * 1024 * 4, maximum bytes allowed to receive from client
-		"grpc.max_send_msg_size", 0).Default(								// 0 for default maxInt32, maximum bytes allowed to send to client
-		"grpc.max_concurrent_streams", 0).Default(						// defines maximum concurrent streams server will handle, 0 for http2 transport default value of 250
-		"grpc.num_stream_workers", 0).Default(							// defines max of stream workers rather than new goroutine per stream, 0 for default of new per routine, if > 0, match to cpu core count for most performant
-		"grpc.rate_limit_per_second", 0).Default(							// indicates rate limit per second, 0 disables rate limit
-		"grpc.use_sqs", true).Default(									// indicates if sqs is used if applicable, default is true
-		"grpc.use_sns", true)												// indicates if sns is used if applicable, default is true
+		"target.app_name", "connector.service").Default(									// required, app being created, be service specific
+		"target.region", "us-east-1").Default(											// must be valid aws regions supported
+		"namespace.ns_id", "").Default(													// from aws cloud map namespace - must be pre-created first
+		"namespace.ns_name", "").Default(													// from aws cloud map namespace - must be pre-created first
+		"service.sv_id", "").Default(														// from aws cloud map or leave blank for auto creation
+		"service.sv_name", "").Default(													// from aws cloud map or leave blank for auto creation
+		"service.sv_discovery_use_sqs_sns", false).Default(								// indicate if this service will use sqs and sns for service discovery, default = false
+		"service.sv_monitor_use_sqs_sns", false).Default(									// indicate if this service will use sqs and sns for service monitor, default = false
+		"service.sv_tracer_use_sqs_sns", false).Default(									// indicate if this service will use sqs and sns for service tracer, default = false
+		"service.sv_logger_use_sqs_sns", false).Default(									// indicate if this service will use sqs and sns for service logger, default = false
+		"queues.sqs_discovery_queue_name_prefix", "service-discovery-data-").Default(		// sqs queue name prefix used for service discovery data queuing, if name is not provided, default = service-discovery-data-
+		"queues.sqs_discovery_message_retention_seconds", 300).Default(					// sqs service discovery queue's messages retention seconds, default = 300 seconds (5 Minutes)
+		"queues.sqs_discovery_queue_url", "").Default(									// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service discovery data queue used by this service (auto set by service upon creation)
+		"queues.sqs_discovery_queue_arn", "").Default(									// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service discovery data queue used by this service (auto set by service upon creation)
+		"queues.sqs_monitor_queue_name_prefix", "service-monitor-data-").Default(			// sqs queue name prefix used for service monitoring data queuing, if name is not provided, default = service-monitor-data-
+		"queues.sqs_monitor_message_retention_seconds", 14400).Default(					// sqs service monitor queue's messages retention seconds, default = 14,400 seconds (4 Hours)
+		"queues.sqs_monitor_queue_url", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service monitor data queue used by this service (auto set by service upon creation)
+		"queues.sqs_monitor_queue_arn", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service monitor data queue used by this service (auto set by service upon creation)
+		"queues.sqs_tracer_queue_name_prefix", "service-tracer-data-").Default(			// sqs queue name prefix used for service tracing data queuing, if name is not provided, default = service-tracer-data-
+		"queues.sqs_tracer_message_retention_seconds", 14400).Default(					// sqs service tracer queue's messages retention seconds, default = 14,400 seconds (4 Hours)
+		"queues.sqs_tracer_queue_url", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service tracer data queue used by this service (auto set by service upon creation)
+		"queues.sqs_tracer_queue_arn", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service tracer data queue used by this service (auto set by service upon creation)
+		"queues.sqs_logger_queue_name_prefix", "service-logger-data-").Default(			// sqs queue name prefix used for service logging data queuing, if name is not provided, default = service-logger-data-
+		"queues.sqs_logger_message_retention_seconds", 14400).Default(					// sqs service logger queue's messages retention seconds, default = 14,400 seconds (4 Hours)
+		"queues.sqs_logger_queue_url", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service logger data queue used by this service (auto set by service upon creation)
+		"queues.sqs_logger_queue_arn", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service logger data queue used by this service (auto set by service upon creation)
+		"topics.sns_discovery_topic_name_prefix", "service-discovery-notify-").Default(	// sns topic name prefix used for discovery data notification, if name is not provided, default = service-discovery-notify-
+		"topics.sns_discovery_topic_arn", "").Default(									// sns topic's topicArn as generated by aws sns for the corresponding service discovery topic used by this service (auto set by service upon creation)
+		"topics.sns_discovery_subscription_arn", "").Default(								// sns topic subscription arn as generated by aws during subscribe event
+		"topics.sns_monitor_topic_name_prefix", "service-monitor-notify-").Default(		// sns topic name prefix used for monitor data notification, if name is not provided, default = service-monitor-notify-
+		"topics.sns_monitor_topic_arn", "").Default(										// sns topic's topicArn as generated by aws sns for the corresponding service monitor topic used by this service (auto set by service upon creation)
+		"topics.sns_monitor_subscription_arn", "").Default(								// sns topic subscription arn as generated by aws during subscribe event
+		"topics.sns_tracer_topic_name_prefix", "service-tracer-notify-").Default(			// sns topic name prefix used for tracer data notification, if name is not provided, default = service-tracer-notify-
+		"topics.sns_tracer_topic_arn", "").Default( 										// sns topic's topicArn as generated by aws sns for the corresponding service tracer topic used by this service (auto set by service upon creation)
+		"topics.sns_tracer_subscription_arn", "").Default(							 	// sns topic subscription arn as generated by aws during subscribe event
+		"topics.sns_logger_topic_name_prefix", "service-logger-notify-").Default( 		// sns topic name prefix used for logger data notification, if name is not provided, default = service-logger-notify-
+		"topics.sns_logger_topic_arn", "").Default( 										// sns topic's topicArn as generated by aws sns for the corresponding service logger topic used by this service (auto set by service upon creation)
+		"topics.sns_logger_subscription_arn", "").Default( 								// sns topic subscription arn as generated by aws during subscribe event
+		"service_auto_create.sac_dns_ttl", 90).Default(									// value to use for auto service creation, in seconds
+		"service_auto_create.sac_dns_type", "srv").Default(								// value to use for auto service creation, srv or a
+		"service_auto_create.sac_dns_routing", "multivalue").Default(						// value to use for auto service creation, multivalue or weighted
+		"service_auto_create.sac_health_custom", true).Default(							// value to use for auto service creation, true or false
+		"service_auto_create.sac_health_failthreshold", 1).Default(						// value to use for auto service creation, uint
+		"service_auto_create.sac_health_pubdns_type", "").Default(						// value to use for auto service creation, http, https, or tcp
+		"service_auto_create.sac_health_pubdns_path", "").Default(						// value to use for auto service creation, http or https health check resource path
+		"instance.instance_port", 0).Default(												// instance launch tcp port, leave 0 as dynamic
+		"instance.instance_version", "v1.0.0").Default(									// instance classification, vx.x.x style
+		"instance.instance_prefix", "ms-").Default(										// instance id creation prefix, leave blank if no prefix
+		"instance.initial_unhealthy", false).Default(										// instance launch initial health state when registered, true or false
+		"instance.instance_id", "").Default(												// instance id currently launched
+		"instance.sd_timeout", 5).Default(												// service discovery actions timeout seconds  (for cloudmap register, health update, deregister)
+		"instance.internal_health_frequency", 5).Default(									// instance internal grpc health check frequency in seconds
+		"instance.auto_deregister_prior", true).Default(									// automatically deregister prior service discovery registration if exists during launch, default = true
+		"grpc.connection_timeout", 15).Default(											// grpc connection attempt time out in seconds, 0 for default of 120 seconds
+		"grpc.server_cert_file", "").Default(												// grpc tls setup, path to cert pem file
+		"grpc.server_key_file", "").Default(												// grpc tls setup, path to key pem file
+		"grpc.client_ca_cert_files", "").Default(											// for mTLS setup, one or more client CA cert path to pem file, multiple files separated by comma
+		"grpc.keepalive_min_wait", 0).Default(											// grpc keep-alive enforcement policy, minimum seconds before client may send keepalive, 0 for default 300 seconds
+		"grpc.keepalive_permit_without_stream", false).Default(							// grpc keep-alive enforcement policy, allow client to keepalive if no stream, false is default
+		"grpc.keepalive_max_conn_idle", 0).Default(										// grpc keep-alive option, max seconds before idle connect is closed, 0 for default of infinity
+		"grpc.keepalive_max_conn_age", 0).Default(										// grpc keep-alive option, max seconds a connection may exist before closed, 0 for default of infinity
+		"grpc.keepalive_max_conn_age_grace", 0).Default(									// grpc keep-alive option, max seconds added to max_conn_age to forcefully close, 0 for default of infinity
+		"grpc.keepalive_inactive_ping_time_trigger", 0).Default(							// grpc keep-alive option, max seconds of no activity before server pings client, 0 for default of 2 hours
+		"grpc.keepalive_inactive_ping_timeout", 0).Default( 								// grpc keep-alive option, max seconds of timeout during server to client ping, where no repsonse closes connection, 0 for default of 20 seconds
+		"grpc.read_buffer_size", 0).Default(												// 0 for default 32 kb = 1024 * 32
+		"grpc.write_buffer_size", 0).Default(												// 0 for default 32 kb = 1024 * 32
+		"grpc.max_recv_msg_size", 0).Default(												// 0 for default 4 mb = 1024 * 1024 * 4, maximum bytes allowed to receive from client
+		"grpc.max_send_msg_size", 0).Default(												// 0 for default maxInt32, maximum bytes allowed to send to client
+		"grpc.max_concurrent_streams", 0).Default(										// defines maximum concurrent streams server will handle, 0 for http2 transport default value of 250
+		"grpc.num_stream_workers", 0).Default(											// defines max of stream workers rather than new goroutine per stream, 0 for default of new per routine, if > 0, match to cpu core count for most performant
+		"grpc.rate_limit_per_second", 0)													// indicates rate limit per second, 0 disables rate limit
 
 	if ok, err := c._v.Init(); err != nil {
 		return err

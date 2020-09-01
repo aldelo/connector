@@ -14,8 +14,6 @@ grpc:
   read_buffer_size: 0
   use_health_check: true
   use_load_balancer: true
-  use_sns: true
-  use_sqs: true
   user_agent: Example-Server
   write_buffer_size: 0
   server_ca_cert_files: x509/ca_cert.pem
@@ -29,8 +27,21 @@ target:
   namespace_name: aldelo.internal
   region: us-east-1
   sd_endpoint_cache_expires: 300
-  sd_endpoint_probe_frequency: 30
   sd_instance_max_result: 100
   sd_timeout: 5
   service_discovery_type: api
   service_name: msautoservice
+queues:
+  sqs_discovery_queue_url:
+  sqs_monitor_queue_url:
+  sqs_tracer_queue_url:
+  sqs_logger_queue_url:
+topics:
+  sns_discovery_topic_arn:
+  sns_discovery_subscription_arn:
+  sns_monitor_topic_arn:
+  sns_monitor_subscription_arn:
+  sns_tracer_topic_arn:
+  sns_tracer_subscription_arn:
+  sns_logger_topic_arn:
+  sns_logger_subscription_arn:

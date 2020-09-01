@@ -109,6 +109,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string) (liv
 			if v.CacheExpire.After(time.Now()){
 				// not yet expired
 				if util.LenTrim(version) > 0 {
+					// has version, check to match version
 					if strings.ToLower(v.Version) != strings.ToLower(version) {
 						log.Println("Get Live Service Endpoints: (Version Mismatch) " + v.Version + " vs " + version)
 						continue
