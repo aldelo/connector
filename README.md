@@ -81,16 +81,17 @@ See /example/cmd/client for a working gRPC client setup to consume the gRPC serv
 # Pre-Requisites
 #### 1) Install ***protoc***
 - In Terminal: (Mac)
-    - brew install protobuf
+    - ~ brew install protobuf
 #### 2) Install ***protoc-gen-go***
 - In Terminal:
-    - go install google.golang.org/protobuf/cmd/protoc-gen-go
+    - ~ go install google.golang.org/protobuf/cmd/protoc-gen-go
     - More Info: https://developers.google.com/protocol-buffers/docs/reference/go-generated
 #### 3) Install ***protoc-gen-go-grpc***
 - install ***go-grpc_out***
     - Info: https://github.com/grpc/grpc-go/tree/master/cmd/protoc-gen-go-grpc
-    - git clone -b v1.31.0 https://github.com/grpc/grpc-go
-    - ( cd ../../cmd/protoc-gen-go-grpc && go install . )
+- In Terminal:
+    - ~ git clone -b v1.31.0 https://github.com/grpc/grpc-go
+    - ~ ( cd ../../cmd/protoc-gen-go-grpc && go install . )
     - Note: v1.31.0 = replace with latest version
 #### 4) Info on ***proto3***
 - https://developers.google.com/protocol-buffers/docs/gotutorial
@@ -99,6 +100,8 @@ See /example/cmd/client for a working gRPC client setup to consume the gRPC serv
     - for example, "github.com/aldelo/connector/example/proto/test"
         - where "test" is the folder that contains proto files
 #### 5) Executing ***protoc***
-- protoc --go_out=$GOPATH/src --go-grpc_out=$GOPATH/src ./*.proto
+- In Terminal:
+    - go to the folder containing .proto files
+    - ~ protoc --go_out=$GOPATH/src --go-grpc_out=$GOPATH/src ./*.proto
     
 
