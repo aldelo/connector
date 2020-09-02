@@ -31,8 +31,6 @@ import (
 	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/connector/adapters/loadbalancer"
 	"github.com/aldelo/connector/adapters/metadata"
-	"github.com/aldelo/connector/adapters/notification"
-	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"google.golang.org/grpc"
@@ -322,6 +320,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	log.Println("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
 
 	// setup sqs and sns if configured
+	/*
 	if c._config.Grpc.UseSQS {
 		c._sqs, _ = queue.NewQueueAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil)
 	}
@@ -329,6 +328,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	if c._config.Grpc.UseSNS {
 		c._sns, _ = notification.NewNotificationAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil)
 	}
+	 */
 
 	// circuit breakers prep
 	c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}

@@ -27,8 +27,6 @@ import (
 	"github.com/aldelo/common/wrapper/sns"
 	"github.com/aldelo/common/wrapper/sqs"
 	"github.com/aldelo/connector/adapters/health"
-	"github.com/aldelo/connector/adapters/notification"
-	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/ratelimiter"
 	"github.com/aldelo/connector/adapters/ratelimiter/ratelimitplugin"
 	"github.com/aldelo/connector/adapters/registry"
@@ -339,6 +337,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		s._localAddress = fmt.Sprintf("%s:%d", ip, port)
 
 		// setup sqs and sns if configured
+		/*
 		if s._config.Grpc.UseSQS {
 			s._sqs, _ = queue.NewQueueAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil)
 		}
@@ -346,6 +345,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		if s._config.Grpc.UseSNS {
 			s._sns, _ = notification.NewNotificationAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil)
 		}
+		 */
 
 		err = nil
 		return
