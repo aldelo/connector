@@ -21,8 +21,12 @@ import (
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
+	ginw "github.com/aldelo/common/wrapper/gin"
+	"github.com/aldelo/common/wrapper/gin/ginbindtype"
+	"github.com/aldelo/common/wrapper/gin/ginhttpmethod"
 	"github.com/aldelo/connector/adapters/metadata"
 	testpb "github.com/aldelo/connector/example/proto/test"
+	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"log"
@@ -191,5 +195,29 @@ func TestDNSLookup(t *testing.T) {
 
 	for _, ip := range ips {
 		log.Println("IP = " + ip.String())
+	}
+}
+
+func TestGinServer(t *testing.T) {
+	g := ginw.NewServer()
+	g.Name = "Example"
+	g.Port = 8881
+	g.Routes = []*ginw.Route{
+		{
+			RelativePath: "/hello",
+			Method: ginhttpmethod.GET,
+			Binding: ginbindtype.UNKNOWN,
+			Handler: func(c *gin.Context, bindingInput interface{}) {
+				c.String(200, "What's up")
+			},
+		},
+	}
+
+	if err := g.RunServer(); err != nil {
+		log.Println("Error: " + err.Error())
+		t.Fatal("Fail")
+	} else {
+		log.Println("Run OK")
+		t.Log("OK")
 	}
 }
