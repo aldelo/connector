@@ -724,7 +724,7 @@ func (c *config) Read() error {
 		"grpc.keepalive_max_conn_age", 0).Default(										// grpc keep-alive option, max seconds a connection may exist before closed, 0 for default of infinity
 		"grpc.keepalive_max_conn_age_grace", 0).Default(									// grpc keep-alive option, max seconds added to max_conn_age to forcefully close, 0 for default of infinity
 		"grpc.keepalive_inactive_ping_time_trigger", 0).Default(							// grpc keep-alive option, max seconds of no activity before server pings client, 0 for default of 2 hours
-		"grpc.keepalive_inactive_ping_timeout", 0).Default( 								// grpc keep-alive option, max seconds of timeout during server to client ping, where no repsonse closes connection, 0 for default of 20 seconds
+		"grpc.keepalive_inactive_ping_timeout", 0).Default( 								// grpc keep-alive option, max seconds of timeout during server to client ping, where no response closes connection, 0 for default of 20 seconds
 		"grpc.read_buffer_size", 0).Default(												// 0 for default 32 kb = 1024 * 32
 		"grpc.write_buffer_size", 0).Default(												// 0 for default 32 kb = 1024 * 32
 		"grpc.max_recv_msg_size", 0).Default(												// 0 for default 4 mb = 1024 * 1024 * 4, maximum bytes allowed to receive from client

@@ -108,7 +108,7 @@ func TestService_Serve(t *testing.T) {
 func TestConfig(t *testing.T) {
 	cfg := &config{
 		AppName: "test-connector-service",
-		ConfigFileName: "service",
+		ConfigFileName: "newtest",
 	}
 
 	if err := cfg.Read(); err != nil {
