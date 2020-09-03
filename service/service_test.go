@@ -199,16 +199,25 @@ func TestDNSLookup(t *testing.T) {
 }
 
 func TestGinServer(t *testing.T) {
-	g := ginw.NewServer()
-	g.Name = "Example"
-	g.Port = 8881
-	g.Routes = []*ginw.Route{
-		{
-			RelativePath: "/hello",
-			Method: ginhttpmethod.GET,
-			Binding: ginbindtype.UNKNOWN,
-			Handler: func(c *gin.Context, bindingInput interface{}) {
-				c.String(200, "What's up")
+	g := ginw.NewServer("Example", 8080, false)
+
+	g.Routes = map[string][]*ginw.RouteDefinition{
+		"*": {
+			{
+				Routes: []*ginw.Route{
+					{
+						RelativePath: "/hello",
+						Method: ginhttpmethod.GET,
+						Binding: ginbindtype.UNKNOWN,
+						Handler: func(c *gin.Context, bindingInput interface{}) {
+							c.String(200, "What's up")
+						},
+					},
+				},
+				MaxLimitConfig: util.IntPtr(10),
+				PerClientIpQpsConfig: util.IntPtr(1),
+				PerClientIpBurstConfig: util.IntPtr(1),
+				PerClientIpLimiterTTLConfig: util.DurationPtr(time.Hour),
 			},
 		},
 	}
