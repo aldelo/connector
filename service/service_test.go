@@ -23,6 +23,7 @@ import (
 	"github.com/aldelo/common/wrapper/cloudmap"
 	ginw "github.com/aldelo/common/wrapper/gin"
 	"github.com/aldelo/common/wrapper/gin/ginbindtype"
+	"github.com/aldelo/common/wrapper/gin/gingzipcompression"
 	"github.com/aldelo/common/wrapper/gin/ginhttpmethod"
 	"github.com/aldelo/connector/adapters/metadata"
 	testpb "github.com/aldelo/connector/example/proto/test"
@@ -199,7 +200,18 @@ func TestDNSLookup(t *testing.T) {
 }
 
 func TestGinServer(t *testing.T) {
-	g := ginw.NewServer("Example", 8080, false)
+	// z := ginw.NewGinZapMiddleware("Example", true)
+
+	g := ginw.NewServer("Example", 8080, true, nil)
+
+	g.SessionMiddleware = &ginw.SessionConfig{
+		SecretKey: "Secret",
+		SessionNames: []string{"MySession"},
+	}
+
+	g.CsrfMiddleware = &ginw.CsrfConfig{
+		Secret: "Secrete",
+	}
 
 	g.Routes = map[string][]*ginw.RouteDefinition{
 		"*": {
@@ -214,10 +226,15 @@ func TestGinServer(t *testing.T) {
 						},
 					},
 				},
-				MaxLimitConfig: util.IntPtr(10),
-				PerClientIpQpsConfig: util.IntPtr(1),
-				PerClientIpBurstConfig: util.IntPtr(1),
-				PerClientIpLimiterTTLConfig: util.DurationPtr(time.Hour),
+				MaxLimitMiddleware: util.IntPtr(10),
+				PerClientQpsMiddleware: &ginw.PerClientQps{
+					Qps: 100,
+					Burst: 100,
+					TTL: time.Hour,
+				},
+				GZipMiddleware: &ginw.GZipConfig{
+					Compression: gingzipcompression.BestCompression,
+				},
 			},
 		},
 	}
