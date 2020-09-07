@@ -69,7 +69,7 @@ example/cmd/grpcserver/grpcserver
 example/cmd/grpcclient/ExampleClient-internal-err.log
 example/cmd/grpcclient/ExampleClient.log
 example/cmd/grpcclient/grpcclient
-
+example/cmd/webserver/webserver
 
 # CMake
 cmake-build-*/
