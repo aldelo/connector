@@ -1,0 +1,130 @@
+web_server:
+  # required, web server descriptive name, default = webserver
+  ws_name: HttpWebServer
+  # optional, true or false, indicates if web server running in debug mode, default = false
+  ws_debug: false
+  # required, web server tcp port, default = 8080
+  ws_port: 8080
+  # optional, web server tls server certificate pem file path, default = blank
+  ws_server_pem: ""
+  # optional, web server tls server certificate key file path, default = blank
+  ws_server_key: ""
+recovery:
+  # optional, true or false, indicates if web server uses custom recovery logic, default = false
+  custom_recovery: false
+logging:
+  # optional, true or false, indicates if web server uses custom logging logic, default = false
+  custom_logging: false
+  # optional, true or false, indicates if custom logging is used, if the logging is to console rather than disk, default = false
+  custom_logging_to_console: false
+session:
+  # optional, session management secret key, default = blank (blank = session not used)
+  session_secret: SessionSecretText
+  # optional, list of session names, default = blank list
+  session_names:
+    - Session
+  # optional, redis host and port used for session, default = blank
+  redis_host: ""
+  # optional, session redis host max idle connections, default = 10
+  redis_max_idle_connections: 10
+csrf:
+  # optional, csrf secret key, default = blank (blank = csrf not used)
+  csrf_secret: CsrfSecretText
+jwt_auth:
+  # optional, jwt auth realm name, default = blank (blank = jwt auth not used)
+  jwt_realm: ""
+  # optional, jwt auth identity key name, default = id
+  jwt_identity_key: id
+  # optional, jwt auth signing key secret, default = blank
+  jwt_sign_secret: JwtSecretText
+  # optional, jwt auth signing algorithm, values: (HS256, HS384, HS512, RS256, RS384 or RS512) default = H256
+  jwt_sign_algorithm: H256
+  # optional, jwt auth aes private key file path, default = blank
+  jwt_private_key: ""
+  # optional, jwt auth aes public key file path, default = blank
+  jwt_public_key: ""
+  # optional, jwt auth login authentication data binding type, (json, header, query, uri, protobuf, yaml, unknown), default = json
+  jwt_login_data_binding: header
+  # optional, jwt auth token valid minutes, default = 15
+  jwt_token_valid_minutes: 15
+  # optional, jwt auth token refresh valid minutes, default = 1440 (24 hours)
+  jwt_refresh_valid_minutes: 1440
+  # optional, jwt auth send cookie, default = false
+  jwt_send_cookie: false
+  # optional, jwt auth use secured cookie, default = true
+  jwt_secure_cookie: true
+  # optional, jwt auth cookie server side http only, prevents edit at client, default = true
+  jwt_cookie_http_only: true
+  # optional, jwt auth cookie maximum age in days, default = 14 days
+  jwt_cookie_max_age_days: 14
+  # optional, jwt auth cookie domain name, default = blank
+  jwt_cookie_domain: ""
+  # optional, jwt auth cookie name, default = blank
+  jwt_cookie_name: ""
+  # optional, jwt auth cookie same site type, values: (default, lax, strict, none) default = default
+  jwt_cookie_same_site: ""
+  # optional, jwt auth login route path, default = /login
+  jwt_login_route_path: /login
+  # optional, jwt auth logout route path, default = /logout
+  jwt_logout_route_path: /logout
+  # optional, jwt auth refresh token route path, default = /refreshtoken
+  jwt_refresh_token_route_path: /refreshtoken
+  # optional, token lookup is a string in the form of <source>:<name> that is used to extract token from the request,
+  #    - default = "header:Authorization",
+  #    - other values:
+  #         - "header:<name>", "query:<name>", "cookie:<name>", "param:<name>"
+  #    - other examples:
+  #         - "header: Authorization, query: token, cookie: jwt"
+  #         - "query:token"
+  #         - "cookie:token"
+  jwt_token_lookup: header:Authorization
+  # optional, token head name is a string in the header, default = Bearer
+  jwt_token_head_name: Bearer
+  # optional, true or false, disables abort() of context, default = false
+  jwt_disable_abort: false
+  # optional, true or false, allow return authorization header for every request, default = false
+  jwt_send_authorization: false
+html_templates:
+  # optional, html templates base directory, default = blank
+  template_base_dir: ""
+  # optional, html templates definitions list, default = empty list
+  template_definitions:
+    - layout_path: ""
+      page_path: ""
+    - layout_path: ""
+      page_path: ""
+routes:
+  # optional, web server routes level middleware configurations, default = empty list
+  - route_group_name: base                    # base = web server root folder; other values = web server route group name
+    jwt_auth_secured: false                   # indicates if this route group is jwt auth secured (assume jwt auth is setup)
+    max_concurrent_request_limit: 100         # max hit rate limit, 0 = turn off
+    per_client_ip_qps: 100                    # per client ip qps rate limit, 0 = turn off
+    per_client_ip_burst: 100
+    per_client_ip_ttl_minutes: 60
+    gzip_compression_type: ""                 # gzip compression services, values: (default, best-speed, best-compression) blank = turn off
+    gzip_exclude_extensions:
+      - ""
+      - ""
+    gzip_exclude_paths:
+      - ""
+      - ""
+    gzip_exclude_paths_regex:
+      - ""
+      - ""
+    cors_allow_all_origins: true              # cors protection services, true = turn off
+    cors_allow_origins:                       # list of cors origins allowed
+      - ""
+      - ""
+    cors_allow_methods:                       # list of cors methods allowed
+      - ""
+      - ""
+    cors_allow_headers:                       # list of cors headers allowed
+      - ""
+      - ""
+    cors_allow_credentials: true
+    cors_allow_wild_card: true
+    cors_allow_browser_extensions: true
+    cors_allow_web_sockets: true
+    cors_allow_files: true
+    cors_max_age_minutes: 0
+

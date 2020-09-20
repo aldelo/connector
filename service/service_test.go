@@ -202,7 +202,7 @@ func TestDNSLookup(t *testing.T) {
 func TestGinServer(t *testing.T) {
 	// z := ginw.NewGinZapMiddleware("Example", true)
 
-	g := ginw.NewServer("Example", 8080, true, nil)
+	g := ginw.NewServer("Example", 8080, true, false, nil)
 
 	g.SessionMiddleware = &ginw.SessionConfig{
 		SecretKey: "Secret",

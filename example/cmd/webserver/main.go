@@ -18,40 +18,56 @@ package main
 
 import (
 	util "github.com/aldelo/common"
+	ws "github.com/aldelo/connector/webserver"
 	ginw "github.com/aldelo/common/wrapper/gin"
 	"github.com/aldelo/common/wrapper/gin/ginbindtype"
 	"github.com/aldelo/common/wrapper/gin/ginhttpmethod"
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"log"
 	"time"
+	"fmt"
 )
 
+type SimpleData struct {
+	Line1 string		`form:"line1" json:"line1"`	// binding:"required"
+	Line2 string		`form:"line2" json:"line2"`	// binding:"required"
+}
+
 func main() {
-	// z := ginw.NewGinZapMiddleware("Example", true)
-	g := ginw.NewServer("Example", 8080, false, true)
+	g := ws.NewWebServer("Example", "server", "")
 
-	g.SessionMiddleware = &ginw.SessionConfig{
-		SecretKey: "Secret",
-		SessionNames: []string{"MySession"},
+	g.LoginRequestDataPtr = &ginw.UserLogin{}
+
+	g.AuthenticateHandler = func(loginRequestDataPtr interface{}) (loggedInCredentialPtr interface{}) {
+		if lg, ok := loginRequestDataPtr.(*ginw.UserLogin); !ok {
+			return nil
+		} else {
+			if lg.Username == "Happy" && lg.Password == "Puppy" {
+				return &ginw.UserInfo{
+					UserName: "Happy",
+					FirstName: "Super Happy",
+					LastName: "Very Happy",
+				}
+			} else {
+				return nil
+			}
+		}
 	}
 
-	g.CsrfMiddleware = &ginw.CsrfConfig{
-		Secret: "Secrete",
-	}
-	
-	g.HtmlTemplateRenderer = &ginw.GinTemplate{
-		TemplateBaseDir: "./templates",
-		Templates: []ginw.TemplateDefintion{
-			{
-				LayoutPath: "/layouts/*.html",
-				PagePath: "/*.html",
-			},
-		},
+	g.AddClaimsHandler = func(loggedInCredentialPtr interface{}) (identityKeyValue string, claims map[string]interface{}) {
+		return "Happy", map[string]interface{}{
+			"productcode": "xyz",
+			"productage": "old",
+		}
 	}
 
-	g.Routes = map[string][]*ginw.RouteDefinition{
+	g.AuthorizerHandler = func(loggedInCredentialPtr interface{}, c *gin.Context) bool {
+		return true
+	}
+
+	g.Routes = map[string]*ginw.RouteDefinition{
 		"*": {
-			{
 				Routes: []*ginw.Route{
 					{
 						RelativePath: "/hello",
@@ -65,9 +81,12 @@ func main() {
 						RelativePath: "/",
 						Method: ginhttpmethod.GET,
 						Binding: ginbindtype.UNKNOWN,
+						BindingInputPtr: &SimpleData{},
 						Handler: func(c *gin.Context, bindingInput interface{}) {
+							o := bindingInput.(*SimpleData)
+
 							c.HTML(200, "index.html", gin.H{
-								"title": "Html Test",
+								"title": o.Line1 + " // " + o.Line2,
 							})
 						},
 					},
@@ -81,6 +100,17 @@ func main() {
 							})
 						},
 					},
+					{
+						RelativePath: "/xyz",
+						Method: ginhttpmethod.GET,
+						Binding: ginbindtype.UNKNOWN,
+						Handler: func(c *gin.Context, bindingInput interface{}) {
+							c.HTML(200, "productx.html", gin.H{
+							})
+						},
+					},
+				},
+				CorsMiddleware: &cors.Config{
 				},
 				MaxLimitMiddleware: util.IntPtr(10),
 				PerClientQpsMiddleware: &ginw.PerClientQps{
@@ -91,11 +121,31 @@ func main() {
 				//GZipMiddleware: &ginw.GZipConfig{
 				//	Compression: gingzipcompression.BestCompression,
 				//},
+				UseAuthMiddleware: false,
 			},
-		},
-	}
+		"auth":	{
+				Routes: []*ginw.Route{
+					{
+						RelativePath: "/secured",
+						Method:       ginhttpmethod.GET,
+						Binding:      ginbindtype.UNKNOWN,
+						Handler: func(c *gin.Context, bindingInput interface{}) {
+							claims := g.ExtractJwtClaims(c)
+							str := ""
 
-	if err := g.RunServer(); err != nil {
+							for k, v := range claims {
+								str += fmt.Sprintf("%s:%v; ", k, v)
+							}
+
+							c.String(200, "Secured Hello: " + str)
+						},
+					},
+				},
+				UseAuthMiddleware: true,
+			},
+		}
+
+	if err := g.Serve(); err != nil {
 		log.Println("Error: " + err.Error())
 	} else {
 		log.Println("Run OK")
