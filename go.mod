@@ -3,7 +3,7 @@ module github.com/aldelo/connector
 go 1.15
 
 require (
-	github.com/aldelo/common v1.0.9
+	github.com/aldelo/common v1.1.0
 	github.com/aws/aws-sdk-go v1.34.8
 	github.com/gin-contrib/cors v1.3.1
 	github.com/gin-gonic/gin v1.6.3
@@ -12,3 +12,5 @@ require (
 	google.golang.org/grpc v1.31.0
 	google.golang.org/protobuf v1.25.0
 )
+
+//replace github.com/aldelo/common => ../common

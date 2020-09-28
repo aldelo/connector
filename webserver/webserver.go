@@ -155,6 +155,15 @@ func (w *WebServer) ExtractJwtClaims(c *gin.Context) map[string]interface{} {
 	}
 }
 
+// Port returns the web server port configured
+func (w *WebServer) Port() uint {
+	if w._config != nil {
+		return w._config.WebServer.Port
+	} else {
+		return 0
+	}
+}
+
 // Serve will setup and start the web server
 func (w *WebServer) Serve() error {
 	if w._config == nil {
@@ -381,9 +390,6 @@ func (w *WebServer) setupWebServer() error {
 		if len(w._config.Routes) > 0 {
 			for _, d := range w._config.Routes {
 				key := strings.ToLower(d.RouteGroupName)
-				if key == "base" {
-					key = "*"
-				}
 
 				if rd, ok := w.Routes[key]; ok {
 					rd.UseAuthMiddleware = d.JwtAuthSecured

@@ -130,6 +130,12 @@ func startServiceHandler(port int) {
 		},
 	}
 
+	// set http web server
+	grpcServer.WebServerConfig = &service.WebServerConfig{
+		AppName: grpcServer.AppName,
+		ConfigFileName: "webserver",
+	}
+
 	//
 	// start grpc service server
 	//

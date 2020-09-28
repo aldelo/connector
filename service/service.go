@@ -24,13 +24,19 @@ import (
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/common/wrapper/cloudmap/sdhealthchecktype"
+	ginw "github.com/aldelo/common/wrapper/gin"
+	"github.com/aldelo/common/wrapper/gin/ginhttpmethod"
 	"github.com/aldelo/common/wrapper/sns"
 	"github.com/aldelo/common/wrapper/sqs"
 	"github.com/aldelo/connector/adapters/health"
+	"github.com/aldelo/connector/adapters/notification"
+	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/ratelimiter"
 	"github.com/aldelo/connector/adapters/ratelimiter/ratelimitplugin"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
+	ws "github.com/aldelo/connector/webserver"
+	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip"
@@ -60,6 +66,9 @@ type Service struct {
 	AppName string
 	ConfigFileName string
 	CustomConfigPath string
+
+	// web server config
+	WebServerConfig *WebServerConfig
 
 	// register one or more service handlers
 	// example: type AnswerServiceImpl struct {
@@ -336,17 +345,169 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		port = util.StrToUint(util.SplitString(lis.Addr().String(), ":", -1))
 		s._localAddress = fmt.Sprintf("%s:%d", ip, port)
 
-		// setup sqs and sns if configured
-		/*
-		if s._config.Grpc.UseSQS {
-			s._sqs, _ = queue.NewQueueAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil)
+		//
+		// setup sqs and sns if needed
+		//
+		if s._config.Service.DiscoveryUseSqsSns || s._config.Service.LoggerUseSqsSns || s._config.Service.MonitorUseSqsSns || s._config.Service.TracerUseSqsSns {
+			//
+			// establish sqs and sns adapters
+			//
+			if s._sqs, err = queue.NewQueueAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil); err != nil {
+				return nil, "", 0, fmt.Errorf("Get SQS Queue Adapter Failed: %s", err)
+			}
+
+			if s._sns, err = notification.NewNotificationAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil); err != nil {
+				return nil, "", 0, fmt.Errorf("Get SNS Notification Adapter Failed: %s", err)
+			}
+
+			//
+			// get a list of all sns topics
+			//
+			var snsTopicArns []string
+			needConfigSave := false
+
+			if snsTopicArns, err = notification.ListTopics(s._sns, time.Duration(s._config.Instance.SdTimeout)); err != nil {
+				return nil, "", 0, fmt.Errorf("Get SNS Topics List Failed: %s", err)
+			}
+
+			//
+			// configure discovery sqs sns if needed
+			//
+			if s._config.Service.DiscoveryUseSqsSns {
+				// create sns topic name if need be
+				if util.LenTrim(s._config.Topics.SnsDiscoveryTopicArn) == 0 || !util.StringSliceContains(&snsTopicArns, s._config.Topics.SnsDiscoveryTopicArn) {
+					discoverySnsTopic := s._config.Topics.SnsDiscoveryTopicNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
+
+					if topicArn, e := notification.CreateTopic(s._sns, discoverySnsTopic, time.Duration(s._config.Instance.SdTimeout)); e != nil {
+						return nil, "", 0, fmt.Errorf("Create SNS Topic %s Failed: %s", discoverySnsTopic, e)
+					} else {
+						snsTopicArns = append(snsTopicArns, topicArn)
+						s._config.SetSnsDiscoveryTopicArn(topicArn)
+						needConfigSave = true
+					}
+				}
+
+				// create sqs queue name if need be
+				if util.LenTrim(s._config.Queues.SqsDiscoveryQueueArn) == 0 || util.LenTrim(s._config.Queues.SqsDiscoveryQueueUrl) == 0 {
+					discoveryQueueName := s._config.Queues.SqsDiscoveryQueueNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
+
+					if url, arn, e := queue.GetQueue(s._sqs, discoveryQueueName, s._config.Queues.SqsDiscoveryMessageRetentionSeconds, s._config.Topics.SnsDiscoveryTopicArn, time.Duration(s._config.Instance.SdTimeout)); e != nil {
+						return nil, "", 0, fmt.Errorf("Create SQS Queue %s Failed: %s", discoveryQueueName, e)
+					} else {
+						s._config.SetSqsDiscoveryQueueUrl(url)
+						s._config.SetSqsDiscoveryQueueArn(arn)
+						needConfigSave = true
+					}
+				}
+			}
+
+			//
+			// configure logger sqs sns if needed
+			//
+			if s._config.Service.LoggerUseSqsSns {
+				// create sns topic name if need be
+				if util.LenTrim(s._config.Topics.SnsLoggerTopicArn) == 0 || !util.StringSliceContains(&snsTopicArns, s._config.Topics.SnsLoggerTopicArn) {
+					loggerSnsTopic := s._config.Topics.SnsLoggerTopicNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
+
+					if topicArn, e := notification.CreateTopic(s._sns, loggerSnsTopic, time.Duration(s._config.Instance.SdTimeout)); e != nil {
+						return nil, "", 0, fmt.Errorf("Create SNS Topic %s Failed: %s", loggerSnsTopic, e)
+					} else {
+						snsTopicArns = append(snsTopicArns, topicArn)
+						s._config.SetSnsLoggerTopicArn(topicArn)
+						needConfigSave = true
+					}
+				}
+
+				// create sqs queue name if need be
+				if util.LenTrim(s._config.Queues.SqsLoggerQueueArn) == 0 || util.LenTrim(s._config.Queues.SqsLoggerQueueUrl) == 0 {
+					loggerQueueName := s._config.Queues.SqsLoggerQueueNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
+
+					if url, arn, e := queue.GetQueue(s._sqs, loggerQueueName, s._config.Queues.SqsLoggerMessageRetentionSeconds, s._config.Topics.SnsLoggerTopicArn, time.Duration(s._config.Instance.SdTimeout)); e != nil {
+						return nil, "", 0, fmt.Errorf("Create SQS Queue %s Failed: %s", loggerQueueName, e)
+					} else {
+						s._config.SetSqsLoggerQueueUrl(url)
+						s._config.SetSqsLoggerQueueArn(arn)
+						needConfigSave = true
+					}
+				}
+			}
+
+			//
+			// configure monitor sqs sns if needed
+			//
+			if s._config.Service.MonitorUseSqsSns {
+				// create sns topic name if need be
+				if util.LenTrim(s._config.Topics.SnsMonitorTopicArn) == 0 || !util.StringSliceContains(&snsTopicArns, s._config.Topics.SnsMonitorTopicArn) {
+					monitorSnsTopic := s._config.Topics.SnsMonitorTopicNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
+
+					if topicArn, e := notification.CreateTopic(s._sns, monitorSnsTopic, time.Duration(s._config.Instance.SdTimeout)); e != nil {
+						return nil, "", 0, fmt.Errorf("Create SNS Topic %s Failed: %s", monitorSnsTopic, e)
+					} else {
+						snsTopicArns = append(snsTopicArns, topicArn)
+						s._config.SetSnsMonitorTopicArn(topicArn)
+						needConfigSave = true
+					}
+				}
+
+				// create sqs queue name if need be
+				if util.LenTrim(s._config.Queues.SqsMonitorQueueArn) == 0 || util.LenTrim(s._config.Queues.SqsMonitorQueueUrl) == 0 {
+					monitorQueueName := s._config.Queues.SqsMonitorQueueNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
+
+					if url, arn, e := queue.GetQueue(s._sqs, monitorQueueName, s._config.Queues.SqsMonitorMessageRetentionSeconds, s._config.Topics.SnsMonitorTopicArn, time.Duration(s._config.Instance.SdTimeout)); e != nil {
+						return nil, "", 0, fmt.Errorf("Create SQS Queue %s Failed: %s", monitorQueueName, e)
+					} else {
+						s._config.SetSqsMonitorQueueUrl(url)
+						s._config.SetSqsMonitorQueueArn(arn)
+						needConfigSave = true
+					}
+				}
+			}
+
+			//
+			// configure tracer sqs sns if needed
+			//
+			if s._config.Service.TracerUseSqsSns {
+				// create sns topic name if need be
+				if util.LenTrim(s._config.Topics.SnsTracerTopicArn) == 0 || !util.StringSliceContains(&snsTopicArns, s._config.Topics.SnsTracerTopicArn) {
+					tracerSnsTopic := s._config.Topics.SnsTracerTopicNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
+
+					if topicArn, e := notification.CreateTopic(s._sns, tracerSnsTopic, time.Duration(s._config.Instance.SdTimeout)); e != nil {
+						return nil, "", 0, fmt.Errorf("Create SNS Topic %s Failed: %s", tracerSnsTopic, e)
+					} else {
+						snsTopicArns = append(snsTopicArns, topicArn)
+						s._config.SetSnsTracerTopicArn(topicArn)
+						needConfigSave = true
+					}
+				}
+
+				// create sqs queue name if need be
+				if util.LenTrim(s._config.Queues.SqsTracerQueueArn) == 0 || util.LenTrim(s._config.Queues.SqsTracerQueueUrl) == 0 {
+					tracerQueueName := s._config.Queues.SqsTracerQueueNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
+
+					if url, arn, e := queue.GetQueue(s._sqs, tracerQueueName, s._config.Queues.SqsTracerMessageRetentionSeconds, s._config.Topics.SnsTracerTopicArn, time.Duration(s._config.Instance.SdTimeout)); e != nil {
+						return nil, "", 0, fmt.Errorf("Create SQS Queue %s Failed: %s", tracerQueueName, e)
+					} else {
+						s._config.SetSqsTracerQueueUrl(url)
+						s._config.SetSqsTracerQueueArn(arn)
+						needConfigSave = true
+					}
+				}
+			}
+
+			//
+			// save config if need be
+			//
+			if needConfigSave {
+				if e := s._config.Save(); e != nil {
+					// save config failed
+					return nil, "", 0, fmt.Errorf("Save Config for SNS SQS ARNs Failed: %s", e)
+				}
+			}
 		}
 
-		if s._config.Grpc.UseSNS {
-			s._sns, _ = notification.NewNotificationAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil)
-		}
-		 */
-
+		//
+		// exit
+		//
 		err = nil
 		return
 	}
@@ -455,6 +616,30 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 
 					log.Println("... gRPC Server Started")
 
+					if s.WebServerConfig != nil {
+						log.Println("Starting Http Web Server...")
+						startWebServerFail := make(chan bool)
+
+						go func() {
+							//
+							// start http web server
+							//
+							if err := s.startWebServer(); err != nil {
+								log.Printf("!!! Serve Http Web Server %s Failed: %s !!!\n", s.WebServerConfig.AppName, err)
+								startWebServerFail <- true
+							} else {
+								log.Println("... Http Web Server Quit Command Received")
+							}
+						}()
+
+						select {
+							case <- startWebServerFail:
+								log.Println("... Http Web Server Fail to Start")
+							default:
+								log.Printf("... Http Web Server Started\n")
+						}
+					}
+
 					if s.AfterServerStart != nil {
 						log.Println("After gRPC Server Started Begin...")
 
@@ -471,6 +656,9 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 								log.Println("!!! Update SD Instance Health Failed: " + err.Error() + " !!!")
 							} else {
 								log.Println("... Update SD Instance Health to 'Healthy' Successful")
+
+								// queue new grpc service host healthy notification
+
 
 								// set service serving mode to true (serving)
 								s._mu.Lock()
@@ -927,3 +1115,50 @@ func (s *Service) ImmediateStop() {
 func (s *Service) LocalAddress() string {
 	return s._localAddress
 }
+
+// =====================================================================================================================
+// HTTP WEB SERVER
+// =====================================================================================================================
+type WebServerConfig struct {
+	AppName string
+	ConfigFileName string
+	CustomConfigPath string
+}
+
+func (s *Service) startWebServer() error {
+	if s.WebServerConfig == nil {
+		return fmt.Errorf("Start Web Server Failed: Web Server Config Not Setup")
+	}
+
+	if util.LenTrim(s.WebServerConfig.AppName) == 0 {
+		return fmt.Errorf("Start Web Server Failed: Web Server Config App Name Not Set")
+	}
+
+	if util.LenTrim(s.WebServerConfig.ConfigFileName) == 0 {
+		return fmt.Errorf("Start Web Server Failed: Web Server Config Custom File Name Not Set")
+	}
+
+	server := ws.NewWebServer(s.WebServerConfig.AppName, s.WebServerConfig.ConfigFileName, s.WebServerConfig.CustomConfigPath)
+
+	server.Routes = map[string]*ginw.RouteDefinition{
+		"base": {
+			Routes: []*ginw.Route{
+				{
+					Method: ginhttpmethod.GET,
+					RelativePath: "/",
+					Handler: func(c *gin.Context, bindingInputPtr interface{}) {
+						c.String(200, "Connector Http Host Up")
+					},
+				},
+			},
+		},
+	}
+
+	// serve web server
+	if err := server.Serve(); err != nil {
+		return fmt.Errorf("Start Web Server Failed: (Serve Error) %s", err)
+	}
+
+	return nil
+}
+
