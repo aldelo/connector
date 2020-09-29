@@ -9,6 +9,8 @@ web_server:
   ws_server_pem:
   # optional, web server tls server certificate key file path, default = blank
   ws_server_key:
+  # optional, google recaptcha v2 secret assigned by google recaptcha service
+  google_recaptcha_secret: ""
 recovery:
   # optional, true or false, indicates if web server uses custom recovery logic, default = false
   custom_recovery: false

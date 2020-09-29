@@ -45,6 +45,7 @@ type webServerData struct {
 	Port uint									`mapstructure:"ws_port"`
 	ServerPem string							`mapstructure:"ws_server_pem"`
 	ServerKey string							`mapstructure:"ws_server_key"`
+	GoogleRecaptchaSecret string				`mapstructure:"google_recaptcha_secret"`
 }
 
 type recoveryData struct {
@@ -158,6 +159,13 @@ func (c *config) SetServerKey(s string) {
 	if c._v != nil {
 		c._v.Set("web_server.ws_server_key", s)
 		c.WebServer.ServerKey = s
+	}
+}
+
+func (c *config) SetGoogleRecaptchaSecret(s string) {
+	if c._v != nil {
+		c._v.Set("web_server.google_recaptcha_secret", s)
+		c.WebServer.GoogleRecaptchaSecret = s
 	}
 }
 
@@ -432,7 +440,8 @@ func (c *config) Read() error {
 	"web_server.ws_debug", false).Default(									// optional, true or false, indicates if web server running in debug mode, default = false
 	"web_server.ws_port", 8080).Default(										// required, web server tcp port, default = 8080
 	"web_server.ws_server_pem", "").Default(									// optional, web server tls server certificate pem file path, default = blank
-	"web_server.ws_server_key", "")											// optional, web server tls server certificate key file path, default = blank
+	"web_server.ws_server_key", "").Default(									// optional, web server tls server certificate key file path, default = blank
+	"web_server.google_recaptcha_secret", "")									// optional, google recaptcha v2 secret assigned by google services
 
 	c._v.Default("recovery.custom_recovery", false)							// optional, true or false, indicates if web server uses custom recovery logic, default = false
 

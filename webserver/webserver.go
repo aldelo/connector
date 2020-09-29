@@ -228,6 +228,10 @@ func (w *WebServer) setupWebServer() error {
 		w._ginwebserver.TlsCertKeyFile = w._config.WebServer.ServerKey
 	}
 
+	if util.LenTrim(w._config.WebServer.GoogleRecaptchaSecret) > 0 {
+		w._ginwebserver.GoogleRecaptchaSecret = w._config.WebServer.GoogleRecaptchaSecret
+	}
+
 	// set jwt auth
 	if util.LenTrim(w._config.JwtAuth.Realm) > 0 {
 		signAlg := ginjwtsignalgorithm.HS256
