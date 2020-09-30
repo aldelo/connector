@@ -395,6 +395,8 @@ func (c *config) SetCircuitBreakerLoggerEnabled(b bool) {
 func (c *config) Read() error {
 	c._v = nil
 	c.Target = targetData{}
+	c.Queues = queuesData{}
+	c.Topics = topicsData{}
 	c.Grpc = grpcData{}
 
 	if util.LenTrim(c.AppName) == 0 {
