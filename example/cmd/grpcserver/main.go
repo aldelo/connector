@@ -140,7 +140,7 @@ func startServiceHandler(port int) {
 	// start grpc service server
 	//
 	if err := grpcServer.Serve(); err != nil {
-		log.Println("Start gRPC Server Failed: " + err.Error())
+		log.Fatalln("Start gRPC Server Failed: " + err.Error())
 	}
 
 	// *** no code after this line, because grpcServer.Serve() will block until shutdown ***

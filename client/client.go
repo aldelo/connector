@@ -21,9 +21,12 @@ import (
 	"fmt"
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/crypto"
+	"github.com/aldelo/common/rest"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
+	ginw "github.com/aldelo/common/wrapper/gin"
 	"github.com/aldelo/common/wrapper/sns"
+	"github.com/aldelo/common/wrapper/sns/snsprotocol"
 	"github.com/aldelo/common/wrapper/sqs"
 	data "github.com/aldelo/common/wrapper/zap"
 	"github.com/aldelo/connector/adapters/circuitbreaker"
@@ -31,8 +34,11 @@ import (
 	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/connector/adapters/loadbalancer"
 	"github.com/aldelo/connector/adapters/metadata"
+	"github.com/aldelo/connector/adapters/notification"
+	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
+	ws "github.com/aldelo/connector/webserver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/connectivity"
@@ -68,6 +74,9 @@ type Client struct {
 	AppName string
 	ConfigFileName string
 	CustomConfigPath string
+
+	// web server config
+	WebServerConfig *WebServerConfig
 
 	// indicate if after dial, client will wait for target service health probe success before continuing to allow rpc
 	WaitForServerReady bool
@@ -320,15 +329,25 @@ func (c *Client) Dial(ctx context.Context) error {
 	log.Println("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
 
 	// setup sqs and sns if configured
-	/*
-	if c._config.Grpc.UseSQS {
-		c._sqs, _ = queue.NewQueueAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil)
+	if util.LenTrim(c._config.Queues.SqsDiscoveryQueueUrl) > 0 || util.LenTrim(c._config.Queues.SqsLoggerQueueUrl) > 0 || util.LenTrim(c._config.Queues.SqsTracerQueueUrl) > 0 || util.LenTrim(c._config.Queues.SqsMonitorQueueUrl) > 0 {
+		var e error
+		if c._sqs, e = queue.NewQueueAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil); e != nil {
+			log.Println("Get SQS Queue Adapter Failed: " + e.Error())
+			c._sqs = nil
+		}
+	} else {
+		c._sqs = nil
 	}
 
-	if c._config.Grpc.UseSNS {
-		c._sns, _ = notification.NewNotificationAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil)
+	if util.LenTrim(c._config.Topics.SnsDiscoveryTopicArn) > 0 || util.LenTrim(c._config.Topics.SnsLoggerTopicArn) > 0 || util.LenTrim(c._config.Topics.SnsTracerTopicArn) > 0 || util.LenTrim(c._config.Topics.SnsMonitorTopicArn) > 0 {
+		var e error
+		if c._sns, e = notification.NewNotificationAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil); e != nil {
+			log.Println("Get SNS Notification Adapter Failed: " + e.Error())
+			c._sns = nil
+		}
+	} else {
+		c._sns = nil
 	}
-	 */
 
 	// circuit breakers prep
 	c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
@@ -427,20 +446,224 @@ func (c *Client) Dial(ctx context.Context) error {
 			log.Println("... gRPC Service @ " + target + " [" + c._remoteAddress + "] Connected")
 
 			if c.WaitForServerReady {
-				if e := c.WaitForReady(time.Duration(dialSec)*time.Second); e != nil {
+				if e := c.waitForEndpointReady(time.Duration(dialSec)*time.Second); e != nil {
 					// health probe failed
 					_ = c._conn.Close()
 					return fmt.Errorf("gRPC Service Server Not Ready: " + e.Error())
 				}
 			}
 
+			// dial successful, now start web server for notification callbacks (webhook)
+			if c.WebServerConfig != nil {
+				log.Println("Starting Http Web Server...")
+				startWebServerFail := make(chan bool)
+
+				go func() {
+					//
+					// start http web server
+					//
+					if err := c.startWebServer(); err != nil {
+						log.Printf("!!! Serve Http Web Server %s Failed: %s !!!\n", c.WebServerConfig.AppName, err)
+						startWebServerFail <- true
+					} else {
+						log.Println("... Http Web Server Quit Command Received")
+					}
+				}()
+
+				// give slight time delay to allow time slice for non blocking code to complete in goroutine above
+				time.Sleep(150*time.Millisecond)
+
+				select {
+				case <- startWebServerFail:
+					log.Println("... Http Web Server Fail to Start")
+				default:
+					// wait short time to check if web server was started up successfully
+					if e := c.waitForWebServerReady(time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+						// web server error
+						log.Printf("!!! Http Web Server %s Failed: %s !!!\n", c.WebServerConfig.AppName, e)
+					} else {
+						// web server ok
+						log.Printf("... Http Web Server Started: %s\n", c.WebServerConfig.WebServerLocalAddress)
+
+						// if sns topic arn is set for discovery service, subscribe to the topic (if not yet subscribed)
+						c.subscribeToSNS("Discovery", c._config.Topics.SnsDiscoveryTopicArn, c._config.Topics.SnsDiscoverySubscriptionArn, c._config.SetSnsDiscoverySubscriptionArn)
+					}
+				}
+			}
+
+			// dial completed
 			return nil
 		}
 	}
 }
 
-// WaitForReady is called after Dial to check if target service is ready as reported by health probe
-func (c *Client) WaitForReady(timeoutDuration ...time.Duration) error {
+func (c *Client) subscribeToSNS(actionName string, topicArn string, topicSubArn string, setConfigSnsSubArnFunc func(string)) {
+	if c._sns != nil && util.LenTrim(topicArn) > 0 && util.LenTrim(topicSubArn) == 0 {
+		if util.LenTrim(c.WebServerConfig.WebServerLocalAddress) == 0 {
+			log.Println("!!! " + actionName + " SNS Topic '" + topicArn + "' Subscribe Failed: Web Server Host Local Address is Empty !!!")
+			return
+		}
+
+		if setConfigSnsSubArnFunc == nil {
+			log.Println("!!! " + actionName + " SNS Topic '" + topicArn + "' Subscribe Failed: setConfigSnsSubArnFunc Parameter Required")
+			return
+		}
+
+		p := snsprotocol.Http
+
+		if util.Left(strings.ToLower(c.WebServerConfig.WebServerLocalAddress), 5) == "https" {
+			p = snsprotocol.Https
+		}
+
+		if subArn, e := notification.Subscribe(c._sns, topicArn, p, c.WebServerConfig.WebServerLocalAddress, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+			log.Println("!!! " + actionName + " SNS Topic '" + topicArn + "' Subscribe Failed: " + e.Error() + " !!!")
+		} else {
+			setConfigSnsSubArnFunc(subArn)
+
+			if e := c._config.Save(); e != nil {
+				setConfigSnsSubArnFunc("")
+				log.Println("!!! " + actionName + " SNS Topic '" + topicArn + "' Subscribe Failed: Persist Config Error, " + e.Error() + " !!!")
+			} else {
+				log.Println("... " + actionName + " SNS Topic '" + topicArn + "' Subscribe OK: " + subArn)
+			}
+		}
+	} else if util.LenTrim(topicSubArn) > 0 {
+		log.Println("--- " + actionName + " SNS Topic '" + topicArn + "' Already Subscribed: " + topicSubArn + " ---")
+	}
+}
+
+func (c *Client) unsubscribeFromSNS() {
+	doSave := false
+
+	if c._sns != nil {
+		if util.LenTrim(c._config.Topics.SnsDiscoverySubscriptionArn) > 0 {
+			if e := notification.Unsubscribe(c._sns, c._config.Topics.SnsDiscoverySubscriptionArn, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+				log.Println("!!! Discovery SNS Topic '" + c._config.Topics.SnsDiscoveryTopicArn + "' Unsubscribe Failed: " + e.Error() + " !!!")
+			} else {
+				log.Println("... Unsubscribe Discovery SNS Topic '" + c._config.Topics.SnsDiscoveryTopicArn + "' OK")
+				c._config.SetSnsDiscoverySubscriptionArn("")
+				doSave = true
+			}
+		} else {
+			log.Println("--- No Discovery SNS Topic to Unsubscribe ---")
+		}
+
+		if util.LenTrim(c._config.Topics.SnsLoggerSubscriptionArn) > 0 {
+			if e := notification.Unsubscribe(c._sns, c._config.Topics.SnsLoggerSubscriptionArn, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+				log.Println("!!! Logger SNS Topic '" + c._config.Topics.SnsLoggerTopicArn + "' Unsubscribe Failed: " + e.Error() + " !!!")
+			} else {
+				log.Println("... Unsubscribe Logger SNS Topic '" + c._config.Topics.SnsLoggerTopicArn + "' OK")
+				c._config.SetSnsLoggerSubscriptionArn("")
+				doSave = true
+			}
+		} else {
+			log.Println("--- No Logger SNS Topic to Unsubscribe ---")
+		}
+
+		if util.LenTrim(c._config.Topics.SnsTracerSubscriptionArn) > 0 {
+			if e := notification.Unsubscribe(c._sns, c._config.Topics.SnsTracerSubscriptionArn, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+				log.Println("!!! Tracer SNS Topic '" + c._config.Topics.SnsTracerTopicArn + "' Unsubscribe Failed: " + e.Error() + " !!!")
+			} else {
+				log.Println("... Unsubscribe Tracer SNS Topic '" + c._config.Topics.SnsTracerTopicArn + "' OK")
+				c._config.SetSnsTracerSubscriptionArn("")
+				doSave = true
+			}
+		} else {
+			log.Println("--- No Tracer SNS Topic to Unsubscribe ---")
+		}
+
+		if util.LenTrim(c._config.Topics.SnsMonitorSubscriptionArn) > 0 {
+			if e := notification.Unsubscribe(c._sns, c._config.Topics.SnsMonitorSubscriptionArn, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+				log.Println("!!! Monitor SNS Topic '" + c._config.Topics.SnsMonitorTopicArn + "' Unsubscribe Failed: " + e.Error() + " !!!")
+			} else {
+				log.Println("... Unsubscribe Monitor SNS Topic '" + c._config.Topics.SnsMonitorTopicArn + "' OK")
+				c._config.SetSnsMonitorSubscriptionArn("")
+				doSave = true
+			}
+		} else {
+			log.Println("--- No Monitor SNS Topic to Unsubscribe ---")
+		}
+
+		if doSave {
+			if e := c._config.Save(); e != nil {
+				log.Println("!!! Persist Unsubscribed Status To Config Failed: " + e.Error() + " !!!")
+			}
+		}
+	}
+}
+
+// waitForWebServerReady is called after web server is expected to start,
+// this function will wait a short time for web server startup success or timeout
+func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
+	if util.LenTrim(c.WebServerConfig.WebServerLocalAddress) == 0 {
+		return fmt.Errorf("Web Server Host Address is Empty")
+	}
+
+	var timeout time.Duration
+
+	if len(timeoutDuration) > 0 {
+		timeout = timeoutDuration[0]
+	} else {
+		timeout = 5*time.Second
+	}
+
+	expireDateTime := time.Now().Add(timeout)
+
+	//
+	// check if web server is ready and healthy via /health check
+	//
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+
+	chanErrorInfo := make(chan string)
+	healthUrl := c.WebServerConfig.WebServerLocalAddress + "/health"
+
+	go func() {
+		for {
+			if status, _, e := rest.GET(healthUrl, nil); e != nil {
+				log.Println("Web Server Health Check Failed: " + e.Error())
+				wg.Done()
+				chanErrorInfo <- "Web Server Health Check Failed: " + e.Error()
+				return
+			} else {
+				if status == 200 {
+					log.Println("Web Server Health OK")
+					wg.Done()
+					chanErrorInfo <- "OK"
+					return
+				} else {
+					log.Println("Web Server Not Ready!")
+				}
+			}
+
+			time.Sleep(2500*time.Millisecond)
+
+			if time.Now().After(expireDateTime) {
+				log.Println("Web Server Health Check Timeout")
+				wg.Done()
+				chanErrorInfo <- "Web Server Health Check Failed: Timeout"
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	log.Println("Web Server Heath Check Finalized...")
+
+	errInfo := <-chanErrorInfo
+
+	if errInfo == "OK" {
+		// success - web server health check = ok
+		return nil
+	} else {
+		// failure
+		return fmt.Errorf(errInfo)
+	}
+}
+
+// waitForEndpointReady is called after Dial to check if target service is ready as reported by health probe
+func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 	var timeout time.Duration
 
 	if len(timeoutDuration) > 0 {
@@ -552,6 +775,8 @@ func (c *Client) Close() {
 			log.Println("... After gRPC Client Close End")
 		}
 	}()
+
+	c.unsubscribeFromSNS()
 
 	c._remoteAddress = ""
 
@@ -1048,3 +1273,92 @@ func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.Str
 	}
 }
 
+// =====================================================================================================================
+// HTTP WEB SERVER
+// =====================================================================================================================
+
+// note: WebServerLocalAddress = read only getter
+//
+// note: WebServerRoutes = map[string]*ginw.RouteDefinition{
+//		"base": {
+//			Routes: []*ginw.Route{
+//				{
+//					Method: ginhttpmethod.GET,
+//					RelativePath: "/",
+//					Handler: func(c *gin.Context, bindingInputPtr interface{}) {
+//						c.String(200, "Connector Client Http Host Up")
+//					},
+//				},
+//			},
+//		},
+//	}
+type WebServerConfig struct {
+	AppName string
+	ConfigFileName string
+	CustomConfigPath string
+
+	// define web server router info
+	WebServerRoutes map[string]*ginw.RouteDefinition
+
+	// getter only
+	WebServerLocalAddress string
+}
+
+func (c *Client) startWebServer() error {
+	if c.WebServerConfig == nil {
+		return fmt.Errorf("Start Web Server Failed: Web Server Config Not Setup")
+	}
+
+	if util.LenTrim(c.WebServerConfig.AppName) == 0 {
+		return fmt.Errorf("Start Web Server Failed: Web Server Config App Name Not Set")
+	}
+
+	if util.LenTrim(c.WebServerConfig.ConfigFileName) == 0 {
+		return fmt.Errorf("Start Web Server Failed: Web Server Config Custom File Name Not Set")
+	}
+
+	if c.WebServerConfig.WebServerRoutes == nil {
+		return fmt.Errorf("Start Web Server Failed: Web Server Routes Not Defined (Map Nil)")
+	}
+
+	if len(c.WebServerConfig.WebServerRoutes) == 0 {
+		return fmt.Errorf("Start Web Server Failed: Web Server Routes Not Set (Count Zero)")
+	}
+
+	server := ws.NewWebServer(c.WebServerConfig.AppName, c.WebServerConfig.ConfigFileName, c.WebServerConfig.CustomConfigPath)
+
+	/* EXAMPLE
+	server.Routes = map[string]*ginw.RouteDefinition{
+		"base": {
+			Routes: []*ginw.Route{
+				{
+					Method: ginhttpmethod.GET,
+					RelativePath: "/",
+					Handler: func(c *gin.Context, bindingInputPtr interface{}) {
+						c.String(200, "Connector Client Http Host Up")
+					},
+				},
+			},
+		},
+	}
+ 	*/
+	server.Routes = c.WebServerConfig.WebServerRoutes
+
+	// set web server local address before serve action
+	httpVerb := ""
+
+	if server.UseTls() {
+		httpVerb = "https"
+	} else {
+		httpVerb = "http"
+	}
+
+	c.WebServerConfig.WebServerLocalAddress = fmt.Sprintf("%s://%s:%d", httpVerb, util.GetLocalIP(), server.Port())
+
+	// serve web server
+	if err := server.Serve(); err != nil {
+		return fmt.Errorf("Start Web Server Failed: (Serve Error) %s", err)
+	}
+
+	return nil
+}

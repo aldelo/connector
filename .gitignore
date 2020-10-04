@@ -46,6 +46,7 @@ client/testclient.log
 client/testclient-internal-err.log
 service/testservice.log
 service/testservice-internal-err.log
+webserver/webserver.yaml
 build/openssl-pem/keys/ca/ca_cert.pem
 build/openssl-pem/keys/ca/ca_cert.srl
 build/openssl-pem/keys/ca/private/ca_key.pem
@@ -57,6 +58,9 @@ build/openssl-pem/keys/server/server_cert.pem
 build/openssl-pem/keys/server/private/server_key.pem
 build/openssl-pem/test-pem.sh
 example/cmd/grpcclient/endpoint/client.yaml
+example/cmd/grpcclient/endpoint/service-1.yaml
+example/cmd/grpcclient/endpoint/service-2.yaml
+example/cmd/grpcclient/grpcclient
 example/cmd/grpcserver/service.yaml
 example/cmd/grpcclient/x509/ca_cert.pem
 example/cmd/grpcclient/x509/client_cert.pem
@@ -70,6 +74,9 @@ example/cmd/grpcclient/ExampleClient-internal-err.log
 example/cmd/grpcclient/ExampleClient.log
 example/cmd/grpcclient/grpcclient
 example/cmd/webserver/webserver
+example/cmd/grpcnotifier/grpcnotifier
+example/cmd/grpcnotifier/notifier-grpcserver.yaml
+example/cmd/grpcnotifier/notifier-webserver.yaml
 
 # CMake
 cmake-build-*/

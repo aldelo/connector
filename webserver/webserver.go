@@ -164,6 +164,15 @@ func (w *WebServer) Port() uint {
 	}
 }
 
+// UseTls indicates if the web server uses tls (https), otherwise, http
+func (w *WebServer) UseTls() bool {
+	if w._config == nil {
+		return false
+	} else {
+		return util.LenTrim(w._config.WebServer.ServerKey) > 0 && util.LenTrim(w._config.WebServer.ServerPem) > 0
+	}
+}
+
 // Serve will setup and start the web server
 func (w *WebServer) Serve() error {
 	if w._config == nil {

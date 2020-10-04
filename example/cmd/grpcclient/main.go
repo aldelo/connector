@@ -100,6 +100,12 @@ func main() {
 func DialService1() (cli *client.Client, err error) {
 	cli = client.NewClient("ExampleClient", "service-1", "./endpoint")
 
+	cli.WebServerConfig = &client.WebServerConfig{
+		AppName: cli.AppName,
+		ConfigFileName: "webserver",
+		CustomConfigPath: "",
+	}
+
 	cli.WaitForServerReady = true
 
 	cli.BeforeClientDial = func(cli *client.Client) {

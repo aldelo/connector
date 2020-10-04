@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package notifierserver;
+option go_package = "github.com/aldelo/connector/notifierserver/proto";
+
+message NotificationSubscriber {
+  string id = 1;
+  string topic = 2;
+}
+
+message NotificationData {
+  string id = 1;
+  string topic = 2;
+  string message = 3;
+  string timestamp = 4;
+}
+
+message NotificationDone {}
+
+service Notifier {
+  rpc Subscribe(NotificationSubscriber) returns (stream NotificationData);
+  rpc Broadcast(NotificationData) returns (NotificationDone);
+}
+
