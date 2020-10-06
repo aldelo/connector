@@ -1348,6 +1348,11 @@ type WebServerConfig struct {
 	WebServerLocalAddress string
 }
 
+// GetWebServerLocalAddress returns FQDN url to the local web server
+func (w *WebServerConfig) GetWebServerLocalAddress() string {
+	return w.WebServerLocalAddress
+}
+
 func (s *Service) startWebServer() error {
 	if s.WebServerConfig == nil {
 		return fmt.Errorf("Start Web Server Failed: Web Server Config Not Setup")

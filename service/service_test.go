@@ -22,12 +22,8 @@ import (
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	ginw "github.com/aldelo/common/wrapper/gin"
-	"github.com/aldelo/common/wrapper/gin/ginbindtype"
-	"github.com/aldelo/common/wrapper/gin/gingzipcompression"
-	"github.com/aldelo/common/wrapper/gin/ginhttpmethod"
 	"github.com/aldelo/connector/adapters/metadata"
 	testpb "github.com/aldelo/connector/example/proto/test"
-	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"log"
@@ -213,8 +209,9 @@ func TestGinServer(t *testing.T) {
 		Secret: "Secrete",
 	}
 
-	g.Routes = map[string][]*ginw.RouteDefinition{
-		"*": {
+	/*
+	g.Routes = map[string]*ginw.RouteDefinition{
+		"base": {
 			{
 				Routes: []*ginw.Route{
 					{
@@ -239,11 +236,34 @@ func TestGinServer(t *testing.T) {
 		},
 	}
 
+	 */
+
 	if err := g.RunServer(); err != nil {
 		log.Println("Error: " + err.Error())
 		t.Fatal("Fail")
 	} else {
 		log.Println("Run OK")
 		t.Log("OK")
+	}
+}
+
+type Dummy struct{
+	FirstName string
+	LastName string
+}
+
+func TestSliceDeleteFunc(t *testing.T){
+	slice := []*Dummy{
+		{FirstName: "John", LastName: "Smith"},
+		{FirstName: "Mike", LastName: "Smith"},
+		{FirstName: "Anna", LastName: "Smith"},
+	}
+
+	resultSlice := util.SliceDeleteElement(slice, -1)
+
+	newSlice := resultSlice.([]*Dummy)
+
+	for _, v := range newSlice{
+		t.Log(v)
 	}
 }

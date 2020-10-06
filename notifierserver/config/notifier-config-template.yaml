@@ -1,0 +1,23 @@
+notifier_server:
+  # required, notifier gateway services http/https url path, must start with http or https
+  gateway_url: ""
+  # auto-created, this notifier server's key (ulid), auto created when server launches
+  server_key: ""
+  # required, valid aws region to host dynamodb services
+  dynamodb_aws_region: us-east-1
+  # optional, dynamodb uses dax or not
+  dynamodb_use_dax: false
+  # conditional, if dax = true, dax url is required
+  dynamodb_dax_url: ""
+  # required, dynamodb table name, used for server routing by notifier gateway
+  dynamodb_table: ""
+  # optional, dynamodb action timeout seconds
+  dynamodb_timeout_seconds: 5
+  # optional, dynamodb action retries count
+  dynamodb_action_retries: 3
+  # required, valid aws region to host sns services
+  sns_aws_region: us-east-1
+subscriptions:
+  # slice list of sns topic subscriptions for this server
+  - topic_arn: ""
+    subscription_arn: ""

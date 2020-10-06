@@ -77,6 +77,13 @@ example/cmd/webserver/webserver
 example/cmd/grpcnotifier/grpcnotifier
 example/cmd/grpcnotifier/notifier-grpcserver.yaml
 example/cmd/grpcnotifier/notifier-webserver.yaml
+example/cmd/grpcnotifier/notifier-config.yaml
+example/cmd/grpcnotifier/x509/ca_cert.pem
+example/cmd/grpcnotifier/x509/client_cert.pem
+example/cmd/grpcnotifier/x509/client_key.pem
+example/cmd/grpcnotifier/x509/ca_cert.pem
+example/cmd/grpcnotifier/x509/server_cert.pem
+example/cmd/grpcnotifier/x509/server_key.pem
 
 # CMake
 cmake-build-*/

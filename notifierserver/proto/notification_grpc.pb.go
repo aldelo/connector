@@ -18,6 +18,7 @@ const _ = grpc.SupportPackageIsVersion6
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type NotifierClient interface {
 	Subscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (Notifier_SubscribeClient, error)
+	Unsubscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (*NotificationDone, error)
 	Broadcast(ctx context.Context, in *NotificationData, opts ...grpc.CallOption) (*NotificationDone, error)
 }
 
@@ -61,6 +62,15 @@ func (x *notifierSubscribeClient) Recv() (*NotificationData, error) {
 	return m, nil
 }
 
+func (c *notifierClient) Unsubscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (*NotificationDone, error) {
+	out := new(NotificationDone)
+	err := c.cc.Invoke(ctx, "/notifierserver.Notifier/Unsubscribe", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *notifierClient) Broadcast(ctx context.Context, in *NotificationData, opts ...grpc.CallOption) (*NotificationDone, error) {
 	out := new(NotificationDone)
 	err := c.cc.Invoke(ctx, "/notifierserver.Notifier/Broadcast", in, out, opts...)
@@ -75,6 +85,7 @@ func (c *notifierClient) Broadcast(ctx context.Context, in *NotificationData, op
 // for forward compatibility
 type NotifierServer interface {
 	Subscribe(*NotificationSubscriber, Notifier_SubscribeServer) error
+	Unsubscribe(context.Context, *NotificationSubscriber) (*NotificationDone, error)
 	Broadcast(context.Context, *NotificationData) (*NotificationDone, error)
 	mustEmbedUnimplementedNotifierServer()
 }
@@ -85,6 +96,9 @@ type UnimplementedNotifierServer struct {
 
 func (*UnimplementedNotifierServer) Subscribe(*NotificationSubscriber, Notifier_SubscribeServer) error {
 	return status.Errorf(codes.Unimplemented, "method Subscribe not implemented")
+}
+func (*UnimplementedNotifierServer) Unsubscribe(context.Context, *NotificationSubscriber) (*NotificationDone, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Unsubscribe not implemented")
 }
 func (*UnimplementedNotifierServer) Broadcast(context.Context, *NotificationData) (*NotificationDone, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Broadcast not implemented")
@@ -116,6 +130,24 @@ func (x *notifierSubscribeServer) Send(m *NotificationData) error {
 	return x.ServerStream.SendMsg(m)
 }
 
+func _Notifier_Unsubscribe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NotificationSubscriber)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NotifierServer).Unsubscribe(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/notifierserver.Notifier/Unsubscribe",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NotifierServer).Unsubscribe(ctx, req.(*NotificationSubscriber))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Notifier_Broadcast_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NotificationData)
 	if err := dec(in); err != nil {
@@ -138,6 +170,10 @@ var _Notifier_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "notifierserver.Notifier",
 	HandlerType: (*NotifierServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Unsubscribe",
+			Handler:    _Notifier_Unsubscribe_Handler,
+		},
 		{
 			MethodName: "Broadcast",
 			Handler:    _Notifier_Broadcast_Handler,
