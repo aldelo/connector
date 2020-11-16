@@ -18,24 +18,37 @@ package main
 
 import (
 	"fmt"
+	util "github.com/aldelo/common"
 	"github.com/aldelo/common/tcp"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
+var _dataIn chan []byte
+
 func main() {
+	_dataIn = make(chan []byte)
+
 	// test tcp client
 	tcpClient := &tcp.TCPClient{
-		ServerIP: "192.168.1.67",
+		ServerIP: "192.168.1.36",
 		ServerPort: 8080,
 		ReceiveHandler: func(data []byte) {
-			log.Print("Client ReceiveHandler: ", string(data))
+			// log.Print("Client ReceiveHandler: ", string(data))
+			select {
+			case _dataIn <- data:
+				fmt.Println("Received Data Assigned to _dataIn chan []byte")
+			default:
+				fmt.Println("Received Data Tossed")
+			}
 		},
 		ErrorHandler: func(err error, socketClosedFunc func()) {
 			log.Print("Client ErrorHandler: ", err)
 
 			if socketClosedFunc != nil {
+				close(_dataIn)
 				socketClosedFunc()
 				os.Exit(0)
 			}
@@ -47,8 +60,10 @@ func main() {
 	}
 
 	if err := tcpClient.Dial(); err != nil {
+		close(_dataIn)
 		log.Println("Client Dial Error: ", err)
 	} else {
+		defer close(_dataIn)
 		defer tcpClient.Close()
 
 		if err := tcpClient.StartReader(); err != nil {
@@ -76,7 +91,6 @@ func main() {
 					time.Sleep(1000 * time.Millisecond)
 				}
 			}()
-			*/
 
 			log.Println("TCP Client Dial OK")
 			log.Println("Press Any Key To Disconnect Client...")
@@ -85,6 +99,58 @@ func main() {
 
 			//stopLoop <- true
 			tcpClient.StopReader()
+			*/
+
+			for {
+				fmt.Println("TCP Client Operations:")
+				fmt.Println("1 = Send Request, Await Response 3 Seconds")
+				fmt.Println("X = Disconnect Client")
+
+				choice := ""
+				if _, err := fmt.Scanln(&choice); err == nil {
+					choice = util.RightTrimLF(choice)
+
+					if strings.ToUpper(choice) == "X" {
+						close(_dataIn)
+						tcpClient.StopReader()
+						break
+					} else if choice == "1" {
+						// send request out
+						if err := tcpClient.Write([]byte("ClientTestXYZ")); err != nil {
+							fmt.Println("Send Data Error: " + err.Error())
+							fmt.Println()
+							fmt.Println()
+						} else {
+							// await response from TCP server within 3 seconds
+							fmt.Println("Waiting for TCP Server Data In...")
+
+							var recv []byte
+							timeOut := false
+
+							select {
+							case recv = <-_dataIn:
+							case <-time.After(3 * time.Second):
+								timeOut = true
+							}
+
+							if !timeOut {
+								fmt.Println("Data Received: ", string(recv))
+							} else {
+								fmt.Println("Wait for TCP Server 3 Seconds Time-Out")
+							}
+
+							fmt.Println()
+							fmt.Println()
+						}
+					} else {
+						fmt.Println()
+						fmt.Println()
+					}
+				} else {
+					fmt.Println()
+					fmt.Println()
+				}
+			}
 		}
 	}
 }

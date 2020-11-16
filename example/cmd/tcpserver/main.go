@@ -38,14 +38,13 @@ func main() {
 		ClientReceiveHandler: func(clientIP string, data []byte, writeToClientFunc func(writeData []byte, clientIP string) error) {
 			log.Println("ClientReceiveHandler: ", clientIP, string(data))
 
-			/*
+			time.Sleep(5*time.Second)
+
 			if e := writeToClientFunc([]byte("TCP ACK Data Received: " + string(data)), clientIP); e != nil {
 				log.Println("TCP Server Send Data to ClientIP Failed: ", clientIP, e)
 			} else {
 				log.Println("TCP Server Send Data to ClientIP OK: ", clientIP)
 			}
-
-			 */
 		},
 		ClientErrorHandler: func(clientIP string, err error) {
 			log.Println("ClientErrorHandler: ", clientIP, err)
