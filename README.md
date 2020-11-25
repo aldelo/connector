@@ -79,9 +79,10 @@ See /example/cmd/client for a working gRPC client setup to consume the gRPC serv
 - to save aws access id and secret key, use aws cli => aws configure
 
 # Pre-Requisites
-#### 1) Install ***protoc***
+#### 1) Install or Upgrade ***protoc***
 - In Terminal: (Mac)
     - ~ brew install protobuf
+    - ~ brew upgrade protobuf
 #### 2) Install ***protoc-gen-go***
 - In Terminal:
     - ~ go install google.golang.org/protobuf/cmd/protoc-gen-go
@@ -89,19 +90,39 @@ See /example/cmd/client for a working gRPC client setup to consume the gRPC serv
 #### 3) Install ***protoc-gen-go-grpc***
 - install ***go-grpc_out***
     - Info: https://github.com/grpc/grpc-go/tree/master/cmd/protoc-gen-go-grpc
+    - Info: https://grpc.io/docs/languages/go/quickstart/
 - In Terminal:
-    - ~ git clone -b v1.31.0 https://github.com/grpc/grpc-go
-    - ~ ( cd ../../cmd/protoc-gen-go-grpc && go install . )
-    - Note: v1.31.0 = replace with latest version
+    - ~ export GO111MODULE=on
+    - ~ go install google.golang.org/grpc/cmd/protoc-gen-go-grpc
 #### 4) Info on ***proto3***
 - https://developers.google.com/protocol-buffers/docs/gotutorial
+- Define ***package*** using OrganizationOrProject.Service.Type pattern
+    - com.company.service
+    - project.proto.service
+    - domain.service.type, etc.
 - Use ***option go_package = "xyz";***
     - xyz should point to the full path from $GOPATH/src to this proto file folder
     - for example, "github.com/aldelo/connector/example/proto/test"
         - where "test" is the folder that contains proto files
+- ***import*** should contain full path from project folder to the proto file
+    - in GoLand (JetBrains), Preferences -> Languages & Preferences -> Protocol Buffers
+        - Uncheck "Configure Automatically"
+        - Add path to $GOPATH/src
 #### 5) Executing ***protoc***
 - In Terminal:
     - go to the folder containing .proto files
     - ~ protoc --go_out=$GOPATH/src --go-grpc_out=$GOPATH/src ./*.proto
     
-
+# Checking Version Info
+#### 1) Latest protoc Version on brew
+- https://formulae.brew.sh/formula/protobuf
+#### 2) Latest protobuf Version
+- https://github.com/golang/protobuf/releases
+#### 3) Latest grpc for go Version
+- https://github.com/grpc/grpc-go/releases
+#### 4) Latest protoc-gen-go Version
+- https://pkg.go.dev/google.golang.org/protobuf/cmd/protoc-gen-go
+#### 5) Latest protoc-gen-go-grpc Version
+- https://github.com/grpc/grpc-go/tree/master/cmd/protoc-gen-go-grpc
+#### 6) Latest genproto Version
+- https://pkg.go.dev/google.golang.org/genproto

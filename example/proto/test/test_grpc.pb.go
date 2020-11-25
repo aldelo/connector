@@ -11,7 +11,7 @@ import (
 
 // This is a compile-time assertion to ensure that this generated file
 // is compatible with the grpc package it is being compiled against.
-const _ = grpc.SupportPackageIsVersion6
+const _ = grpc.SupportPackageIsVersion7
 
 // AnswerServiceClient is the client API for AnswerService service.
 //
@@ -49,12 +49,19 @@ type AnswerServiceServer interface {
 type UnimplementedAnswerServiceServer struct {
 }
 
-func (*UnimplementedAnswerServiceServer) Greeting(context.Context, *Question) (*Answer, error) {
+func (UnimplementedAnswerServiceServer) Greeting(context.Context, *Question) (*Answer, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Greeting not implemented")
 }
-func (*UnimplementedAnswerServiceServer) mustEmbedUnimplementedAnswerServiceServer() {}
+func (UnimplementedAnswerServiceServer) mustEmbedUnimplementedAnswerServiceServer() {}
 
-func RegisterAnswerServiceServer(s *grpc.Server, srv AnswerServiceServer) {
+// UnsafeAnswerServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AnswerServiceServer will
+// result in compilation errors.
+type UnsafeAnswerServiceServer interface {
+	mustEmbedUnimplementedAnswerServiceServer()
+}
+
+func RegisterAnswerServiceServer(s grpc.ServiceRegistrar, srv AnswerServiceServer) {
 	s.RegisterService(&_AnswerService_serviceDesc, srv)
 }
 
