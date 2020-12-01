@@ -111,7 +111,8 @@ See /example/cmd/client for a working gRPC client setup to consume the gRPC serv
 #### 5) Executing ***protoc***
 - In Terminal:
     - go to the folder containing .proto files
-    - ~ protoc --go_out=$GOPATH/src --go-grpc_out=$GOPATH/src ./*.proto
+    - ~ protoc --go_out=$GOPATH/src --go-grpc_out=$GOPATH/src --proto_path=$GOPATH/src $GOPATH/src/xyz.../*.proto
+        - where xyz... refers to the actual full path below $GOPATH/src up to the folder containing the proto files
     
 # Checking Version Info
 #### 1) Latest protoc Version on brew
