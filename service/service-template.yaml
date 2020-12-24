@@ -94,6 +94,12 @@ service_auto_create:
 instance:
   # instance id creation prefix, leave blank if no prefix
   instance_prefix: ams-
+  # instance favor public ip when possible, will contact snsgateway callerid service to request public ip if available
+  instance_favor_public_ip: false
+  # full url path including http or https to the gateway service that providers public ip discovery, typically this is the endpoint pointing to snsgateway services
+  public_ip_discovery_gateway:
+  # gateway validation key used by public ip discovery gateway, this is a required field if the public_ip_discovery_gateway is set
+  public_ip_gateway_key:
   # instance launch tcp port, leave 0 as dynamic
   instance_port: 0
   # instance classification, vx.x.x style

@@ -103,6 +103,9 @@ type serviceAutoCreate struct {
 }
 
 type instanceData struct {
+	FavorPublicIP bool				`mapstructure:"instance_favor_public_ip"`
+	PublicIPGateway string			`mapstructure:"public_ip_discovery_gateway"`
+	PublicIPGatewayKey string		`mapstructure:"public_ip_gateway_key"`
 	Port uint						`mapstructure:"instance_port"`
 	Version string					`mapstructure:"instance_version"`
 	Prefix string					`mapstructure:"instance_prefix"`
@@ -449,6 +452,27 @@ func (c *config) SetSvcCreateHealthPubDnsPath(s string) {
 	}
 }
 
+func (c *config) SetInstanceFavorPublicIP(b bool) {
+	if c._v != nil {
+		c._v.Set("instance.instance_favor_public_ip", b)
+		c.Instance.FavorPublicIP = b
+	}
+}
+
+func (c *config) SetPublicIPDiscoveryGateway(s string) {
+	if c._v != nil {
+		c._v.Set("instance.public_ip_discovery_gateway", s)
+		c.Instance.PublicIPGateway = s
+	}
+}
+
+func (c *config) SetPublicIPGatewayKey(s string) {
+	if c._v != nil {
+		c._v.Set("instance.public_ip_gateway_key", s)
+		c.Instance.PublicIPGatewayKey = s
+	}
+}
+
 func (c *config) SetInstancePort(i uint) {
 	if c._v != nil {
 		c._v.Set("instance.instance_port", i)
@@ -706,6 +730,9 @@ func (c *config) Read() error {
 		"service_auto_create.sac_health_failthreshold", 1).Default(						// value to use for auto service creation, uint
 		"service_auto_create.sac_health_pubdns_type", "").Default(						// value to use for auto service creation, http, https, or tcp
 		"service_auto_create.sac_health_pubdns_path", "").Default(						// value to use for auto service creation, http or https health check resource path
+		"instance.instance_favor_public_ip", "false").Default(							// instance favors public ip, will call snsgateway callerid service to try to obtain public ip of instance, if no public ip, then private ip is used
+		"instance.public_ip_discovery_gateway", "").Default(								// if instance_favor_public_ip is set to true, then public_ip_discovery_gateway is required, this should be the https full url to the snsgateway services which provides the public ip callerid
+		"instance.public_ip_gateway_key", "").Default(									// if public_ip_discovery_gateway is set to true, then public_ip_gateway_key is required, this is needed to hash validation token so that the snsgateway services can validate during GET action
 		"instance.instance_port", 0).Default(												// instance launch tcp port, leave 0 as dynamic
 		"instance.instance_version", "v1.0.0").Default(									// instance classification, vx.x.x style
 		"instance.instance_prefix", "ms-").Default(										// instance id creation prefix, leave blank if no prefix

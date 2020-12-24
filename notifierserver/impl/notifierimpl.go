@@ -35,15 +35,15 @@ import (
 )
 
 type StreamConnection struct {
-	Id string
-	Topic string
-	Stream pb.Notifier_SubscribeServer
+	Id string		// typically custom created guid or other unique id value, used during unsubscribe
+	Topic string	// topic refers to the topic arn
+	Stream pb.NotifierService_SubscribeServer
 	Active bool
 	Err chan error
 }
 
 type NotifierImpl struct {
-	pb.UnimplementedNotifierServer
+	pb.UnimplementedNotifierServiceServer
 
 	Subscribers map[string][]*StreamConnection
 	ConfigData *config.Config
@@ -123,7 +123,7 @@ func (n *NotifierImpl) UnsubscribeAllPrior() {
 	_ = n.ConfigData.Save()
 }
 
-func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.Notifier_SubscribeServer) error {
+func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.NotifierService_SubscribeServer) error {
 	n._mux.Lock()
 	defer n._mux.Unlock()
 

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/crypto"
+	"github.com/aldelo/common/rest"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/common/wrapper/cloudmap/sdhealthchecktype"
@@ -342,6 +343,43 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		s.RegisterServiceHandlers(s._grpcServer)
 
 		ip = util.GetLocalIP()
+
+		//
+		// if instance prefers public ip, will attempt to acquire thru public ip discovery gateway if available
+		//
+		if s._config.Instance.FavorPublicIP && util.LenTrim(s._config.Instance.PublicIPGateway) > 0 && util.LenTrim(s._config.Instance.PublicIPGatewayKey) > 0 {
+			validationToken := crypto.Sha256(util.FormatDate(time.Now().UTC()), s._config.Instance.PublicIPGatewayKey)
+
+			if status, body, err := rest.GET(s._config.Instance.PublicIPGateway, []*rest.HeaderKeyValue{
+				{
+					Key: "x-nts-gateway-token",
+					Value: validationToken,
+				},
+			}); err != nil {
+				// get public ip error, still use local ip
+				log.Println("!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token: " + s._config.Instance.PublicIPGatewayKey + "' Failed: " + err.Error() + ", Using LocalIP Instead !!!")
+			} else if status != 200 {
+				// get public ip status not 200, still use local ip
+				log.Println("!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token: " + s._config.Instance.PublicIPGatewayKey + "' Not Successful: Status Code " + util.Itoa(status) + ", Using LocalIP Instead !!!")
+			} else {
+				// status 200, use public ip instead of local ip
+				if util.IsNumericIntOnly(strings.Replace(body, ".", "", -1)) {
+					// is public ip most likely
+					log.Println("=== Instance Using Public IP '" + body + "' From Discovery Gateway Per Service Config, Original LocalIP was '" + ip + "' ===")
+					ip = body
+				} else {
+					log.Println("!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token: " + s._config.Instance.PublicIPGatewayKey + "' Not Successful: Status Code 200, But Content Not IP: " + body + ", Using LocalIP Instead !!!")
+				}
+			}
+		} else {
+			if s._config.Instance.FavorPublicIP {
+				log.Println("!!! Instance Favors Public IP, However, Service Config Missing Public IP Discovery Gateway and/or Public IP Gateway Key, Using LocalIP Instead !!!")
+			} else {
+				log.Println("=== Instance Using LocalIP Per Service Config Setting ===")
+			}
+		}
+
+		// set port
 		port = util.StrToUint(util.SplitString(lis.Addr().String(), ":", -1))
 		s._localAddress = fmt.Sprintf("%s:%d", ip, port)
 
@@ -651,97 +689,97 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 						}
 					}
 
-					if s.AfterServerStart != nil {
-						log.Println("After gRPC Server Started Begin...")
+					log.Println("After gRPC Server Started Begin...")
 
-						// trigger sd initial health update
-						go func() {
-							waitTime := int(s._config.SvcCreateData.HealthFailThreshold*30+5)
+					// trigger sd initial health update
+					go func() {
+						waitTime := int(s._config.SvcCreateData.HealthFailThreshold*30+5)
 
-							log.Println(">>> Initial SD Instance Health Check Staged (" +  util.Itoa(waitTime) + " Seconds Warm-Up) >>>")
-							time.Sleep(time.Duration(waitTime)*time.Second)
-							log.Println("Initial SD Instance Health Check Begin...")
+						log.Println(">>> Initial SD Instance Health Check Staged (" +  util.Itoa(waitTime) + " Seconds Warm-Up) >>>")
+						time.Sleep(time.Duration(waitTime)*time.Second)
+						log.Println("Initial SD Instance Health Check Begin...")
 
-							// on initial health update, set sd instance health status to healthy (true)
-							if err := s.updateHealth(true); err != nil {
-								log.Println("!!! Update SD Instance Health Failed: " + err.Error() + " !!!")
-							} else {
-								log.Println("... Update SD Instance Health to 'Healthy' Successful")
+						// on initial health update, set sd instance health status to healthy (true)
+						if err := s.updateHealth(true); err != nil {
+							log.Println("!!! Update SD Instance Health Failed: " + err.Error() + " !!!")
+						} else {
+							log.Println("... Update SD Instance Health to 'Healthy' Successful")
 
-								// queue new grpc service host healthy notification
-								if s._config.Service.DiscoveryUseSqsSns {
-									log.Println("Discovery Push Notification Begin...")
+							// queue new grpc service host healthy notification
+							if s._config.Service.DiscoveryUseSqsSns {
+								log.Println("Discovery Push Notification Begin...")
 
-									if s._sqs == nil {
-										log.Println("!!! Discovery Push Notification - Requires SQS Initialized !!!")
-									} else if s._sns == nil {
-										log.Println("!!! Discovery Push Notification - Requires SNS Initialized !!!")
+								if s._sqs == nil {
+									log.Println("!!! Discovery Push Notification - Requires SQS Initialized !!!")
+								} else if s._sns == nil {
+									log.Println("!!! Discovery Push Notification - Requires SNS Initialized !!!")
+								} else {
+									qArn := s._config.Queues.SqsDiscoveryQueueArn
+									qUrl := s._config.Queues.SqsDiscoveryQueueUrl
+									tArn := s._config.Topics.SnsDiscoveryTopicArn
+									tSubId := s._config.Topics.SnsDiscoverySubscriptionArn
+
+									if util.LenTrim(qArn) == 0 {
+										log.Println("!!! Discovery Push Notification - Required SQS Queue Not Auto Created (Missing QueueARN) !!!")
+									} else if util.LenTrim(qUrl) == 0 {
+										log.Println("!!! Discovery Push Notification - Required SQS Queue Not Auto Created (Missing QueueURL) !!!")
+									} else if util.LenTrim(tArn) == 0 {
+										log.Println("!!! Discovery Push Notification - Required SNS Topic Not Auto Created (Missing TopicARN) !!!")
 									} else {
-										qArn := s._config.Queues.SqsDiscoveryQueueArn
-										qUrl := s._config.Queues.SqsDiscoveryQueueUrl
-										tArn := s._config.Topics.SnsDiscoveryTopicArn
-										tSubId := s._config.Topics.SnsDiscoverySubscriptionArn
+										pubOk := false
 
-										if util.LenTrim(qArn) == 0 {
-											log.Println("!!! Discovery Push Notification - Required SQS Queue Not Auto Created (Missing QueueARN) !!!")
-										} else if util.LenTrim(qUrl) == 0 {
-											log.Println("!!! Discovery Push Notification - Required SQS Queue Not Auto Created (Missing QueueURL) !!!")
-										} else if util.LenTrim(tArn) == 0 {
-											log.Println("!!! Discovery Push Notification - Required SNS Topic Not Auto Created (Missing TopicARN) !!!")
-										} else {
-											pubOk := false
+										if util.LenTrim(tSubId) == 0 {
+											// need to subscribe topic
+											if subId, subErr := notification.Subscribe(s._sns, tArn, snsprotocol.Sqs, qArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); subErr != nil {
+												log.Println("!!! Discovery Push Notification - Server Queue Topic Subscribe Failed: " + subErr.Error() + " !!!")
+											} else {
+												s._config.SetSnsDiscoverySubscriptionArn(subId)
 
-											if util.LenTrim(tSubId) == 0 {
-												// need to subscribe topic
-												if subId, subErr := notification.Subscribe(s._sns, tArn, snsprotocol.Sqs, qArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); subErr != nil {
-													log.Println("!!! Discovery Push Notification - Server Queue Topic Subscribe Failed: " + subErr.Error() + " !!!")
-												} else {
-													s._config.SetSnsDiscoverySubscriptionArn(subId)
+												if cErr := s._config.Save(); cErr != nil {
+													// save config fail, reverse subscription if possible
+													log.Println("!!! Discovery Push Notification - Server Queue Topic Subscription Persist To Config Failed: " + cErr.Error() + " !!!")
 
-													if cErr := s._config.Save(); cErr != nil {
-														// save config fail, reverse subscription if possible
-														log.Println("!!! Discovery Push Notification - Server Queue Topic Subscription Persist To Config Failed: " + cErr.Error() + " !!!")
-
-														if uErr := notification.Unsubscribe(s._sns, subId, time.Duration(s._config.Instance.SdTimeout)*time.Second); uErr != nil {
-															log.Println("!!! Discovery Push Notification - Server Queue Auto Unsubscribe Failed: " + uErr.Error() + " !!!")
-														} else {
-															log.Println("!!! Discovery Push Notification - Server Queue Auto Unsubscribe Successful !!!")
-														}
-
-														log.Println("!!! Discovery Push Notification - Publish Service Host Will Not Be Performed !!!")
+													if uErr := notification.Unsubscribe(s._sns, subId, time.Duration(s._config.Instance.SdTimeout)*time.Second); uErr != nil {
+														log.Println("!!! Discovery Push Notification - Server Queue Auto Unsubscribe Failed: " + uErr.Error() + " !!!")
 													} else {
-														pubOk = true
+														log.Println("!!! Discovery Push Notification - Server Queue Auto Unsubscribe Successful !!!")
 													}
-												}
-											} else {
-												// subscription already exist, use existing subscription
-												pubOk = true
-											}
 
-											// publish message to sns -> sqs about this host live
-											if pubOk {
-												s.publishToSNS(tArn, "Discovery Push Notification", s.getHostDiscoveryMessage(true), nil)
-											} else {
-												log.Println("!!! Discovery Push Notification - Nothing to Publish, Possible Error Encountered !!!")
+													log.Println("!!! Discovery Push Notification - Publish Service Host Will Not Be Performed !!!")
+												} else {
+													pubOk = true
+												}
 											}
+										} else {
+											// subscription already exist, use existing subscription
+											pubOk = true
+										}
+
+										// publish message to sns -> sqs about this host live
+										if pubOk {
+											s.publishToSNS(tArn, "Discovery Push Notification", s.getHostDiscoveryMessage(true), nil)
+										} else {
+											log.Println("!!! Discovery Push Notification - Nothing to Publish, Possible Error Encountered !!!")
 										}
 									}
-								} else {
-									log.Println("!!! Discovery Push Notification Disabled !!!")
 								}
-
-								// set service serving mode to true (serving)
-								s._mu.Lock()
-								s._serving = true
-								s._mu.Unlock()
+							} else {
+								log.Println("!!! Discovery Push Notification Disabled !!!")
 							}
-						}()
 
-						// trigger after server start event
+							// set service serving mode to true (serving)
+							s._mu.Lock()
+							s._serving = true
+							s._mu.Unlock()
+						}
+					}()
+
+					// trigger after server start event
+					if s.AfterServerStart != nil {
 						s.AfterServerStart(s)
-
-						log.Println("... After gRPC Server Started End")
 					}
+
+					log.Println("... After gRPC Server Started End")
 				}
 			}
 

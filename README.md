@@ -108,6 +108,10 @@ See /example/cmd/client for a working gRPC client setup to consume the gRPC serv
     - in GoLand (JetBrains), Preferences -> Languages & Preferences -> Protocol Buffers
         - Uncheck "Configure Automatically"
         - Add path to $GOPATH/src
+        - Add path to $GOPATH/pkg/mod
+        - Also, under Descriptor Path
+          - Input: /github.com/golang/protobuf@v1.3.5/protoc-gen-go/descriptor/descriptor.proto
+          - Note: protobuf@v1.3.5, replace with later version if there is descriptor.proto file
 #### 5) Executing ***protoc***
 - In Terminal:
     - go to the folder containing .proto files

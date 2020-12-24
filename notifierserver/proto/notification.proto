@@ -17,7 +17,7 @@ message NotificationData {
 
 message NotificationDone {}
 
-service Notifier {
+service NotifierService {
   rpc Subscribe(NotificationSubscriber) returns (stream NotificationData) {}
   rpc Unsubscribe(NotificationSubscriber) returns (NotificationDone) {}
   rpc Broadcast(NotificationData) returns (NotificationDone) {}

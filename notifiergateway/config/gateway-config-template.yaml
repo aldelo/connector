@@ -1,0 +1,15 @@
+notifier_gateway:
+  # required, valid aws region to host dynamodb services
+  dynamodb_aws_region: us-east-1
+  # optional, dynamodb uses dax or not
+  dynamodb_use_dax: false
+  # conditional, if dax = true, dax url is required
+  dynamodb_dax_url: ""
+  # required, dynamodb table name, used for server routing by notifier gateway
+  dynamodb_table: ""
+  # optional, dynamodb action timeout seconds
+  dynamodb_timeout_seconds: 5
+  # optional, dynamodb action retries count
+  dynamodb_action_retries: 3
+  # optional, gateway secret key phrase, used for hashing or other validation purposes
+  gateway_key:

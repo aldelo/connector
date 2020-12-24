@@ -38,6 +38,7 @@ import (
 	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
+	"github.com/aldelo/connector/notifierclient"
 	ws "github.com/aldelo/connector/webserver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -47,6 +48,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/stats"
 	"log"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +71,10 @@ func init() {
 //			a) import "google.golang.org/grpc/encoding/gzip"
 //			b) in RPC Call, pass grpc.UseCompressor(gzip.Name)) in the third parameter
 //					example: RPCCall(ctx, &pb.Request{...}, grpc.UseCompressor(gzip.Name))
+//
+//		2) Notifier Client yaml
+//			a) xyz-notifier-client.yaml
+//					where xyz is the target gRPC service endpoint name
 type Client struct {
 	// client properties
 	AppName string
@@ -129,6 +135,11 @@ type Client struct {
 	// auto instantiate a manual help checker
 	_healthManualChecker *health.HealthClient
 
+	// upon dial completion successfully,
+	// auto instantiate a notifier client connection to the notifier server,
+	// for auto service discovery callback notifications
+	_notifierClient *notifierclient.NotifierClient
+
 	// *** Setup by Dial Action ***
 	// helper for creating metadata context,
 	// and evaluate metadata header or trailer value when received from rpc
@@ -167,10 +178,12 @@ func (c *Client) readConfig() error {
 	}
 
 	if err := c._config.Read(); err != nil {
+		c._config = nil
 		return fmt.Errorf("Read Config Failed: %s", err.Error())
 	}
 
 	if c._config.Target.InstancePort > 65535 {
+		c._config = nil
 		return fmt.Errorf("Configured Instance Port Not Valid: %s", "Tcp Port Max is 65535")
 	}
 
@@ -317,13 +330,91 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	return
 }
 
+// PreloadConfigData will load the config data before Dial()
+func (c *Client) PreloadConfigData() error {
+	if err := c.readConfig(); err != nil {
+		return err
+	} else {
+		return nil
+	}
+}
+
+// ConfiguredDialMinConnectTimeoutSeconds gets the timeout seconds from config yaml
+func (c *Client) ConfiguredDialMinConnectTimeoutSeconds() uint {
+	if c._config != nil {
+		if c._config.Grpc.DialMinConnectTimeout > 0 {
+			return c._config.Grpc.DialMinConnectTimeout
+		}
+	}
+
+	return 5
+}
+
+// ConfiguredForClientDial checks if the config yaml is ready for client dial operation
+func (c *Client) ConfiguredForClientDial() bool {
+	if c._config == nil {
+		return false
+	}
+
+	if util.LenTrim(c._config.Target.AppName) == 0 {
+		return false
+	}
+
+	if util.LenTrim(c._config.Target.ServiceDiscoveryType) == 0 {
+		return false
+	}
+
+	if util.LenTrim(c._config.Target.ServiceName) == 0 {
+		return false
+	}
+
+	if util.LenTrim(c._config.Target.NamespaceName) == 0 {
+		return false
+	}
+
+	if util.LenTrim(c._config.Target.Region) == 0 {
+		return false
+	}
+
+	return true
+}
+
+// ConfiguredForSNSDiscoveryTopicArn indicates if the sns topic arn for service discovery is configured within the config yaml
+func (c *Client) ConfiguredForSNSDiscoveryTopicArn() bool {
+	if c._config == nil {
+		return false
+	}
+
+	if util.LenTrim(c._config.Topics.SnsDiscoveryTopicArn) == 0 {
+		return false
+	}
+
+	return true
+}
+
+// ConfiguredSNSDiscoveryTopicArn returns the sns discovery topic arn as configured in config yaml
+func (c *Client) ConfiguredSNSDiscoveryTopicArn() string {
+	if c._config == nil {
+		return ""
+	}
+
+	return c._config.Topics.SnsDiscoveryTopicArn
+}
+
 // Dial will dial grpc service and establish client connection
 func (c *Client) Dial(ctx context.Context) error {
 	c._remoteAddress = ""
 
 	// read client config data in
-	if err := c.readConfig(); err != nil {
-		return err
+	if c._config == nil {
+		if err := c.readConfig(); err != nil {
+			return err
+		}
+	}
+
+	if !c.ConfiguredForClientDial() {
+		c._config = nil
+		return fmt.Errorf(c.ConfigFileName + " Not Yet Configured for gRPC Client Dial, Please Check Config File")
 	}
 
 	log.Println("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
@@ -491,12 +582,63 @@ func (c *Client) Dial(ctx context.Context) error {
 				}
 			}
 
+			// finally, run notifier client to subscribe for notification callbacks
+			// the notifier client uses the same client config yaml, but a copy of it to keep the scope separated
+			// within the notifier client config yaml, named xyz-notifier-client.yaml, where xyz is the endpoint service name,
+			// the discovery topicArn as pre-created on aws is stored within, this enables callback for this specific topicArn from notifier server,
+			// note that the service discovery of notifier client is to the notifier server cluster
+			if util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName + "-notifier-client.yaml")) {
+				c._notifierClient = notifierclient.NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
+
+				if c._notifierClient.ConfiguredForNotifierClientDial() {
+					/*
+					use default logging for the commented out handlers
+
+					c._notifierClient.BeforeClientDialHandler
+					c._notifierClient.AfterClientDialHandler
+					c._notifierClient.BeforeClientCloseHandler
+					c._notifierClient.AfterClientCloseHandler
+
+					c._notifierClient.UnaryClientInterceptorHandlers
+					c._notifierClient.StreamClientInterceptorHandlers
+
+					c._notifierClient.ServiceAlertStartedHandler
+					c._notifierClient.ServiceAlertStoppedHandler
+
+					c._notifierClient.ServiceAlertSkippedHandler
+
+					c._notifierClient.ServiceHostOnlineHandler
+					c._notifierClient.ServiceHostOfflineHandler
+					*/
+
+					// dial notifier client to notifier server endpoint and begin service operations
+					if err := c._notifierClient.Dial(); err != nil {
+						log.Println("!!! Notifier Client Service Dial Failed: " + err.Error() + " !!!")
+					} else {
+						if err := c._notifierClient.Subscribe(c._notifierClient.ConfiguredSNSDiscoveryTopicArn()); err != nil {
+							log.Println("!!! Notifier Client Service Subscribe Failed: " + err.Error() + " !!!")
+							c._notifierClient.Close() // close to clean up
+						} else {
+							// subscribe successful, notifier client alert services started
+							log.Println("+++ Notifier Client Service Started +++")
+						}
+					}
+				} else {
+					log.Println("--- Notifier Client Service Skipped, Not Yet Configured for Dial ---")
+				}
+			} else {
+				log.Println("--- Notifier Client Service Skipped, No xyz-notifier-client.yaml Defined ---")
+			}
+
+			//
 			// dial completed
+			//
 			return nil
 		}
 	}
 }
 
+// note: SNS http callback requires public http endpoint, for service discovery, use NotifierClient instead (already configured within Dial)
 func (c *Client) subscribeToSNS(actionName string, topicArn string, topicSubArn string, setConfigSnsSubArnFunc func(string)) {
 	if c._sns != nil && util.LenTrim(topicArn) > 0 && util.LenTrim(topicSubArn) == 0 {
 		if util.LenTrim(c.WebServerConfig.WebServerLocalAddress) == 0 {
@@ -532,6 +674,7 @@ func (c *Client) subscribeToSNS(actionName string, topicArn string, topicSubArn 
 	}
 }
 
+// note: SNS http callback requires public http endpoint, for service discovery, use NotifierClient instead (already configured within Dial)
 func (c *Client) unsubscribeFromSNS() {
 	doSave := false
 
@@ -778,6 +921,19 @@ func (c *Client) Close() {
 
 	c.unsubscribeFromSNS()
 
+	// clean up notifier client connection
+	if c._notifierClient != nil {
+		if c._notifierClient.NotifierClientAlertServicesStarted() {
+			if err := c._notifierClient.Unsubscribe(); err != nil {
+				log.Println("!!! Notifier Client Alert Services Unsubscribe Failed: " + err.Error() + " !!!")
+			}
+		}
+
+		c._notifierClient.Close()
+		c._notifierClient = nil
+	}
+
+	// clean up client connection objects
 	c._remoteAddress = ""
 
 	if c._sqs != nil {

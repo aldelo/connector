@@ -1,0 +1,508 @@
+package notifierclient
+
+/*
+ * Copyright 2020 Aldelo, LP
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import (
+	"context"
+	"fmt"
+	util "github.com/aldelo/common"
+	"github.com/aldelo/connector/client"
+	"google.golang.org/grpc"
+	"log"
+	"strings"
+	"time"
+	notifierpb "github.com/aldelo/connector/notifierserver/proto"
+)
+
+// `{"msg_type":"host-discovery", "action":"online | offline", "host":"123.123.123.123:9999"}`
+type HostDiscoveryNotification struct {
+	MsgType string		`json:"msg_type"`
+	Action string		`json:"action"`
+	Host string			`json:"host"`
+}
+
+func (d *HostDiscoveryNotification) Marshal() (string, error) {
+	if d == nil {
+		return "", nil
+	} else {
+		if buf, err := util.MarshalJSONCompact(d); err != nil {
+			return "", err
+		} else {
+			return buf, nil
+		}
+	}
+}
+
+func (d *HostDiscoveryNotification) Unmarshal(jsonData string) error {
+	if util.LenTrim(jsonData) == 0 {
+		return fmt.Errorf("Unmarshal Requires Json Data")
+	} else {
+		if err := util.UnmarshalJSON(jsonData, d); err != nil {
+			return err
+		} else {
+			return nil
+		}
+	}
+}
+
+type NotifierClient struct {
+	AppName string
+	ConfigFileName string
+	CustomConfigPath string
+
+	BeforeClientDialHandler func(*client.Client)
+	AfterClientDialHandler func(*client.Client)
+	BeforeClientCloseHandler func(*client.Client)
+	AfterClientCloseHandler func(*client.Client)
+
+	UnaryClientInterceptorHandlers []grpc.UnaryClientInterceptor
+	StreamClientInterceptorHandlers []grpc.StreamClientInterceptor
+
+	ServiceAlertStartedHandler func()
+	ServiceAlertSkippedHandler func(reason string)
+	ServiceAlertStoppedHandler func(reason string)
+	ServiceHostOnlineHandler func(host string, port uint)
+	ServiceHostOfflineHandler func(host string, port uint)
+
+	_grpcClient *client.Client
+	_subscriberID string
+	_subscriberTopicArn string
+	_notificationServicesStarted bool
+	_stopNotificationServices chan bool
+}
+
+// NewNotifierClient creates a new prepared notifier client for use in service discovery notification
+func NewNotifierClient(appName string, configFileName string, customConfigPath string) *NotifierClient {
+	// set param info into notifier client struct object
+	cli := &NotifierClient{
+		AppName: appName,
+		ConfigFileName: configFileName,
+		CustomConfigPath: customConfigPath,
+	}
+
+	// create new grpc client object in notifier client struct object
+	cli._grpcClient = client.NewClient(cli.AppName, cli.ConfigFileName, cli.CustomConfigPath)
+
+	// always wait for health check pass
+	cli._grpcClient.WaitForServerReady = true
+
+	// default before and after handlers
+	cli._grpcClient.BeforeClientDial = func(cli *client.Client) {
+		log.Println("Before Notifier Client Dial to Notifier Server...")
+	}
+
+	cli._grpcClient.AfterClientDial = func(cli *client.Client) {
+		log.Println("... After Notifier Client Dialed to Notifier Server")
+	}
+
+	cli._grpcClient.BeforeClientClose = func(cli *client.Client) {
+		log.Println("Before Notifier Client Disconnects from Notifier Server...")
+	}
+
+	cli._grpcClient.AfterClientClose = func(cli *client.Client) {
+		log.Println("... After Notifier Client Disconnected from Notifier Server")
+	}
+
+	cli._grpcClient.UnaryClientInterceptors = []grpc.UnaryClientInterceptor{
+		func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			log.Println(">>> Unary Client Interceptor Invoked for Method " + method)
+			return invoker(ctx, method, req, reply, cc, opts...)
+		},
+	}
+
+	cli._grpcClient.StreamClientInterceptors = []grpc.StreamClientInterceptor{
+		func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			log.Println(">>> Stream Client Interceptor Invoked for Method " + method)
+			return streamer(ctx, desc, cc, method, opts...)
+		},
+	}
+
+	cli.ServiceAlertStartedHandler = func() {
+		log.Println("+++ Service Discovery Alert Notification Started +++")
+	}
+	
+	cli.ServiceAlertSkippedHandler = func(reason string) {
+		log.Println("^^^ Service Discovery Alert Notification Skipped: " + reason + " ^^^")
+	}
+
+	cli.ServiceAlertStoppedHandler = func(reason string) {
+		log.Println("--- Service Discovery Alert Notification Stopped: " + reason + " ---")
+	}
+
+	cli.ServiceHostOnlineHandler = func(host string, port uint) {
+		log.Println("+++ Service Discovery Host Online Notification: " + fmt.Sprintf("%s:%d", host, port) + " +++")
+	}
+
+	cli.ServiceHostOfflineHandler = func(host string, port uint) {
+		log.Println("--- Service Discovery Host Offline Notification: " + fmt.Sprintf("%s:%d", host, port) + " ---")
+	}
+
+	// return the factory built cli
+	return cli
+}
+
+// ConfiguredForNotifierClientDial checks if the notifier client is configured for options, where Dial can be attempted to invoke
+func (n *NotifierClient) ConfiguredForNotifierClientDial() bool {
+	if n._grpcClient == nil {
+		return false
+	}
+
+	if err := n._grpcClient.PreloadConfigData(); err != nil {
+		log.Println("!!! Preload Notifier Client Config Failed: " + err.Error() + " !!!")
+		return false
+	}
+
+	if !n._grpcClient.ConfiguredForClientDial() {
+		log.Println("!!! Notifier Client Config Not Setup for Client Dial Operations Yet !!!")
+		return false
+	}
+
+	if !n._grpcClient.ConfiguredForSNSDiscoveryTopicArn() {
+		log.Println("!!! Notifier Client Config Not Setup for SNS Service Discovery Topic Yet !!!")
+		return false
+	}
+
+	return true
+}
+
+// ConfiguredSNSDiscoveryTopicArn gets the topicArn defined for the notifier client service discovery endpoints
+func (n *NotifierClient) ConfiguredSNSDiscoveryTopicArn() string {
+	if n._grpcClient != nil {
+		return n._grpcClient.ConfiguredSNSDiscoveryTopicArn()
+	} else {
+		return ""
+	}
+}
+
+// NotifierClientAlertServicesStarted indicates notifier client services started via Subscribe() action
+func (n *NotifierClient) NotifierClientAlertServicesStarted() bool {
+	return n._notificationServicesStarted
+}
+
+// Dial will connect the notifier client to the notifier server
+func (n *NotifierClient) Dial() error {
+	if n._grpcClient == nil {
+		return fmt.Errorf("Notifier's gRPC Client is Not Initialized, Obtain via NewNotifierClient Factory Func First")
+	}
+
+	if n.BeforeClientDialHandler != nil {
+		n._grpcClient.BeforeClientDial = n.BeforeClientDialHandler
+	}
+
+	if n.AfterClientDialHandler != nil {
+		n._grpcClient.AfterClientDial = n.AfterClientDialHandler
+	}
+
+	if n.BeforeClientCloseHandler != nil {
+		n._grpcClient.BeforeClientClose = n.BeforeClientCloseHandler
+	}
+
+	if n.AfterClientCloseHandler != nil {
+		n._grpcClient.AfterClientClose = n.AfterClientCloseHandler
+	}
+
+	if len(n.UnaryClientInterceptorHandlers) > 0 {
+		n._grpcClient.UnaryClientInterceptors = n.UnaryClientInterceptorHandlers
+	}
+
+	if len(n.StreamClientInterceptorHandlers) > 0 {
+		n._grpcClient.StreamClientInterceptors = n.StreamClientInterceptorHandlers
+	}
+
+	n._notificationServicesStarted = false
+	n._subscriberID = ""
+	n._subscriberTopicArn = ""
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(n._grpcClient.ConfiguredDialMinConnectTimeoutSeconds())*time.Second)
+	defer cancel()
+
+	if err := n._grpcClient.Dial(ctx); err != nil {
+		log.Printf("!!! Notifier Client Dial Failed: (Connectivity State = %s) %s !!!", n._grpcClient.GetState().String(), err.Error())
+		return err
+	} else {
+		// dial success
+		return nil
+	}
+}
+
+// Close will disconnect the notifier client from the notifier server
+func (n *NotifierClient) Close() {
+	if n._notificationServicesStarted {
+		n._stopNotificationServices <-true
+		n._notificationServicesStarted = false
+	}
+
+	if n._grpcClient != nil {
+		n._grpcClient.Close()
+	}
+
+	n._subscriberID = ""
+	n._subscriberTopicArn = ""
+}
+
+// Subscribe will subscribe this notifier client to a specified topicArn with sns, via notifier server;
+// this subscription will also start the recurring loop to wait for notifier server stream data, for receiving service discovery host info;
+// when service discovery host info is received, the appropriate ServiceHostOnlineHandler or ServiceHostOfflineHandler is triggered;
+// calling the Close() or Unsubscribe() or receiving error conditions from notifier server will sever the long running service discovery process.
+func (n *NotifierClient) Subscribe(topicArn string) error {
+	if n._grpcClient == nil {
+		n._notificationServicesStarted = false
+		n._subscriberID = ""
+		n._subscriberTopicArn = ""
+		return fmt.Errorf("Notifier's gRPC Client is Not Initialized, Obtain via NewNotifierClient Factory Func First")
+	}
+
+	if util.LenTrim(n._subscriberID) > 0 && util.LenTrim(n._subscriberTopicArn) > 0 {
+		return fmt.Errorf("Notifier Client Subscription Already Engaged, Please Use Unsubscribe() First")
+	} else {
+		n._subscriberID = ""
+		n._subscriberTopicArn = ""
+	}
+
+	if util.LenTrim(topicArn) == 0 {
+		n._notificationServicesStarted = false
+		return fmt.Errorf("Notifier Client Subscription Requires Target TopicARN")
+	}
+
+	nc := notifierpb.NewNotifierServiceClient(n._grpcClient.ClientConnection())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sessionId := util.NewULID()
+
+	if nsClient, err := nc.Subscribe(ctx, &notifierpb.NotificationSubscriber{
+		Id: sessionId,
+		Topic: topicArn,
+	}); err != nil {
+		n._notificationServicesStarted = false
+		return fmt.Errorf("Notifier Client Subscribe to TopicARN Failed: %s", err.Error())
+	} else {
+		if n.ServiceAlertStartedHandler != nil {
+			n.ServiceAlertStartedHandler()
+		}
+
+		n._stopNotificationServices = make(chan bool)
+
+		go func(topic string) {
+			for {
+				select {
+				case stopSvc := <-n._stopNotificationServices:
+					if stopSvc {
+						// stop service invoked
+						if n.ServiceAlertStoppedHandler != nil {
+							n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
+						}
+
+						return
+					}
+
+				default:
+					// process notification receive event
+					if data, err := nsClient.Recv(); err != nil {
+						if data != nil {
+							// notification data received from host stream provider
+							if data.Topic != topic {
+								log.Println("!!! Notifier Client Received Notification Data, But Topic Received is Not Expected: Received " + data.Topic + ", Expected " + topic + " !!!")
+
+								if n.ServiceAlertSkippedHandler != nil {
+									n.ServiceAlertSkippedHandler("Received Topic " + data.Topic + ", Expected Topic " + topic)
+								}
+
+								continue
+							}
+
+							// evaluate sns callback relay message
+							// Id = sns message id (assigned by sns) < Id is not used in this code block
+							// Timestamp = sns message timestamp, formatted as "yyyy-mm-ddThh:mm:ss.mmmZ"
+							// Message = sns message content:
+							// 			 `{"msg_type":"host-discovery", "action":"online | offline", "host":"123.123.123.123"}`
+							if util.LenTrim(data.Message) == 0 {
+								log.Println("!!! Notifier Client Received Notification Data, But Message Content is Blank !!!")
+
+								if n.ServiceAlertSkippedHandler != nil {
+									n.ServiceAlertSkippedHandler("Notification Message Content is Blank")
+								}
+
+								continue
+							}
+
+							// ensure message was within the last 15 minutes
+							// t1 is utc value
+							// t2 converts to utc for comparison
+							if t1, err := time.Parse(time.RFC3339, data.Timestamp); err != nil {
+								log.Println("!!! Notifier Client Received Notification Timestamp Not Valid: " + err.Error() + " !!!")
+
+								if n.ServiceAlertSkippedHandler != nil {
+									n.ServiceAlertSkippedHandler("Notification Timestamp Parse Error: " + err.Error())
+								}
+
+								continue
+							} else {
+								t2 := time.Now().UTC()
+
+								if util.AbsDuration(t2.Sub(t1)).Minutes() > 15 {
+									log.Println("!!! Notifier Client Received Notification Timestamp Exceeded 15 Minute Limit: Message Timestamp " + util.FormatDateTime(t1) + ", Current Timestamp " + util.FormatDateTime(t2) + " !!!")
+
+									if n.ServiceAlertSkippedHandler != nil {
+										n.ServiceAlertSkippedHandler("Notification Expired (Exceeded 15 Minutes): Received " + util.FormatDateTime(t1) + ", Current " + util.FormatDateTime(t2))
+									}
+
+									continue
+								}
+							}
+
+							// unmarshal message to host discovery notification object
+							hostDiscNotification := new(HostDiscoveryNotification)
+
+							if err := hostDiscNotification.Unmarshal(data.Message); err != nil {
+								log.Println("!!! Notifier Client Received Notification Unmarshal Json Failed: " + err.Error() + " !!!")
+
+								if n.ServiceAlertSkippedHandler != nil {
+									n.ServiceAlertSkippedHandler("Notification Message Unmarshal Failed: " + err.Error())
+								}
+
+								return
+							}
+
+							// received host discovery notification, push out for event alert
+							if strings.ToUpper(hostDiscNotification.MsgType) == "HOST-DISCOVERY" {
+								if ipPort := strings.Split(hostDiscNotification.Host, ":"); len(ipPort) != 2 {
+									log.Println("!!! Notifier Client Received Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "' !!!")
+
+									if n.ServiceAlertSkippedHandler != nil {
+										n.ServiceAlertSkippedHandler("Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "'")
+									}
+
+									continue
+								} else {
+									ip := ipPort[0]
+									port := util.StrToUint(ipPort[1])
+
+									if ipParts := strings.Split(ip, "."); len(ipParts) != 4 || !util.IsNumericIntOnly(strings.Replace(ip, ".", "", -1)) {
+										log.Println("!!! Notifier Client Received Notification Host IP Not Valid: Received '" + ip + "' !!!")
+
+										if n.ServiceAlertSkippedHandler != nil {
+											n.ServiceAlertSkippedHandler("Notification Host IP Not Valid: Received '" + ip + "'")
+										}
+
+										continue
+									}
+
+									if port <= 0 || port > 65535 {
+										log.Println("!!! Notification Client Received Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "' !!!")
+
+										if n.ServiceAlertSkippedHandler != nil {
+											n.ServiceAlertSkippedHandler("Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "'")
+										}
+
+										continue
+									}
+
+									isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
+
+									// notify the discovered host
+									if isOnline {
+										if n.ServiceHostOnlineHandler != nil {
+											n.ServiceHostOnlineHandler(ip, port)
+										}
+									} else {
+										if n.ServiceHostOfflineHandler != nil {
+											n.ServiceHostOfflineHandler(ip, port)
+										}
+									}
+								}
+							} else {
+								log.Println("!!! Notifier Client Received Notification Message Type Not Expected: Received '" + hostDiscNotification.MsgType + "', Expected 'host-discovery'")
+
+								if n.ServiceAlertSkippedHandler != nil {
+									n.ServiceAlertSkippedHandler("Notification Message Type Not Expected: 'Received " + hostDiscNotification.MsgType + "', Expected 'host-discovery'")
+								}
+
+								continue
+							}
+						} else {
+							// on nil data exit stream client loop
+							log.Println("!!! Exit Notifier Client Side Host Stream Due To Nil Data Received !!!")
+
+							if n.ServiceAlertStoppedHandler != nil {
+								n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Nil Data Received From Notifier Server Stream")
+							}
+
+							n._notificationServicesStarted = false
+							return
+						}
+					} else {
+						// on error exit stream client loop
+						log.Println("!!! Exit Notifier Client Side Host Stream Due To Error: " + err.Error() + " !!!")
+
+						if n.ServiceAlertStoppedHandler != nil {
+							n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Notifier Server Stream Error: " + err.Error())
+						}
+
+						n._notificationServicesStarted = false
+						return
+					}
+				}
+			}
+		}(topicArn)
+
+		n._notificationServicesStarted = true
+		n._subscriberID = sessionId
+		n._subscriberTopicArn = topicArn
+
+		return nil
+	}
+}
+
+// Unsubscribe will stop notification alert services and disconnect from subscription on notifier server
+func (n *NotifierClient) Unsubscribe() error {
+	if n._grpcClient == nil {
+		return fmt.Errorf("Notifier's gRPC Client is Not Initialized, Obtain via NewNotifierClient Factory Func First")
+	}
+
+	// first, stop notification alert services
+	if n._notificationServicesStarted {
+		n._stopNotificationServices <-true
+		n._notificationServicesStarted = false
+	}
+
+	// second, perform unsubscribe?
+	if util.LenTrim(n._subscriberID) == 0 || util.LenTrim(n._subscriberTopicArn) == 0 {
+		n._subscriberID = ""
+		n._subscriberTopicArn = ""
+		return fmt.Errorf("Notifier Client's Subscriber ID and TopicArn Not Found, Client Not Yet Subscribed")
+	}
+
+	// perform unsubscribe action
+	nc := notifierpb.NewNotifierServiceClient(n._grpcClient.ClientConnection())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := nc.Unsubscribe(ctx, &notifierpb.NotificationSubscriber{
+		Id: n._subscriberID,
+		Topic: n._subscriberTopicArn,
+	}); err != nil {
+		return fmt.Errorf("Notifier Client ID %s Unsubscribe From TopicARN %s Failed: %s", n._subscriberID, n._subscriberTopicArn, err.Error())
+	} else {
+		// unsubscribe ok
+		n._subscriberID = ""
+		n._subscriberTopicArn = ""
+		return nil
+	}
+}

@@ -16,6 +16,40 @@ package notifierserver
  * limitations under the License.
  */
 
+/*
+=== PURPOSE ===
+1) notifierServer implements impl.NotifierImpl interface
+2) notifierServer is to be used by a cmd gRPC daemon where it acts as an independent service host
+3) notifierServer exists because aws SNS http/s callback do not support private ip endpoints,
+	therefore, if we need to enable gRPC clients subscribe to an aws SNS topic, with an http callback to a private IP endpoint,
+	we need to comprise a set of services so that SNS can callback to a public notifier gateway endpoint (likely behind ELB),
+	and then such notifier gateway routes the callback data to the notifier server, where notifier server is connected to the gRPC clients via server stream,
+	ultimately allowing the gRPC clients receive the callback that would normally not be possible since it lives within private IP scope
+4) notifierServer is a gRPC service host, likely one or more running on EC2, or ECS, or other containerized deployment strategy within the aws vpc region
+5) notifierServer can be either public or private, depending on target gRPC client needs, notifierServer configuration always is defined with its upstream gateway url
+6) notifierServer exposes gRPC services so that it enables gRPC clients to Subscribe or Unsubscribe intended SNS topic,
+	so that when callback occurs, such callback data is routed to the gRPC client
+7) notifierServer also has the ability to broadcast data to all its connected gRPC clients, when such broadcast request is received by the notifierServer itself
+8) notifierServer uses aws DynamoDB as its backend data store, so that it can store its own server url info to the data store, for Notifier Gateway to discover via Server Key,
+	note, Server Key is submitted during SNS Topic subscription, so during callback by SNS, the server key is returned in path,
+	so that using such server key, we can find the server url from DynamoDB data store
+9) topology of the notification system is:
+	a) gRPC Clients, uses gRPC Notifier Client wrapper, to facilitate the notification service participation; gRPC Clients can be private or public IP scope
+	b) gRPC Notifier Client wrapper, connects to one of, gRPC Notifier Server, where gRPC Notifier Server endpoints discovered via service discovery;
+	c) gRPC Notifier Server, provides SNS Topic Subscribe / Unsubscribe services, to gRPC Notifier Client wrapper; gRPC Notifier Server can be private or public IP scope
+	d) gRPC Notifier Server, provides Data Broadcast to connected gRPC Notifier Clients, as received from gRPC Notifier Gateway from time to time;
+	e) gRPC Notifier Server, automatically persists its own server url into DynamoDB during its lifecycle, so that Notifier Gateway can easily discover its url based on Server Key;
+	f) gRPC Notifier Server, when performing Subscribe to SNS Topic, uses the host defined Notifier Gateway URL;
+	g) gRPC Notifier Gateway, a REST API service, hosted under ELB on Public IP scope, acts as the router between SNS HTTP callback and the gRPC Notifier Server network;
+	h) SNS Topic HTTP Callback, will always be registered (subscribed) for callback to the gRPC Notifier Gateway;
+	i) where the SNS Topic HTTP Callback, will call gRPC Notifier Gateway REST API service, and upon it receiving the call, delegate to the gRPC Notifier Server for downstream push;
+	j) note that gRPC Notifier Server exposes a self hosted REST API endpoint for /snsrelay, and a pre-defined snsNotification struct;
+	k) so that gRPC Notifier Gateway has a standard method of invoking the routing process;
+	l) in essence, gRPC Client to Notifier Server is pure gRPC,
+		while Notifier Server also exposes HTTP REST API, so that Notifier Gateway can trigger when needed during callback,
+		where SNS Callback is always HTTP invocation to the Notifier Gateway REST API path.
+*/
+
 import (
 	"context"
 	"fmt"
@@ -73,7 +107,7 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 	}
 
 	svr := service.NewService(appName, configFileNameGrpcServer, customConfigPath, func(grpcServer *grpc.Server) {
-			pb.RegisterNotifierServer(grpcServer, notifierServer)
+			pb.RegisterNotifierServiceServer(grpcServer, notifierServer)
 		})
 
 	svr.WebServerConfig = &service.WebServerConfig{
@@ -106,7 +140,7 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 
 func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 	if notifierServer == nil {
-		c.String(404, "notifierServer Not Exist")
+		c.String(412, "notifierServer Not Exist")
 		return
 	}
 

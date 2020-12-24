@@ -11,31 +11,31 @@ import (
 
 // This is a compile-time assertion to ensure that this generated file
 // is compatible with the grpc package it is being compiled against.
-const _ = grpc.SupportPackageIsVersion6
+const _ = grpc.SupportPackageIsVersion7
 
-// NotifierClient is the client API for Notifier service.
+// NotifierServiceClient is the client API for NotifierService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type NotifierClient interface {
-	Subscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (Notifier_SubscribeClient, error)
+type NotifierServiceClient interface {
+	Subscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (NotifierService_SubscribeClient, error)
 	Unsubscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (*NotificationDone, error)
 	Broadcast(ctx context.Context, in *NotificationData, opts ...grpc.CallOption) (*NotificationDone, error)
 }
 
-type notifierClient struct {
+type notifierServiceClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewNotifierClient(cc grpc.ClientConnInterface) NotifierClient {
-	return &notifierClient{cc}
+func NewNotifierServiceClient(cc grpc.ClientConnInterface) NotifierServiceClient {
+	return &notifierServiceClient{cc}
 }
 
-func (c *notifierClient) Subscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (Notifier_SubscribeClient, error) {
-	stream, err := c.cc.NewStream(ctx, &_Notifier_serviceDesc.Streams[0], "/notifierserver.Notifier/Subscribe", opts...)
+func (c *notifierServiceClient) Subscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (NotifierService_SubscribeClient, error) {
+	stream, err := c.cc.NewStream(ctx, &_NotifierService_serviceDesc.Streams[0], "/notifierserver.NotifierService/Subscribe", opts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &notifierSubscribeClient{stream}
+	x := &notifierServiceSubscribeClient{stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -45,16 +45,16 @@ func (c *notifierClient) Subscribe(ctx context.Context, in *NotificationSubscrib
 	return x, nil
 }
 
-type Notifier_SubscribeClient interface {
+type NotifierService_SubscribeClient interface {
 	Recv() (*NotificationData, error)
 	grpc.ClientStream
 }
 
-type notifierSubscribeClient struct {
+type notifierServiceSubscribeClient struct {
 	grpc.ClientStream
 }
 
-func (x *notifierSubscribeClient) Recv() (*NotificationData, error) {
+func (x *notifierServiceSubscribeClient) Recv() (*NotificationData, error) {
 	m := new(NotificationData)
 	if err := x.ClientStream.RecvMsg(m); err != nil {
 		return nil, err
@@ -62,127 +62,134 @@ func (x *notifierSubscribeClient) Recv() (*NotificationData, error) {
 	return m, nil
 }
 
-func (c *notifierClient) Unsubscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (*NotificationDone, error) {
+func (c *notifierServiceClient) Unsubscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (*NotificationDone, error) {
 	out := new(NotificationDone)
-	err := c.cc.Invoke(ctx, "/notifierserver.Notifier/Unsubscribe", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/notifierserver.NotifierService/Unsubscribe", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *notifierClient) Broadcast(ctx context.Context, in *NotificationData, opts ...grpc.CallOption) (*NotificationDone, error) {
+func (c *notifierServiceClient) Broadcast(ctx context.Context, in *NotificationData, opts ...grpc.CallOption) (*NotificationDone, error) {
 	out := new(NotificationDone)
-	err := c.cc.Invoke(ctx, "/notifierserver.Notifier/Broadcast", in, out, opts...)
+	err := c.cc.Invoke(ctx, "/notifierserver.NotifierService/Broadcast", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// NotifierServer is the server API for Notifier service.
-// All implementations must embed UnimplementedNotifierServer
+// NotifierServiceServer is the server API for NotifierService service.
+// All implementations must embed UnimplementedNotifierServiceServer
 // for forward compatibility
-type NotifierServer interface {
-	Subscribe(*NotificationSubscriber, Notifier_SubscribeServer) error
+type NotifierServiceServer interface {
+	Subscribe(*NotificationSubscriber, NotifierService_SubscribeServer) error
 	Unsubscribe(context.Context, *NotificationSubscriber) (*NotificationDone, error)
 	Broadcast(context.Context, *NotificationData) (*NotificationDone, error)
-	mustEmbedUnimplementedNotifierServer()
+	mustEmbedUnimplementedNotifierServiceServer()
 }
 
-// UnimplementedNotifierServer must be embedded to have forward compatible implementations.
-type UnimplementedNotifierServer struct {
+// UnimplementedNotifierServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedNotifierServiceServer struct {
 }
 
-func (*UnimplementedNotifierServer) Subscribe(*NotificationSubscriber, Notifier_SubscribeServer) error {
+func (UnimplementedNotifierServiceServer) Subscribe(*NotificationSubscriber, NotifierService_SubscribeServer) error {
 	return status.Errorf(codes.Unimplemented, "method Subscribe not implemented")
 }
-func (*UnimplementedNotifierServer) Unsubscribe(context.Context, *NotificationSubscriber) (*NotificationDone, error) {
+func (UnimplementedNotifierServiceServer) Unsubscribe(context.Context, *NotificationSubscriber) (*NotificationDone, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Unsubscribe not implemented")
 }
-func (*UnimplementedNotifierServer) Broadcast(context.Context, *NotificationData) (*NotificationDone, error) {
+func (UnimplementedNotifierServiceServer) Broadcast(context.Context, *NotificationData) (*NotificationDone, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Broadcast not implemented")
 }
-func (*UnimplementedNotifierServer) mustEmbedUnimplementedNotifierServer() {}
+func (UnimplementedNotifierServiceServer) mustEmbedUnimplementedNotifierServiceServer() {}
 
-func RegisterNotifierServer(s *grpc.Server, srv NotifierServer) {
-	s.RegisterService(&_Notifier_serviceDesc, srv)
+// UnsafeNotifierServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to NotifierServiceServer will
+// result in compilation errors.
+type UnsafeNotifierServiceServer interface {
+	mustEmbedUnimplementedNotifierServiceServer()
 }
 
-func _Notifier_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) error {
+func RegisterNotifierServiceServer(s grpc.ServiceRegistrar, srv NotifierServiceServer) {
+	s.RegisterService(&_NotifierService_serviceDesc, srv)
+}
+
+func _NotifierService_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(NotificationSubscriber)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(NotifierServer).Subscribe(m, &notifierSubscribeServer{stream})
+	return srv.(NotifierServiceServer).Subscribe(m, &notifierServiceSubscribeServer{stream})
 }
 
-type Notifier_SubscribeServer interface {
+type NotifierService_SubscribeServer interface {
 	Send(*NotificationData) error
 	grpc.ServerStream
 }
 
-type notifierSubscribeServer struct {
+type notifierServiceSubscribeServer struct {
 	grpc.ServerStream
 }
 
-func (x *notifierSubscribeServer) Send(m *NotificationData) error {
+func (x *notifierServiceSubscribeServer) Send(m *NotificationData) error {
 	return x.ServerStream.SendMsg(m)
 }
 
-func _Notifier_Unsubscribe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _NotifierService_Unsubscribe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NotificationSubscriber)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(NotifierServer).Unsubscribe(ctx, in)
+		return srv.(NotifierServiceServer).Unsubscribe(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/notifierserver.Notifier/Unsubscribe",
+		FullMethod: "/notifierserver.NotifierService/Unsubscribe",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(NotifierServer).Unsubscribe(ctx, req.(*NotificationSubscriber))
+		return srv.(NotifierServiceServer).Unsubscribe(ctx, req.(*NotificationSubscriber))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Notifier_Broadcast_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _NotifierService_Broadcast_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NotificationData)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(NotifierServer).Broadcast(ctx, in)
+		return srv.(NotifierServiceServer).Broadcast(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/notifierserver.Notifier/Broadcast",
+		FullMethod: "/notifierserver.NotifierService/Broadcast",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(NotifierServer).Broadcast(ctx, req.(*NotificationData))
+		return srv.(NotifierServiceServer).Broadcast(ctx, req.(*NotificationData))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-var _Notifier_serviceDesc = grpc.ServiceDesc{
-	ServiceName: "notifierserver.Notifier",
-	HandlerType: (*NotifierServer)(nil),
+var _NotifierService_serviceDesc = grpc.ServiceDesc{
+	ServiceName: "notifierserver.NotifierService",
+	HandlerType: (*NotifierServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
 			MethodName: "Unsubscribe",
-			Handler:    _Notifier_Unsubscribe_Handler,
+			Handler:    _NotifierService_Unsubscribe_Handler,
 		},
 		{
 			MethodName: "Broadcast",
-			Handler:    _Notifier_Broadcast_Handler,
+			Handler:    _NotifierService_Broadcast_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Subscribe",
-			Handler:       _Notifier_Subscribe_Handler,
+			Handler:       _NotifierService_Subscribe_Handler,
 			ServerStreams: true,
 		},
 	},
