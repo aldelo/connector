@@ -15,3 +15,7 @@ message Answer {
 service AnswerService {
   rpc Greeting (Question) returns (Answer) {}
 }
+
+service AnswerServerStreamService {
+  rpc StreamGreeting (Question) returns (stream Answer) {}
+}

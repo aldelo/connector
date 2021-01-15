@@ -64,7 +64,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/grpclog"
+	"log"
 	"time"
 )
 
@@ -124,6 +124,13 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 						BindingInputPtr: &snsNotification{},
 						Handler: snsrelay,
 					},
+					{
+						RelativePath: "/snsupdate/:topicArn",
+						Method: ginhttpmethod.POST,
+						Binding: ginbindtype.UNKNOWN,
+						BindingInputPtr: nil,
+						Handler: snsupdate,
+					},
 				},
 				CorsMiddleware: &cors.Config{},
 			},
@@ -133,9 +140,20 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 	notifierServer.WebServerLocalAddressFunc = svr.WebServerConfig.GetWebServerLocalAddress
 
 	// clean up prior sns subscriptions logged in config, upon initial launch
-	notifierServer.UnsubscribeAllPrior()
+	notifierServer.UnsubscribeAllPriorSNSTopics()
 
 	return svr, nil
+}
+
+// UnsubscribeAllTopics will clean up by unsubscribing all subscriptionArns from Topic list in config,
+// this is call during notifier service shutdown to clean up
+func UnsubscribeAllTopics() {
+	if notifierServer != nil {
+		log.Println("UnsubscribeAllTopics Invoked")
+		notifierServer.UnsubscribeAllPriorSNSTopics()
+	} else {
+		log.Println("UnsubscribeAllTopics Not Invoked Because notifierServer Object is Nil")
+	}
 }
 
 func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
@@ -147,13 +165,17 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 	n, ok := bindingInputPtr.(*snsNotification)
 
 	if !ok {
-		c.String(500, "Assert SNS Notification Json Failed")
+		c.String(412, "Assert SNS Notification Json Failed")
 	}
+
+	log.Println("Notifier Server SNS Relay Started...")
 
 	if util.LenTrim(n.Message) > 0 {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+
+			log.Println("~~~ Notifier Server Relaying SNS Message to TopicArn: " + n.TopicArn + " ~~~")
 
 			if _, err := notifierServer.Broadcast(ctx, &pb.NotificationData{
 				Id: n.MessageId,
@@ -162,10 +184,55 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 				Timestamp: n.Timestamp,
 			}); err != nil {
 				// broadcast error encountered
-				grpclog.Errorf("SNS Relay Failed: %s", err.Error())
+				log.Println("!!! Notifier Server Relay SNS Message Failed: " + err.Error() + " !!!")
+			} else {
+				log.Println("+++ Notifier Server Relay SNS Message Success +++")
 			}
 		}()
+	} else {
+		log.Println(">>> Notifier Server Skipped SNS Relay Because Message is Blank <<<")
 	}
 
+	log.Println("... Notifier Server SNS Relay Completed")
+
 	c.String(200, "SNS Relay Sent")
+}
+
+func snsupdate(c *gin.Context, bindingInputPtr interface{}) {
+	if notifierServer == nil {
+		c.String(412, "notifierServer Not Exist")
+		return
+	}
+
+	topicArn := c.Param("topicArn")
+
+	if util.LenTrim(topicArn) == 0 {
+		c.String(412, "SNS Update Requires TopicArn")
+		return
+	}
+
+	if c.Request == nil {
+		c.String(412, "SNS Update Requires Http Request Not Nil")
+		return
+	}
+
+	if c.Request.Body == nil {
+		c.String(412, "SNS Update Requires Http Request Body Not Nil")
+		return
+	}
+
+	buf := make([]byte, 1024)
+	num, _ := c.Request.Body.Read(buf)
+	subscriptionArn := string(buf[0:num])
+
+	if util.LenTrim(subscriptionArn) == 0 {
+		c.String(412, "SNS Update Requires SubscriptionArn in Http Request Body")
+		return
+	}
+
+	if err := notifierServer.UpdateSubscriptionArnToTopic(topicArn, subscriptionArn); err != nil {
+		c.String(412, err.Error())
+	} else {
+		c.Status(200)
+	}
 }

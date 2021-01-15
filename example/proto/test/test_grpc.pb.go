@@ -95,3 +95,114 @@ var _AnswerService_serviceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "test.proto",
 }
+
+// AnswerServerStreamServiceClient is the client API for AnswerServerStreamService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type AnswerServerStreamServiceClient interface {
+	StreamGreeting(ctx context.Context, in *Question, opts ...grpc.CallOption) (AnswerServerStreamService_StreamGreetingClient, error)
+}
+
+type answerServerStreamServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewAnswerServerStreamServiceClient(cc grpc.ClientConnInterface) AnswerServerStreamServiceClient {
+	return &answerServerStreamServiceClient{cc}
+}
+
+func (c *answerServerStreamServiceClient) StreamGreeting(ctx context.Context, in *Question, opts ...grpc.CallOption) (AnswerServerStreamService_StreamGreetingClient, error) {
+	stream, err := c.cc.NewStream(ctx, &_AnswerServerStreamService_serviceDesc.Streams[0], "/test.AnswerServerStreamService/StreamGreeting", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &answerServerStreamServiceStreamGreetingClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type AnswerServerStreamService_StreamGreetingClient interface {
+	Recv() (*Answer, error)
+	grpc.ClientStream
+}
+
+type answerServerStreamServiceStreamGreetingClient struct {
+	grpc.ClientStream
+}
+
+func (x *answerServerStreamServiceStreamGreetingClient) Recv() (*Answer, error) {
+	m := new(Answer)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// AnswerServerStreamServiceServer is the server API for AnswerServerStreamService service.
+// All implementations must embed UnimplementedAnswerServerStreamServiceServer
+// for forward compatibility
+type AnswerServerStreamServiceServer interface {
+	StreamGreeting(*Question, AnswerServerStreamService_StreamGreetingServer) error
+	mustEmbedUnimplementedAnswerServerStreamServiceServer()
+}
+
+// UnimplementedAnswerServerStreamServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedAnswerServerStreamServiceServer struct {
+}
+
+func (UnimplementedAnswerServerStreamServiceServer) StreamGreeting(*Question, AnswerServerStreamService_StreamGreetingServer) error {
+	return status.Errorf(codes.Unimplemented, "method StreamGreeting not implemented")
+}
+func (UnimplementedAnswerServerStreamServiceServer) mustEmbedUnimplementedAnswerServerStreamServiceServer() {
+}
+
+// UnsafeAnswerServerStreamServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AnswerServerStreamServiceServer will
+// result in compilation errors.
+type UnsafeAnswerServerStreamServiceServer interface {
+	mustEmbedUnimplementedAnswerServerStreamServiceServer()
+}
+
+func RegisterAnswerServerStreamServiceServer(s grpc.ServiceRegistrar, srv AnswerServerStreamServiceServer) {
+	s.RegisterService(&_AnswerServerStreamService_serviceDesc, srv)
+}
+
+func _AnswerServerStreamService_StreamGreeting_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(Question)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AnswerServerStreamServiceServer).StreamGreeting(m, &answerServerStreamServiceStreamGreetingServer{stream})
+}
+
+type AnswerServerStreamService_StreamGreetingServer interface {
+	Send(*Answer) error
+	grpc.ServerStream
+}
+
+type answerServerStreamServiceStreamGreetingServer struct {
+	grpc.ServerStream
+}
+
+func (x *answerServerStreamServiceStreamGreetingServer) Send(m *Answer) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+var _AnswerServerStreamService_serviceDesc = grpc.ServiceDesc{
+	ServiceName: "test.AnswerServerStreamService",
+	HandlerType: (*AnswerServerStreamServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamGreeting",
+			Handler:       _AnswerServerStreamService_StreamGreeting_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "test.proto",
+}

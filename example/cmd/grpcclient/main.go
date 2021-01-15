@@ -28,6 +28,15 @@ import (
 	testpb "github.com/aldelo/connector/example/proto/test"
 )
 
+type healthTest struct {
+	PK string				`json:"pk" dynamodbav:"PK"`
+	SK string				`json:"sk" dynamodbav:"SK"`
+	NamespaceId string		`json:"namespaceid" dynamodbav:"NamespaceId"`
+	ServiceId string		`json:"serviceid" dynamodbav:"ServiceId"`
+	InstanceId string		`json:"instanceid" dynamodbav:"InstanceId"`
+	LastTimestamp int64		`json:"lasttimestamp" dynamodbav:"LastTimestamp"`
+}
+
 // example gRPC client using connector client
 func main() {
 	fmt.Println("*** Example Client Consuming gRPC Server Services ***")
@@ -43,6 +52,10 @@ func main() {
 	}
 	defer svc1Cli.Close()
 
+	go func() {
+		svc1Cli.DoNotifierAlertService()
+	}()
+
 	//
 	// now operate client to service interactions
 	//
@@ -51,7 +64,8 @@ func main() {
 
 		fmt.Println("Please Select Choice:")
 		fmt.Println("... 1 = Call service-1 RPC Test Method")
-		fmt.Println("... 2 = Re-Dial service-1 Client Connection")
+		fmt.Println("... 2 = Call service-1 Server Stream RPC Test Method")
+		fmt.Println("... 3 = Re-Dial service-1 Client Connection")
 		_, _ = fmt.Scanln(&choice)
 
 		switch util.RightTrimLF(choice) {
@@ -81,6 +95,23 @@ func main() {
 			}
 
 		case "2":
+			answerClient := testpb.NewAnswerServerStreamServiceClient(svc1Cli.ClientConnection())
+			if stream, err := answerClient.StreamGreeting(context.Background(), &testpb.Question{}); err != nil {
+				log.Println(err)
+			} else {
+				for {
+					if answer, e := stream.Recv(); e != nil {
+						log.Println("Stream Receive Error: " + e.Error())
+						break
+					} else {
+						log.Println("Answer = " + answer.Answer)
+					}
+				}
+
+				log.Println("For Loop Ended")
+			}
+
+		case "3":
 			svc1Cli.Close()
 			if svc1Cli, err = DialService1(); err != nil {
 				log.Fatal("Re-Dial Client Failed: " + err.Error())
@@ -100,11 +131,13 @@ func main() {
 func DialService1() (cli *client.Client, err error) {
 	cli = client.NewClient("ExampleClient", "service-1", "./endpoint")
 
+	/*
 	cli.WebServerConfig = &client.WebServerConfig{
 		AppName: cli.AppName,
 		ConfigFileName: "webserver",
 		CustomConfigPath: "",
 	}
+	*/
 
 	cli.WaitForServerReady = true
 

@@ -95,10 +95,13 @@ instance:
   # instance id creation prefix, leave blank if no prefix
   instance_prefix: ams-
   # instance favor public ip when possible, will contact snsgateway callerid service to request public ip if available
+  # warning: if favor public ip = true, but public ip fail to obtain, service launch will stop
   instance_favor_public_ip: false
   # full url path including http or https to the gateway service that providers public ip discovery, typically this is the endpoint pointing to snsgateway services
+  # warning: required if favor public ip = true, but public ip fail to obtain, service launch will stop
   public_ip_discovery_gateway:
   # gateway validation key used by public ip discovery gateway, this is a required field if the public_ip_discovery_gateway is set
+  # warning: required if favor public ip = true, but public ip fail to obtain, service launch will stop
   public_ip_gateway_key:
   # instance launch tcp port, leave 0 as dynamic
   instance_port: 0
@@ -114,6 +117,16 @@ instance:
   instance_id: ""
   # automatically deregister prior instance id if found during launch
   auto_deregister_prior: true
+  # rest api url full path to the healthreport controller, for service to report its live status, the service host will periodically retire inactive services > 15 minutes of no keepalive report
+  health_report_service_url: ""
+  # frequency of health report update via calling health_report_service_url, minimum 30 seconds, default 120 seconds, maximum 300 seconds, 0 = 120
+  health_report_update_frequency_seconds: 120
+  # hash key name is the identifier name used by service when performing health report
+  # hash key name can be any alphanumeric string value, on the health monitor side, this name is used as lookup for the actual key
+  hash_key_name: ""
+  # hash key secret is the actual hash key secret value used by this service, to hash (digitally sign) a set of values
+  # the host side will also have this hash key, while the hash key name is used as lookup between the packet transfer, without disclosing the hash key secret
+  hash_key_secret: ""
 grpc:
   # grpc connection attempt time out in seconds, 0 for default of 120 seconds
   connection_timeout: 15
@@ -124,7 +137,7 @@ grpc:
   # for mTLS setup, one or more client CA cert path to pem file, multiple files separated by comma
   client_ca_cert_files: ""
   # grpc keep-alive enforcement policy,
-  # minimum seconds before client may send keepalive, 0 for default 300 seconds
+  # minimum seconds before client may send keepalive, 0 for default 15 seconds
   keepalive_min_wait: 0
   # grpc keep-alive enforcement policy,
   # allow client to keepalive if no stream, false is default

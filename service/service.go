@@ -56,6 +56,24 @@ import (
 	"time"
 )
 
+// notifiergateway/notifiergateway.go also contains this struct as a mirror;
+//
+// HashSignature = security validation is via sha256 hash signature for use with notifiergateway /healthreport,
+// struct field HashSignature is hash of values (other than aws region, hash key name, and hash signature itself),
+// the hashing source value is also combined with the current date in UTC formatted in yyyy-mm-dd,
+// hash value is comprised of namespaceid + serviceid + instanceid + current date in UTC in yyyy-mm-dd format;
+// the sha256 hash salt uses named HashKey on both client and server side
+type healthreport struct {
+	NamespaceId string		`json:"NamespaceId"`
+	ServiceId string		`json:"ServiceId"`
+	InstanceId string		`json:"InstanceId"`
+	AwsRegion string		`json:"AWSRegion"`
+	ServiceInfo string		`json:"ServiceInfo"`
+	HostInfo string			`json:"HostInfo"`
+	HashKeyName string		`json:"HashKeyName"`
+	HashSignature string	`json:"HashSignature"`
+}
+
 // Service represents a gRPC server's service definition and entry point
 //
 // AppName = (required) name of this service
@@ -209,10 +227,13 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 				opts = append(opts, grpc.Creds(credentials.NewTLS(tc)))
 			}
+		} else {
+			log.Println("~~~ Server Unsecured, Not On TLS ~~~")
 		}
 
-		if s._config.Grpc.KeepAliveMinWait > 0 || s._config.Grpc.KeepAlivePermitWithoutStream {
-			minTime := 5 * time.Minute // default value per grpc doc
+		if s._config.Grpc.KeepAliveMinWait >= 0 || s._config.Grpc.KeepAlivePermitWithoutStream {
+			// anything more than 10 seconds, it seems client side will disconnect if no data within 30 seconds
+			minTime := 10 * time.Second
 
 			if s._config.Grpc.KeepAliveMinWait > 0 {
 				minTime = time.Duration(s._config.Grpc.KeepAliveMinWait) * time.Second
@@ -345,7 +366,8 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		ip = util.GetLocalIP()
 
 		//
-		// if instance prefers public ip, will attempt to acquire thru public ip discovery gateway if available
+		// if instance prefers public ip, will attempt to acquire thru public ip discovery gateway,
+		// if instance prefers public ip, but cannot obtain public ip, stop service launch
 		//
 		if s._config.Instance.FavorPublicIP && util.LenTrim(s._config.Instance.PublicIPGateway) > 0 && util.LenTrim(s._config.Instance.PublicIPGatewayKey) > 0 {
 			validationToken := crypto.Sha256(util.FormatDate(time.Now().UTC()), s._config.Instance.PublicIPGatewayKey)
@@ -357,10 +379,14 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 				},
 			}); err != nil {
 				// get public ip error, still use local ip
-				log.Println("!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token: " + s._config.Instance.PublicIPGatewayKey + "' Failed: " + err.Error() + ", Using LocalIP Instead !!!")
+				buf := "!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token' Failed: " + err.Error() + ", Service Launch Stopped !!!"
+				log.Println(buf)
+				return nil, "", 0, fmt.Errorf(buf)
 			} else if status != 200 {
 				// get public ip status not 200, still use local ip
-				log.Println("!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token: " + s._config.Instance.PublicIPGatewayKey + "' Not Successful: Status Code " + util.Itoa(status) + ", Using LocalIP Instead !!!")
+				buf := "!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token' Not Successful: Status Code " + util.Itoa(status) + ", Service Launch Stopped !!!"
+				log.Println(buf)
+				return nil, "", 0, fmt.Errorf(buf)
 			} else {
 				// status 200, use public ip instead of local ip
 				if util.IsNumericIntOnly(strings.Replace(body, ".", "", -1)) {
@@ -368,12 +394,16 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 					log.Println("=== Instance Using Public IP '" + body + "' From Discovery Gateway Per Service Config, Original LocalIP was '" + ip + "' ===")
 					ip = body
 				} else {
-					log.Println("!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token: " + s._config.Instance.PublicIPGatewayKey + "' Not Successful: Status Code 200, But Content Not IP: " + body + ", Using LocalIP Instead !!!")
+					buf := "!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token' Not Successful: Status Code 200, But Content Not IP: " + body + ", Service Launch Stopped !!!"
+					log.Println(buf)
+					return nil, "", 0, fmt.Errorf(buf)
 				}
 			}
 		} else {
 			if s._config.Instance.FavorPublicIP {
-				log.Println("!!! Instance Favors Public IP, However, Service Config Missing Public IP Discovery Gateway and/or Public IP Gateway Key, Using LocalIP Instead !!!")
+				buf := "!!! Instance Favors Public IP, However, Service Config Missing Public IP Discovery Gateway and/or Public IP Gateway Key, Service Launch Stopped !!!"
+				log.Println(buf)
+				return nil, "", 0, fmt.Errorf(buf)
 			} else {
 				log.Println("=== Instance Using LocalIP Per Service Config Setting ===")
 			}
@@ -608,11 +638,31 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 	go func() {
 		gRPCServerInvoked := false
 
+		stopHealthReportService := make(chan bool)
+
 		for {
 			select {
 			case <-quit:
 				// quit is invoked
 				log.Println("gRPC Server Quit Invoked")
+
+				// remove service from health list on data store
+				instanceId := s._config.Instance.Id
+
+				if util.LenTrim(instanceId) > 0 {
+					log.Println("Removing Health Report Service Record From Data Store for InstanceID '" + instanceId + "'...")
+
+					if e := s.deleteServiceHealthReportFromDataStore(instanceId); e != nil {
+						log.Println("!!! Removing Health Report Service Record From Data Store for InstanceID '" + instanceId + "' Failed: " + e.Error() + " !!!")
+					} else {
+						log.Println("...Removing Health Report Service Record From Data Store for InstanceID '" + instanceId + "': OK")
+					}
+				} else {
+					log.Println("!!! Remove Health Report Service Record From Data Store Not Needed: InstanceID is Blank !!!")
+				}
+
+				// stop health report clean up service
+				stopHealthReportService <-true
 
 				// on exit, stop serving
 				s._mu.Lock()
@@ -621,6 +671,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 
 				s._grpcServer.Stop()
 				_ = lis.Close()
+
 				return
 
 			default:
@@ -636,7 +687,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 						log.Println("... Before gRPC Server Starts End")
 					}
 
-					log.Println("Starting gRPC Server...")
+					log.Println("Initiating gRPC Server Startup...")
 
 					go func() {
 						//
@@ -660,59 +711,61 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 						}
 					}()
 
-					log.Println("... gRPC Server Started")
+					log.Println("... gRPC Server Startup Initiated")
 
 					if s.WebServerConfig != nil {
-						log.Println("Starting Http Web Server...")
-						startWebServerFail := make(chan bool)
+						if util.LenTrim(s.WebServerConfig.ConfigFileName) > 0 {
+							log.Println("Starting Http Web Server...")
+							startWebServerFail := make(chan bool)
 
-						go func() {
-							//
-							// start http web server
-							//
-							if err := s.startWebServer(); err != nil {
-								log.Printf("!!! Serve Http Web Server %s Failed: %s !!!\n", s.WebServerConfig.AppName, err)
-								startWebServerFail <- true
-							} else {
-								log.Println("... Http Web Server Quit Command Received")
-							}
-						}()
+							go func() {
+								//
+								// start http web server
+								//
+								if err := s.startWebServer(); err != nil {
+									log.Printf("!!! Serve Http Web Server %s Failed: %s !!!\n", s.WebServerConfig.AppName, err)
+									startWebServerFail <- true
+								} else {
+									log.Println("... Http Web Server Quit Command Received")
+								}
+							}()
 
-						// give slight time delay to allow time slice for non blocking code to complete in goroutine above
-						time.Sleep(150*time.Millisecond)
+							// give slight time delay to allow time slice for non blocking code to complete in goroutine above
+							time.Sleep(150 * time.Millisecond)
 
-						select {
-							case <- startWebServerFail:
+							select {
+							case <-startWebServerFail:
 								log.Println("... Http Web Server Fail to Start")
 							default:
 								log.Printf("... Http Web Server Started: %s\n", s.WebServerConfig.WebServerLocalAddress)
+							}
 						}
 					}
-
-					log.Println("After gRPC Server Started Begin...")
 
 					// trigger sd initial health update
 					go func() {
 						waitTime := int(s._config.SvcCreateData.HealthFailThreshold*30+5)
 
-						log.Println(">>> Initial SD Instance Health Check Staged (" +  util.Itoa(waitTime) + " Seconds Warm-Up) >>>")
+						log.Println(">>> Instance Health Check Warm-Up: " +  util.Itoa(waitTime) + " Seconds - Please Wait >>>")
 						time.Sleep(time.Duration(waitTime)*time.Second)
-						log.Println("Initial SD Instance Health Check Begin...")
+						log.Println("<<< Instance Health Check Warm-Up: OK <<<")
+
+						log.Println("+++ Updating Instance as Healthy with Service Discovery: Please Wait +++")
 
 						// on initial health update, set sd instance health status to healthy (true)
 						if err := s.updateHealth(true); err != nil {
-							log.Println("!!! Update SD Instance Health Failed: " + err.Error() + " !!!")
+							log.Println("!!! Update Instance Health Status with Service Discovery Failed: " + err.Error() + " !!!")
 						} else {
-							log.Println("... Update SD Instance Health to 'Healthy' Successful")
+							log.Println("+++ Update Instance as Healthy with Service Discovery: OK +++")
 
 							// queue new grpc service host healthy notification
 							if s._config.Service.DiscoveryUseSqsSns {
-								log.Println("Discovery Push Notification Begin...")
+								log.Println("~~~ Service Discovery Push Notification Begin ~~~")
 
 								if s._sqs == nil {
-									log.Println("!!! Discovery Push Notification - Requires SQS Initialized !!!")
+									log.Println("!!! Service Discovery Push Notification Skipped - SQS Not Initialized, Check Config !!!")
 								} else if s._sns == nil {
-									log.Println("!!! Discovery Push Notification - Requires SNS Initialized !!!")
+									log.Println("!!! Service Discovery Push Notification Skipped - SNS Not Initialized, Check Config !!!")
 								} else {
 									qArn := s._config.Queues.SqsDiscoveryQueueArn
 									qUrl := s._config.Queues.SqsDiscoveryQueueUrl
@@ -720,57 +773,95 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 									tSubId := s._config.Topics.SnsDiscoverySubscriptionArn
 
 									if util.LenTrim(qArn) == 0 {
-										log.Println("!!! Discovery Push Notification - Required SQS Queue Not Auto Created (Missing QueueARN) !!!")
+										log.Println("!!! Service Discovery Push Notification Skipped - SQS Queue Not Auto Created (Missing QueueARN) !!!")
 									} else if util.LenTrim(qUrl) == 0 {
-										log.Println("!!! Discovery Push Notification - Required SQS Queue Not Auto Created (Missing QueueURL) !!!")
+										log.Println("!!! Service Discovery Push Notification Skipped - SQS Queue Not Auto Created (Missing QueueURL) !!!")
 									} else if util.LenTrim(tArn) == 0 {
-										log.Println("!!! Discovery Push Notification - Required SNS Topic Not Auto Created (Missing TopicARN) !!!")
+										log.Println("!!! Service Discovery Push Notification Skipped - SNS Topic Not Auto Created (Missing TopicARN) !!!")
 									} else {
 										pubOk := false
 
 										if util.LenTrim(tSubId) == 0 {
 											// need to subscribe topic
+											log.Println("+++ Instance Subscribing to SNS Topic '" + tArn + "' with SQS Queue '" + qArn + "' for Service Discovery Publishing +++")
+
 											if subId, subErr := notification.Subscribe(s._sns, tArn, snsprotocol.Sqs, qArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); subErr != nil {
-												log.Println("!!! Discovery Push Notification - Server Queue Topic Subscribe Failed: " + subErr.Error() + " !!!")
+												log.Println("!!! Service Discovery Push Notification Skipped - Instance Queue Topic Subscribe Failed: " + subErr.Error() + " !!!")
 											} else {
+												log.Println("+++ Instance Subscribing to SNS Topic '" + tArn + "' with SQS Queue '" + qArn + "' for Service Discovery Publishing: OK +++")
+
 												s._config.SetSnsDiscoverySubscriptionArn(subId)
 
 												if cErr := s._config.Save(); cErr != nil {
 													// save config fail, reverse subscription if possible
-													log.Println("!!! Discovery Push Notification - Server Queue Topic Subscription Persist To Config Failed: " + cErr.Error() + " !!!")
+													log.Println("!!! Service Discovery Push Notification Skipped - Instance Queue Topic Subscription Persist To Config Failed: " + cErr.Error() + " !!!")
 
 													if uErr := notification.Unsubscribe(s._sns, subId, time.Duration(s._config.Instance.SdTimeout)*time.Second); uErr != nil {
-														log.Println("!!! Discovery Push Notification - Server Queue Auto Unsubscribe Failed: " + uErr.Error() + " !!!")
+														log.Println("!!! Service Discovery Push Notification Skipped - Instance Queue Save to Config Failed, Auto Unsubscribe Failed: " + uErr.Error() + " !!!")
 													} else {
-														log.Println("!!! Discovery Push Notification - Server Queue Auto Unsubscribe Successful !!!")
+														log.Println("!!! Service Discovery Push Notification Skipped - Instance Queue Save to Config Failed, Auto Unsubscribe Successful !!!")
 													}
 
-													log.Println("!!! Discovery Push Notification - Publish Service Host Will Not Be Performed !!!")
+													log.Println("!!! Service Discovery Push Notification Skipped - Publish Service Host Will Not Be Performed !!!")
 												} else {
 													pubOk = true
 												}
 											}
 										} else {
 											// subscription already exist, use existing subscription
+											log.Println("+++ Instance Subscription Already Exists for SNS Topic '" + tArn + "' with SQS Queue '" + qArn + "'")
 											pubOk = true
 										}
 
 										// publish message to sns -> sqs about this host live
 										if pubOk {
+											log.Println("+++ Service Discovery Push Notification: Publish Host Info OK +++")
 											s.publishToSNS(tArn, "Discovery Push Notification", s.getHostDiscoveryMessage(true), nil)
 										} else {
-											log.Println("!!! Discovery Push Notification - Nothing to Publish, Possible Error Encountered !!!")
+											log.Println("!!! Service Discovery Push Notification: Nothing to Publish, Possible Error Encountered !!!")
 										}
 									}
 								}
 							} else {
-								log.Println("!!! Discovery Push Notification Disabled !!!")
+								log.Println("--- Service Discovery Push Notification Disabled ---")
 							}
 
 							// set service serving mode to true (serving)
 							s._mu.Lock()
 							s._serving = true
 							s._mu.Unlock()
+
+							// -----------------------------------------------------------------------------------------
+							// start service live timestamp reporting to data store
+							// initially reporting will skip or fail, until instance is registered and healthy
+							// -----------------------------------------------------------------------------------------
+							freq := s._config.Instance.HealthReportUpdateFrequencySeconds
+
+							if freq == 0 {
+								freq = 120
+							} else if freq < 30 {
+								freq = 30
+							} else if freq > 300 {
+								freq = 300
+							}
+
+							for {
+								select {
+								case <-stopHealthReportService:
+									log.Println("### Health Report Update To Data Store Service Stopped: Stop Signal Received ###")
+									return
+
+								default:
+									// perform service live timestamp update to data store
+									if !s.setServiceHealthReportUpdateToDataStore() {
+										log.Println("### Health Report Update To Data Store Service Stopped: Update Action Exception ###")
+										return
+									}
+
+									// each update wait
+									time.Sleep(time.Duration(freq)*time.Second)
+								}
+							}
 						}
 					}()
 
@@ -778,8 +869,6 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) error {
 					if s.AfterServerStart != nil {
 						s.AfterServerStart(s)
 					}
-
-					log.Println("... After gRPC Server Started End")
 				}
 			}
 
@@ -860,10 +949,163 @@ func (s *Service) awaitOsSigExit() {
 	}()
 
 	log.Println("=== Press 'Ctrl + C' to Shutdown ===")
+	log.Print("Please Wait for Instance Service Discovery To Complete... (This may take 30+ Seconds)")
+
 	<-done
 
 	// blocked until signal
 	log.Println("*** Shutdown Invoked ***")
+}
+
+// deleteServiceHealthReportFromDataStore will remove the health report service record from data store based on instanceId
+func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) error {
+	if util.LenTrim(instanceId) == 0 {
+		return fmt.Errorf("Delete Health Report Service Record Requires InstanceID")
+	}
+
+	if s._config == nil {
+		return fmt.Errorf("Delete Health Report Service Record Requires Config Object")
+	}
+
+	if util.LenTrim(s._config.Instance.HealthReportServiceUrl) == 0 {
+		return fmt.Errorf("Delete Health Report Service Record Requires HealthReportServiceUrl")
+	}
+
+	if util.LenTrim(s._config.Instance.HashKeyName) == 0 {
+		return fmt.Errorf("Delete Health Report Service Record Requires HashKeyName")
+	}
+
+	if util.LenTrim(s._config.Instance.HashKeySecret) == 0 {
+		return fmt.Errorf("Delete Health Report Service Record Requires HashKeySecret")
+	}
+
+	statusCode, _, e := rest.DELETE(s._config.Instance.HealthReportServiceUrl + "/" + instanceId, []*rest.HeaderKeyValue{
+										{
+											Key: "Content-Type",
+											Value: "application/json",
+										},
+										{
+											Key: "x-nts-gateway-hash-name",
+											Value: s._config.Instance.HashKeyName,
+										},
+										{
+											Key: "x-nts-gateway-hash-signature",
+											Value: crypto.Sha256(instanceId + util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret),
+										},
+									})
+
+	if e != nil {
+		return fmt.Errorf("Delete Health Report Service Record Failed: %s", e.Error())
+	}
+
+	if statusCode != 200 {
+		return fmt.Errorf("Delete Health Report Service Record Failed: %s", "Status Code " + util.Itoa(statusCode))
+	}
+
+	return nil
+}
+
+// setServiceHealthReportUpdateToDataStore updates this service with dynamodb Common-Hosts with last hit timestamp,
+// this is used by SNS Gateway service to auto clean up inactive services by de-register once more than 15 minutes stale
+func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
+	if s._config == nil {
+		log.Println("Set Service Health Report Update To Data Store Stopped: " + "Service Config Nil")
+		return false
+	}
+
+	if util.LenTrim(s._config.Instance.HealthReportServiceUrl) == 0 {
+		// skip
+		return false
+	}
+
+	if util.LenTrim(s._config.Instance.HashKeyName) == 0 {
+		log.Println("Set Service Health Report Update To Data Store Stopped: " + "Hash Key Name Not Defined in Config")
+		return false
+	}
+
+	if util.LenTrim(s._config.Instance.HashKeySecret) == 0 {
+		log.Println("Set Service Health Report Update To Data Store Stopped: " + "Hash Key Secret Not Defined in Config")
+		return false
+	}
+
+	if util.LenTrim(s._config.Target.Region) == 0 {
+		log.Println("Set Service Health Report Update To Data Store Stopped: " + "AWS Region Not Defined in Config")
+		return false
+	}
+
+	if util.LenTrim(s._config.Namespace.Id) == 0 {
+		log.Println("Set Service Health Report Update To Data Store Stopped: " + "NamespaceID Not Defined in Config")
+		return false
+	}
+
+	if util.LenTrim(s._config.Namespace.Name) == 0 {
+		log.Println("Set Service Health Report Update To Data Store Stopped: " + "NamespaceName Not Defined in Config")
+		return false
+	}
+
+	if util.LenTrim(s._config.Service.Name) == 0 {
+		log.Println("Set Service Health Report Update To Data Store Stopped: " + "ServiceName Not Defined in Config")
+		return false
+	}
+
+	if util.LenTrim(s._config.Service.Id) == 0 {
+		log.Println("Set Service Health Report Update To Data Store Skipped: " + "ServiceID Not Defined in Config")
+		return true
+	}
+
+	if util.LenTrim(s._config.Instance.Id) == 0 {
+		log.Println("Set Service Health Report Update To Data Store Skipped: " + "InstanceID Not Defined in Config")
+		return true
+	}
+
+	if util.LenTrim(s._localAddress) == 0 {
+		log.Println("Set Service Health Report Update To Data Store Skipped: " + "Service Host Info Not Ready")
+		return true
+	}
+
+	// create hash signature
+	// sha256 of namespaceid + serviceid + instanceid + current date in UTC yyyy-mm-dd
+	// sha256 salt = Hash Key Secret
+	hashSignature := crypto.Sha256(s._config.Namespace.Id + s._config.Service.Id + s._config.Instance.Id + util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret)
+
+	data := &healthreport{
+		NamespaceId: s._config.Namespace.Id,
+		ServiceId: s._config.Service.Id,
+		InstanceId: s._config.Instance.Id,
+		AwsRegion: s._config.Target.Region,
+		ServiceInfo: strings.ToLower(s._config.Service.Name + "." + s._config.Namespace.Name),
+		HostInfo: s._localAddress,
+		HashKeyName: s._config.Instance.HashKeyName,
+		HashSignature: hashSignature,
+	}
+
+	jsonData, e := util.MarshalJSONCompact(data)
+
+	if e != nil {
+		log.Println("Set Service Health Report Update To Data Store Failed: " + e.Error())
+		return true
+	}
+
+	// call sns gateway /healthreport to notify service live status
+	if statusCode, RespBody, e := rest.POST(s._config.Instance.HealthReportServiceUrl, []*rest.HeaderKeyValue{
+												{
+													Key: "Content-Type",
+													Value: "application/json",
+												},
+											}, jsonData); e != nil {
+		// rest post invoke error
+		log.Println("Set Service Health Report Update To Data Store Failed: (Invoke REST POST '" + s._config.Instance.HealthReportServiceUrl + "' Error) " + e.Error())
+
+	} else if statusCode != 200 {
+		// rest post result status not 200
+		log.Println("Set Service Health Report Update To Data Store Failed: (Invoke REST POST '" + s._config.Instance.HealthReportServiceUrl + "' Result Status " + util.Itoa(statusCode) + ") " + RespBody)
+
+	} else {
+		// rest post success: 200
+		log.Println("Set Service Health Report Update To Data Store OK")
+	}
+
+	return true
 }
 
 // Serve will setup grpc service and start serving
@@ -1166,7 +1408,7 @@ func (s *Service) deregisterInstance() error {
 						// wait 250 ms then retry, up until 20 counts of 250 ms (5 seconds)
 						if tryCount < 20 {
 							tryCount++
-							log.Println("... Checking De-Register Instance Completion Status, Attempt " + strconv.Itoa(tryCount) + " (100ms)")
+							log.Println("... Checking De-Register Instance Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
 							time.Sleep(250*time.Millisecond)
 						} else {
 							log.Println("... De-Register Instance Failed: Operation Timeout After 5 Seconds")
@@ -1271,6 +1513,8 @@ func (s *Service) GracefulStop() {
 
 	// perform unsubscribe if any
 	s.unsubscribeSNS()
+
+	_ = s.deleteServiceHealthReportFromDataStore(s._config.Instance.Id)
 
 	// start clean up
 	s._localAddress = ""

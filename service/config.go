@@ -114,6 +114,10 @@ type instanceData struct {
 	SdTimeout uint					`mapstructure:"sd_timeout"`
 	InternalHealthFrequency uint	`mapstructure:"internal_health_frequency"`
 	AutoDeregisterPrior bool		`mapstructure:"auto_deregister_prior"`
+	HealthReportServiceUrl string	`mapstructure:"health_report_service_url"`
+	HealthReportUpdateFrequencySeconds uint 	`mapstructure:"health_report_update_frequency_seconds"`
+	HashKeyName string				`mapstructure:"hash_key_name"`
+	HashKeySecret string			`mapstructure:"hash_key_secret"`
 }
 
 type grpcData struct {
@@ -529,6 +533,34 @@ func (c *config) SetAutoDeregisterPrior(b bool) {
 	}
 }
 
+func (c *config) SetHealthReportServiceUrl(s string) {
+	if c._v != nil {
+		c._v.Set("instance.health_report_service_url", s)
+		c.Instance.HealthReportServiceUrl = s
+	}
+}
+
+func (c *config) SetHealthReportUpdateFrequencySeconds(i uint) {
+	if c._v != nil {
+		c._v.Set("instance.health_report_update_frequency_seconds", i)
+		c.Instance.HealthReportUpdateFrequencySeconds = i
+	}
+}
+
+func (c *config) SetHashKeyName(s string) {
+	if c._v != nil {
+		c._v.Set("instance.hash_key_name", s)
+		c.Instance.HashKeyName = s
+	}
+}
+
+func (c *config) SetHashKeySecret(s string) {
+	if c._v != nil {
+		c._v.Set("instance.hash_key_secret", s)
+		c.Instance.HashKeySecret = s
+	}
+}
+
 func (c *config) SetGrpcConnectTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.connection_timeout", i)
@@ -741,6 +773,10 @@ func (c *config) Read() error {
 		"instance.sd_timeout", 5).Default(												// service discovery actions timeout seconds  (for cloudmap register, health update, deregister)
 		"instance.internal_health_frequency", 5).Default(									// instance internal grpc health check frequency in seconds
 		"instance.auto_deregister_prior", true).Default(									// automatically deregister prior service discovery registration if exists during launch, default = true
+		"instance.health_report_service_url", "").Default(								// if service reports health keepalive status to a target service host, specify the service url full path, including healthreport controller destination
+		"instance.health_report_update_frequency_seconds", 120).Default(					// frequency of health report update via calling health_report_service_url, minimum 30 seconds, default 120 seconds, maximum 300 seconds, 0 = 120
+		"instance.hash_key_name", "").Default(											// hash key name is passed to host to indicate the actual hash key secret to use for hash verification (the actual hash key secret is not sent via wire)
+		"instance.hash_key_secret", "").Default(											// hash key secret is used to hash string value, so that such hash value is sent via wire, where host will use its own hash key secret to verify
 		"grpc.connection_timeout", 15).Default(											// grpc connection attempt time out in seconds, 0 for default of 120 seconds
 		"grpc.server_cert_file", "").Default(												// grpc tls setup, path to cert pem file
 		"grpc.server_key_file", "").Default(												// grpc tls setup, path to key pem file

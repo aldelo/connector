@@ -17,8 +17,8 @@ package main
  */
 
 import (
-	"github.com/aldelo/connector/notifiergateway"
 	"github.com/aldelo/common/wrapper/systemd"
+	"github.com/aldelo/connector/notifiergateway"
 	"github.com/aldelo/connector/webserver"
 	"log"
 )
@@ -44,7 +44,15 @@ func startServiceHandler(port int) {
 		log.Fatalln(err)
 	}
 
+	// first start health clean up routine
+	stopHealthCleanUp := make(chan bool)
+	notifiergateway.RunStaleHealthReportRecordsRemoverService(stopHealthCleanUp)
+
+	// gin serve runs in blocking mode
 	if err = ng.Serve(); err != nil {
 		log.Println(err)
 	}
+
+	log.Println(">>> Stopping Health Clean Up Service <<<")
+	stopHealthCleanUp <-true
 }

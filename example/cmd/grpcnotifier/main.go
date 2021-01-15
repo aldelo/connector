@@ -50,6 +50,10 @@ func startServiceHandler(port int) {
 }
 
 func stopServiceHandler() {
+	// unsubscribe all subscriptions
+	notifierserver.UnsubscribeAllTopics()
+
+	// stop service
 	if ns != nil {
 		ns.GracefulStop()
 	}

@@ -13,3 +13,14 @@ notifier_gateway:
   dynamodb_action_retries: 3
   # optional, gateway secret key phrase, used for hashing or other validation purposes
   gateway_key:
+  # optional, service discovery action timeout seconds
+  service_discovery_timeout_seconds: 5
+  # optional, health report service record clean up frequency seconds, default is 120, minmimum is 30, maximum is 3600 (1 hour), 0 = 120
+  health_report_cleanup_frequency_seconds: 120
+  # optional, health report service record stale minutes, total minutes before record is considered stale and primed for clean up removal
+  # minimum = 3 minutes, default = 5 minutes, maximum = 15 minutes, 0 = 5 minutes
+  health_report_record_stale_minutes: 5
+  # optional, list of hash key name and secrets for use by this host
+  hash_keys:
+    - hash_key_name: ""
+      hash_key_secret: ""

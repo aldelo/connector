@@ -5,7 +5,6 @@ import (
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/dynamodb"
-	"log"
 	"strings"
 	"time"
 )
@@ -13,7 +12,9 @@ import (
 type serverRoute struct {
 	PK string				`json:"pk" dynamodbav:"PK"`
 	SK string				`json:"sk" dynamodbav:"SK"`
-	ServerHost string		`json:"host" dynamodbav:"Host"`
+	ServerKey string		`json:"serverkey" dynamodbav:"ServerKey"`
+	HostInfo string			`json:"hostinfo" dynamodbav:"HostInfo"`
+	LastTimestamp int64		`json:"lasttimestamp" dynamodbav:"LastTimestamp"`
 }
 
 func (n *NotifierImpl) ConnectDataStore() error {
@@ -39,8 +40,7 @@ func (n *NotifierImpl) ConnectDataStore() error {
 	}
 }
 
-// maxRetries = 0 disables retry, max is 10
-func (n *NotifierImpl) saveServerRouteToDataStore(serverKey string, serverUrl string, maxRetries uint) error {
+func (n *NotifierImpl) saveServerRouteToDataStore(serverKey string, serverUrl string) (err error) {
 	if n._ddbStore == nil {
 		return fmt.Errorf("Persist Server Routing to Data Store Failed: DynamoDB Connection Not Established")
 	}
@@ -57,59 +57,29 @@ func (n *NotifierImpl) saveServerRouteToDataStore(serverKey string, serverUrl st
 		return fmt.Errorf("Notifier Server Callback URL Endpoint Must Begin with https:// or http://")
 	}
 
-	if maxRetries > 10 {
-		maxRetries = 10
-	}
+	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
+	sk := fmt.Sprintf("ServerKey^%s", serverKey)
 
-	pk := fmt.Sprintf("%s#notifier#gateway#route#config^serverkey#%s", n.ConfigData.AppName, serverKey)
-	sk := "route"
-	timeOut := uint(5)
-	if n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds > 0 {
-		timeOut = n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds
-		if timeOut > 15 {
-			timeOut = 15
-		}
-	}
-
-	if err := n._ddbStore.PutItem(serverRoute{
+	hostInfo := &serverRoute{
 		PK: pk,
 		SK: sk,
-		ServerHost: serverUrl,
-	}, util.DurationPtr(time.Duration(timeOut)*time.Second)); err != nil {
+		ServerKey: serverKey,
+		HostInfo: serverUrl,
+		LastTimestamp: time.Now().Unix(),
+	}
+
+	if e := n._ddbStore.PutItemWithRetry(n.ConfigData.NotifierServerData.DynamoDBActionRetries,
+										 hostInfo,
+										 n._ddbStore.TimeOutDuration(n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds)); e != nil {
 		// error
-		if maxRetries > 0 {
-			if err.AllowRetry {
-				if err.RetryNeedsBackOff {
-					time.Sleep(500*time.Millisecond)
-				} else {
-					time.Sleep(100*time.Millisecond)
-				}
-
-				log.Printf("Persist Server Routing to Data Store Failed: (Retry) %s\n", err)
-
-				return n.saveServerRouteToDataStore(serverKey, serverUrl, maxRetries-1)
-			} else {
-				if err.SuppressError {
-					return nil
-				} else {
-					return fmt.Errorf("Persist Server Routing to Data Store Failed: (PutItem - Retry) %s", err)
-				}
-			}
-		} else {
-			if err.SuppressError {
-				return nil
-			} else {
-				return fmt.Errorf("Persist Server Routing to Data Store Failed: (PutItem - Retries Exhausted) %s", err)
-			}
-		}
+		return fmt.Errorf("Persist Server Routing to Data Store Failed: %s", err)
 	} else {
-		// no error
+		// success
 		return nil
 	}
 }
 
-// maxRetries = 0 disables retry, max is 10
-func (n *NotifierImpl) getServerRouteFromDataStore(serverKey string, maxRetries uint) (serverUrl string, err error) {
+func (n *NotifierImpl) getServerRouteFromDataStore(serverKey string) (serverUrl string, err error) {
 	if n._ddbStore == nil {
 		return "", fmt.Errorf("Get Server Routing From Data Store Failed: DynamoDB Connection Not Established")
 	}
@@ -118,57 +88,19 @@ func (n *NotifierImpl) getServerRouteFromDataStore(serverKey string, maxRetries 
 		return "", fmt.Errorf("Get Server Routing From Data Store Failed: Server Key is Required")
 	}
 
-	if maxRetries > 10 {
-		maxRetries = 10
-	}
+	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
+	sk := fmt.Sprintf("ServerKey^%s", serverKey)
 
-	pk := fmt.Sprintf("%s#notifier#gateway#route#config^serverkey#%s", n.ConfigData.AppName, serverKey)
-	sk := "route"
-	timeOut := uint(5)
-	if n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds > 0 {
-		timeOut = n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds
-		if timeOut > 15 {
-			timeOut = 15
-		}
-	}
+	routeInfo := &serverRoute{}
 
-	routeInfo := new(serverRoute)
-
-	if e := n._ddbStore.GetItem(routeInfo, pk, sk, util.DurationPtr(time.Duration(timeOut)*time.Second), nil); e != nil {
-		// error
-		if maxRetries > 0 {
-			if e.AllowRetry {
-				if e.RetryNeedsBackOff {
-					time.Sleep(500*time.Millisecond)
-				} else {
-					time.Sleep(100*time.Millisecond)
-				}
-
-				log.Printf("Get Server Routing From Data Store Failed: (Retry) %s\n", e)
-
-				return n.getServerRouteFromDataStore(serverKey, maxRetries-1)
-			} else {
-				if e.SuppressError {
-					return "", nil
-				} else {
-					return "", fmt.Errorf("Get Server Routing From Data Store Failed: (GetItem - Retry) %s", e)
-				}
-			}
-		} else {
-			if e.SuppressError {
-				return "", nil
-			} else {
-				return "", fmt.Errorf("Get Server Routing From Data Store Failed: (GetItem - Retries Exhausted) %s", e)
-			}
-		}
+	if e := n._ddbStore.GetItemWithRetry(n.ConfigData.NotifierServerData.DynamoDBActionRetries, routeInfo, pk, sk, util.DurationPtr(time.Duration(n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds)*time.Second), nil); e != nil {
+		return "", fmt.Errorf("Get Server Routing From Data Store Failed: %s", e)
 	} else {
-		// no error
-		return routeInfo.ServerHost, nil
+		return routeInfo.HostInfo, nil
 	}
 }
 
-// maxRetries = 0 disables retry, max is 10
-func (n *NotifierImpl) deleteServerRouteFromDataStore(serverKey string, maxRetries uint) error {
+func (n *NotifierImpl) deleteServerRouteFromDataStore(serverKey string) error {
 	if n._ddbStore == nil {
 		return fmt.Errorf("Delete Server Routing From Data Store Failed: DynamoDB Connection Not Established")
 	}
@@ -177,49 +109,12 @@ func (n *NotifierImpl) deleteServerRouteFromDataStore(serverKey string, maxRetri
 		return fmt.Errorf("Delete Server Routing From Data Store Failed: Server Key is Required")
 	}
 
-	if maxRetries > 10 {
-		maxRetries = 10
-	}
+	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
+	sk := fmt.Sprintf("ServerKey^%s", serverKey)
 
-	pk := fmt.Sprintf("%s#notifier#gateway#route#config^serverkey#%s", n.ConfigData.AppName, serverKey)
-	sk := "route"
-	timeOut := uint(5)
-	if n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds > 0 {
-		timeOut = n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds
-		if timeOut > 15 {
-			timeOut = 15
-		}
-	}
-
-	if err := n._ddbStore.DeleteItem(pk, sk, util.DurationPtr(time.Duration(timeOut)*time.Second)); err != nil {
-		// error
-		if maxRetries > 0 {
-			if err.AllowRetry {
-				if err.RetryNeedsBackOff {
-					time.Sleep(500*time.Millisecond)
-				} else {
-					time.Sleep(100*time.Millisecond)
-				}
-
-				log.Printf("Delete Server Routing From Data Store Failed: (Retry) %s\n", err)
-
-				return n.deleteServerRouteFromDataStore(serverKey, maxRetries-1)
-			} else {
-				if err.SuppressError {
-					return nil
-				} else {
-					return fmt.Errorf("Delete Server Routing From Data Store Failed: (DeleteItem - Retry) %s", err)
-				}
-			}
-		} else {
-			if err.SuppressError {
-				return nil
-			} else {
-				return fmt.Errorf("Delete Server Routing From Data Store Failed: (DeleteItem - Retries Exhausted) %s", err)
-			}
-		}
+	if err := n._ddbStore.DeleteItemWithRetry(n.ConfigData.NotifierServerData.DynamoDBActionRetries, pk, sk, util.DurationPtr(time.Duration(n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds)*time.Second)); err != nil {
+		return fmt.Errorf("Delete Server Routing From Data Store Failed: %s", err)
 	} else {
-		// no error
 		return nil
 	}
 }

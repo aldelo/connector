@@ -17,6 +17,7 @@ package impl
  */
 
 import (
+	util "github.com/aldelo/common"
 	testpb "github.com/aldelo/connector/example/proto/test"
 	"context"
 )
@@ -31,4 +32,20 @@ func (*TestServiceImpl) Greeting(ctx context.Context, q *testpb.Question) (*test
 	return &testpb.Answer{
 		Answer: s,
 	}, nil
+}
+
+type TestStreamServiceImpl struct {
+	testpb.UnimplementedAnswerServerStreamServiceServer
+}
+
+func (*TestStreamServiceImpl) StreamGreeting(in *testpb.Question, stream testpb.AnswerServerStreamService_StreamGreetingServer) error {
+	for i := 0; i < 50; i++ {
+		if err := stream.Send(&testpb.Answer{
+			Answer: util.CurrentDateTime(),
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

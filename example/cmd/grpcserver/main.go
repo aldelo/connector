@@ -57,6 +57,7 @@ func startServiceHandler(port int) {
 	// setup grpc service server
 	grpcServer = service.NewService("ExampleServer", "service", "", func(grpcServer *grpc.Server) {
 		testpb.RegisterAnswerServiceServer(grpcServer, &impl.TestServiceImpl{})
+		testpb.RegisterAnswerServerStreamServiceServer(grpcServer, &impl.TestStreamServiceImpl{})
 	})
 
 	// code to execute before server starts
@@ -133,7 +134,7 @@ func startServiceHandler(port int) {
 	// set http web server
 	grpcServer.WebServerConfig = &service.WebServerConfig{
 		AppName: grpcServer.AppName,
-		ConfigFileName: "webserver",
+		ConfigFileName: "",	// web server not used in example
 	}
 
 	//

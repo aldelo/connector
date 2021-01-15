@@ -8,6 +8,7 @@ COMPANY="Example Company"
 CN="*.example.com"
 
 # SAN must contain the same DNS domain as in CN for gRPC TLS to work
+# if DNS sub domain is more than one level, such as a.b.domain.com, then *.b.domain.com
 SERVERSAN="DNS:localhost,DNS:*.example.com,IP:0.0.0.0,IP:127.0.0.1"
 CLIENTSAN="DNS:localhost,DNS:*.example.com,IP:0.0.0.0,IP:127.0.0.1"
 

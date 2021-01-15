@@ -40,6 +40,15 @@ type notifierGatewayData struct {
 	DynamoDBTimeoutSeconds uint					`mapstructure:"dynamodb_timeout_seconds"`
 	DynamoDBActionRetries uint					`mapstructure:"dynamodb_action_retries"`
 	GatewayKey string							`mapstructure:"gateway_key"`
+	ServiceDiscoveryTimeoutSeconds uint			`mapstructure:"service_discovery_timeout_seconds"`
+	HealthReportCleanUpFrequencySeconds uint	`mapstructure:"health_report_cleanup_frequency_seconds"`
+	HealthReportRecordStaleMinutes uint			`mapstructure:"health_report_record_stale_minutes"`
+	HashKeys []hashKeyData						`mapstructure:"hash_keys"`
+}
+
+type hashKeyData struct {
+	HashKeyName string							`mapstructure:"hash_key_name"`
+	HashKeySecret string						`mapstructure:"hash_key_secret"`
 }
 
 func (c *Config) SetDynamoDBAwsRegion(s string) {
@@ -91,6 +100,34 @@ func (c *Config) SetGatewayKey(s string) {
 	}
 }
 
+func (c *Config) SetServiceDiscoveryTimeoutSeconds(i uint) {
+	if c._v != nil {
+		c._v.Set("notifier_gateway.service_discovery_timeout_seconds", i)
+		c.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds = i
+	}
+}
+
+func (c *Config) SetHealthReportCleanUpFrequencySeconds(i uint) {
+	if c._v != nil {
+		c._v.Set("notifier_gateway.health_report_cleanup_frequency_seconds", i)
+		c.NotifierGatewayData.HealthReportCleanUpFrequencySeconds = i
+	}
+}
+
+func (c *Config) SetHealthReportRecordStaleMinutes(i uint) {
+	if c._v != nil {
+		c._v.Set("notifier_gateway.health_report_record_stale_minutes", i)
+		c.NotifierGatewayData.HealthReportRecordStaleMinutes = i
+	}
+}
+
+func (c *Config) SetHashKeys(hk ...hashKeyData) {
+	if c._v != nil {
+		c._v.Set("notifier_gateway.hash_keys", hk)
+		c.NotifierGatewayData.HashKeys = hk
+	}
+}
+
 // Read will load config settings from disk
 func (c *Config) Read() error {
 	c._v = nil
@@ -118,8 +155,19 @@ func (c *Config) Read() error {
 		"notifier_gateway.dynamodb_dax_url", "").Default(					// conditional, required if use dax = true
 		"notifier_gateway.dynamodb_table", "").Default(					// required, dynamodb table name
 		"notifier_gateway.dynamodb_timeout_seconds", 5).Default(			// optional, dynamodb action timeout seconds
-		"notifier_gateway.dynamodb_action_retries", 3).Default(
-		"notifier_gateway.gateway_key", "")							// optional, gateway key is used to validate inbound request when such request is to be validated
+		"notifier_gateway.dynamodb_action_retries", 3).Default(			// optional, dynamodb actions retry count
+		"notifier_gateway.gateway_key", "").Default(						// optional, gateway key is used to validate inbound request when such request is to be validated
+		"notifier_gateway.service_discovery_timeout_seconds", 5)			// optional, service discovery actions timeout seconds, defaults to 5 seconds
+
+	// optional, health report service record clean up frequency seconds, default is 120, minmimum is 30, maximum is 3600 (1 hour), 0 = 120
+	c._v.Default("notifier_gateway.health_report_cleanup_frequency_seconds", 120)
+
+	// optional, health report service record stale minutes, total minutes before record is considered stale and primed for clean up removal
+	// minimum = 3 minutes, default = 5 minutes, maximum = 15 minutes, 0 = 5 minutes
+	c._v.Default("notifier_gateway.health_report_record_stale_minutes", 5)
+
+	// optional, sets up default hash keys slice
+	c._v.Default("notifier_gateway.hash_keys", []hashKeyData{})
 
 	if ok, err := c._v.Init(); err != nil {
 		return err
