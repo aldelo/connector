@@ -1,7 +1,7 @@
 package service
 
 /*
- * Copyright 2020 Aldelo, LP
+ * Copyright 2020-2021 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -53,9 +53,8 @@ type serviceData struct {
 	Id string						`mapstructure:"sv_id"`
 	Name string						`mapstructure:"sv_name"`
 	DiscoveryUseSqsSns bool			`mapstructure:"sv_discovery_use_sqs_sns"`
-	MonitorUseSqsSns bool			`mapstrucutre:"sv_monitor_use_sqs_sns"`
-	TracerUseSqsSns bool			`mapstructure:"sv_tracer_use_sqs_sns"`
-	LoggerUseSqsSns bool			`mapstructure:"sv_logger_use_sqs_sns"`
+	TracerUseXRay bool				`mapstructure:"sv_tracer_use_xray"`
+	LoggerUseSqs bool				`mapstructure:"sv_logger_use_sqs"`
 }
 
 type queuesData struct {
@@ -63,14 +62,6 @@ type queuesData struct {
 	SqsDiscoveryMessageRetentionSeconds uint	`mapstructure:"sqs_discovery_message_retention_seconds"`
 	SqsDiscoveryQueueUrl string					`mapstructure:"sqs_discovery_queue_url"`
 	SqsDiscoveryQueueArn string					`mapstructure:"sqs_discovery_queue_arn"`
-	SqsMonitorQueueNamePrefix string			`mapstructure:"sqs_monitor_queue_name_prefix"`
-	SqsMonitorMessageRetentionSeconds uint		`mapstructure:"sqs_monitor_message_retention_seconds"`
-	SqsMonitorQueueUrl string					`mapstructure:"sqs_monitor_queue_url"`
-	SqsMonitorQueueArn string					`mapstructure:"sqs_monitor_queue_arn"`
-	SqsTracerQueueNamePrefix string				`mapstructure:"sqs_tracer_queue_name_prefix"`
-	SqsTracerMessageRetentionSeconds uint		`mapstructure:"sqs_tracer_message_retention_seconds"`
-	SqsTracerQueueUrl string					`mapstructure:"sqs_tracer_queue_url"`
-	SqsTracerQueueArn string					`mapstructure:"sqs_tracer_queue_arn"`
 	SqsLoggerQueueNamePrefix string				`mapstructure:"sqs_logger_queue_name_prefix"`
 	SqsLoggerMessageRetentionSeconds uint		`mapstructure:"sqs_logger_message_retention_seconds"`
 	SqsLoggerQueueUrl string					`mapstructure:"sqs_logger_queue_url"`
@@ -81,15 +72,6 @@ type topicsData struct {
 	SnsDiscoveryTopicNamePrefix string			`mapstructure:"sns_discovery_topic_name_prefix"`
 	SnsDiscoveryTopicArn string					`mapstructure:"sns_discovery_topic_arn"`
 	SnsDiscoverySubscriptionArn string			`mapstructure:"sns_discovery_subscription_arn"`
-	SnsMonitorTopicNamePrefix string			`mapstructure:"sns_monitor_topic_name_prefix"`
-	SnsMonitorTopicArn string					`mapstructure:"sns_monitor_topic_arn"`
-	SnsMonitorSubscriptionArn string			`mapstructure:"sns_monitor_subscription_arn"`
-	SnsTracerTopicNamePrefix string				`mapstructure:"sns_tracer_topic_name_prefix"`
-	SnsTracerTopicArn string					`mapstructure:"sns_tracer_topic_arn"`
-	SnsTracerSubscriptionArn string				`mapstructure:"sns_tracer_subscription_arn"`
-	SnsLoggerTopicNamePrefix string				`mapstructure:"sns_logger_topic_name_prefix"`
-	SnsLoggerTopicArn string					`mapstructure:"sns_logger_topic_arn"`
-	SnsLoggerSubscriptionArn string				`mapstructure:"sns_logger_subscription_arn"`
 }
 
 type serviceAutoCreate struct {
@@ -190,24 +172,17 @@ func (c *config) SetDiscoveryUseSqsSns(b bool) {
 	}
 }
 
-func (c *config) SetMonitorUseSqsSns(b bool) {
+func (c *config) SetTracerUseXRay(b bool) {
 	if c._v != nil {
-		c._v.Set("service.sv_monitor_use_sqs_sns", b)
-		c.Service.MonitorUseSqsSns = b
+		c._v.Set("service.sv_tracer_use_xray", b)
+		c.Service.TracerUseXRay = b
 	}
 }
 
-func (c *config) SetTracerUseSqsSns(b bool) {
+func (c *config) SetLoggerUseSqs(b bool) {
 	if c._v != nil {
-		c._v.Set("service.sv_tracer_use_sqs_sns", b)
-		c.Service.TracerUseSqsSns = b
-	}
-}
-
-func (c *config) SetLoggerUseSqsSns(b bool) {
-	if c._v != nil {
-		c._v.Set("service.sv_logger_use_sqs_sns", b)
-		c.Service.LoggerUseSqsSns = b
+		c._v.Set("service.sv_logger_use_sqs", b)
+		c.Service.LoggerUseSqs = b
 	}
 }
 
@@ -236,62 +211,6 @@ func (c *config) SetSqsDiscoveryQueueArn(s string) {
 	if c._v != nil {
 		c._v.Set("queues.sqs_discovery_queue_arn", s)
 		c.Queues.SqsDiscoveryQueueArn = s
-	}
-}
-
-func (c *config) SetSqsMonitorQueueNamePrefix(s string) {
-	if c._v != nil {
-		c._v.Set("queues.sqs_monitor_queue_name_prefix", s)
-		c.Queues.SqsMonitorQueueNamePrefix = s
-	}
-}
-
-func (c *config) SetSqsMonitorMessageRetentionSeconds(i uint) {
-	if c._v != nil {
-		c._v.Set("queues.sqs_monitor_message_retention_seconds", i)
-		c.Queues.SqsMonitorMessageRetentionSeconds = i
-	}
-}
-
-func (c *config) SetSqsMonitorQueueUrl(s string) {
-	if c._v != nil {
-		c._v.Set("queues.sqs_monitor_queue_url", s)
-		c.Queues.SqsMonitorQueueUrl = s
-	}
-}
-
-func (c *config) SetSqsMonitorQueueArn(s string) {
-	if c._v != nil {
-		c._v.Set("queues.sqs_monitor_queue_arn", s)
-		c.Queues.SqsMonitorQueueArn = s
-	}
-}
-
-func (c *config) SetSqsTracerQueueNamePrefix(s string) {
-	if c._v != nil {
-		c._v.Set("queues.sqs_tracer_queue_name_prefix", s)
-		c.Queues.SqsTracerQueueNamePrefix = s
-	}
-}
-
-func (c *config) SetSqsTracerMessageRetentionSeconds(i uint) {
-	if c._v != nil {
-		c._v.Set("queues.sqs_tracer_message_retention_seconds", i)
-		c.Queues.SqsTracerMessageRetentionSeconds = i
-	}
-}
-
-func (c *config) SetSqsTracerQueueUrl(s string) {
-	if c._v != nil {
-		c._v.Set("queues.sqs_tracer_queue_url", s)
-		c.Queues.SqsTracerQueueUrl = s
-	}
-}
-
-func (c *config) SetSqsTracerQueueArn(s string) {
-	if c._v != nil {
-		c._v.Set("queues.sqs_tracer_queue_arn", s)
-		c.Queues.SqsTracerQueueArn = s
 	}
 }
 
@@ -341,69 +260,6 @@ func (c *config) SetSnsDiscoverySubscriptionArn(s string) {
 	if c._v != nil {
 		c._v.Set("topics.sns_discovery_subscription_arn", s)
 		c.Topics.SnsDiscoverySubscriptionArn = s
-	}
-}
-
-func (c *config) SetSnsMonitorTopicNamePrefix(s string) {
-	if c._v != nil {
-		c._v.Set("topics.sns_monitor_topic_name_prefix", s)
-		c.Topics.SnsMonitorTopicNamePrefix = s
-	}
-}
-
-func (c *config) SetSnsMonitorTopicArn(s string) {
-	if c._v != nil {
-		c._v.Set("topics.sns_monitor_topic_arn", s)
-		c.Topics.SnsMonitorTopicArn = s
-	}
-}
-
-func (c *config) SetSnsMonitorSubscriptionArn(s string) {
-	if c._v != nil {
-		c._v.Set("topics.sns_monitor_subscription_arn", s)
-		c.Topics.SnsMonitorSubscriptionArn = s
-	}
-}
-
-func (c *config) SetSnsTracerTopicNamePrefix(s string) {
-	if c._v != nil {
-		c._v.Set("topics.sns_tracer_topic_name_prefix", s)
-		c.Topics.SnsTracerTopicNamePrefix = s
-	}
-}
-
-func (c *config) SetSnsTracerTopicArn(s string) {
-	if c._v != nil {
-		c._v.Set("topics.sns_tracer_topic_arn", s)
-		c.Topics.SnsTracerTopicArn = s
-	}
-}
-
-func (c *config) SetSnsTracerSubscriptionArn(s string) {
-	if c._v != nil {
-		c._v.Set("topics.sns_tracer_subscription_arn", s)
-		c.Topics.SnsTracerSubscriptionArn = s
-	}
-}
-
-func (c *config) SetSnsLoggerTopicNamePrefix(s string) {
-	if c._v != nil {
-		c._v.Set("topics.sns_logger_topic_name_prefix", s)
-		c.Topics.SnsLoggerTopicNamePrefix = s
-	}
-}
-
-func (c *config) SetSnsLoggerTopicArn(s string) {
-	if c._v != nil {
-		c._v.Set("topics.sns_logger_topic_arn", s)
-		c.Topics.SnsLoggerTopicArn = s
-	}
-}
-
-func (c *config) SetSnsLoggerSubscriptionArn(s string) {
-	if c._v != nil {
-		c._v.Set("topics.sns_logger_subscription_arn", s)
-		c.Topics.SnsLoggerSubscriptionArn = s
 	}
 }
 
@@ -724,21 +580,12 @@ func (c *config) Read() error {
 		"service.sv_id", "").Default(														// from aws cloud map or leave blank for auto creation
 		"service.sv_name", "").Default(													// from aws cloud map or leave blank for auto creation
 		"service.sv_discovery_use_sqs_sns", false).Default(								// indicate if this service will use sqs and sns for service discovery, default = false
-		"service.sv_monitor_use_sqs_sns", false).Default(									// indicate if this service will use sqs and sns for service monitor, default = false
-		"service.sv_tracer_use_sqs_sns", false).Default(									// indicate if this service will use sqs and sns for service tracer, default = false
-		"service.sv_logger_use_sqs_sns", false).Default(									// indicate if this service will use sqs and sns for service logger, default = false
+		"service.sv_tracer_use_xray", false).Default(										// indicate if this service will use aws xray for service tracer, default = false
+		"service.sv_logger_use_sqs", false).Default(										// indicate if this service will use sqs for service logger staging, default = false
 		"queues.sqs_discovery_queue_name_prefix", "service-discovery-data-").Default(		// sqs queue name prefix used for service discovery data queuing, if name is not provided, default = service-discovery-data-
 		"queues.sqs_discovery_message_retention_seconds", 300).Default(					// sqs service discovery queue's messages retention seconds, default = 300 seconds (5 Minutes)
 		"queues.sqs_discovery_queue_url", "").Default(									// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service discovery data queue used by this service (auto set by service upon creation)
 		"queues.sqs_discovery_queue_arn", "").Default(									// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service discovery data queue used by this service (auto set by service upon creation)
-		"queues.sqs_monitor_queue_name_prefix", "service-monitor-data-").Default(			// sqs queue name prefix used for service monitoring data queuing, if name is not provided, default = service-monitor-data-
-		"queues.sqs_monitor_message_retention_seconds", 14400).Default(					// sqs service monitor queue's messages retention seconds, default = 14,400 seconds (4 Hours)
-		"queues.sqs_monitor_queue_url", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service monitor data queue used by this service (auto set by service upon creation)
-		"queues.sqs_monitor_queue_arn", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service monitor data queue used by this service (auto set by service upon creation)
-		"queues.sqs_tracer_queue_name_prefix", "service-tracer-data-").Default(			// sqs queue name prefix used for service tracing data queuing, if name is not provided, default = service-tracer-data-
-		"queues.sqs_tracer_message_retention_seconds", 14400).Default(					// sqs service tracer queue's messages retention seconds, default = 14,400 seconds (4 Hours)
-		"queues.sqs_tracer_queue_url", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service tracer data queue used by this service (auto set by service upon creation)
-		"queues.sqs_tracer_queue_arn", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service tracer data queue used by this service (auto set by service upon creation)
 		"queues.sqs_logger_queue_name_prefix", "service-logger-data-").Default(			// sqs queue name prefix used for service logging data queuing, if name is not provided, default = service-logger-data-
 		"queues.sqs_logger_message_retention_seconds", 14400).Default(					// sqs service logger queue's messages retention seconds, default = 14,400 seconds (4 Hours)
 		"queues.sqs_logger_queue_url", "").Default(										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service logger data queue used by this service (auto set by service upon creation)
@@ -746,15 +593,6 @@ func (c *config) Read() error {
 		"topics.sns_discovery_topic_name_prefix", "service-discovery-notify-").Default(	// sns topic name prefix used for discovery data notification, if name is not provided, default = service-discovery-notify-
 		"topics.sns_discovery_topic_arn", "").Default(									// sns topic's topicArn as generated by aws sns for the corresponding service discovery topic used by this service (auto set by service upon creation)
 		"topics.sns_discovery_subscription_arn", "").Default(								// sns topic subscription arn as generated by aws during subscribe event
-		"topics.sns_monitor_topic_name_prefix", "service-monitor-notify-").Default(		// sns topic name prefix used for monitor data notification, if name is not provided, default = service-monitor-notify-
-		"topics.sns_monitor_topic_arn", "").Default(										// sns topic's topicArn as generated by aws sns for the corresponding service monitor topic used by this service (auto set by service upon creation)
-		"topics.sns_monitor_subscription_arn", "").Default(								// sns topic subscription arn as generated by aws during subscribe event
-		"topics.sns_tracer_topic_name_prefix", "service-tracer-notify-").Default(			// sns topic name prefix used for tracer data notification, if name is not provided, default = service-tracer-notify-
-		"topics.sns_tracer_topic_arn", "").Default( 										// sns topic's topicArn as generated by aws sns for the corresponding service tracer topic used by this service (auto set by service upon creation)
-		"topics.sns_tracer_subscription_arn", "").Default(							 	// sns topic subscription arn as generated by aws during subscribe event
-		"topics.sns_logger_topic_name_prefix", "service-logger-notify-").Default( 		// sns topic name prefix used for logger data notification, if name is not provided, default = service-logger-notify-
-		"topics.sns_logger_topic_arn", "").Default( 										// sns topic's topicArn as generated by aws sns for the corresponding service logger topic used by this service (auto set by service upon creation)
-		"topics.sns_logger_subscription_arn", "").Default( 								// sns topic subscription arn as generated by aws during subscribe event
 		"service_auto_create.sac_dns_ttl", 90).Default(									// value to use for auto service creation, in seconds
 		"service_auto_create.sac_dns_type", "srv").Default(								// value to use for auto service creation, srv or a
 		"service_auto_create.sac_dns_routing", "multivalue").Default(						// value to use for auto service creation, multivalue or weighted

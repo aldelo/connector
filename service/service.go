@@ -1,7 +1,7 @@
 package service
 
 /*
- * Copyright 2020 Aldelo, LP
+ * Copyright 2020-2021 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 	"github.com/aldelo/common/wrapper/sns"
 	"github.com/aldelo/common/wrapper/sns/snsprotocol"
 	"github.com/aldelo/common/wrapper/sqs"
+	"github.com/aldelo/common/wrapper/xray"
 	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/connector/adapters/notification"
 	"github.com/aldelo/connector/adapters/queue"
@@ -36,6 +37,7 @@ import (
 	"github.com/aldelo/connector/adapters/ratelimiter/ratelimitplugin"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
+	"github.com/aldelo/connector/adapters/tracer"
 	ws "github.com/aldelo/connector/webserver"
 	sns2 "github.com/aws/aws-sdk-go/service/sns"
 	"google.golang.org/grpc"
@@ -80,6 +82,15 @@ type healthreport struct {
 // ConfigFileName = (required) config file name without .yaml extension
 // CustomConfigPath = (optional) if not specified, . is assumed
 // RegisterServiceHandlers = (required) func to register grpc service handlers
+//
+// When calling RPC services, To pass in parent xray segment id and trace id, set the metadata keys with:
+//		x-amzn-seg-id = parent xray segment id, assign value to this key via metadata.MD
+//		x-amzn-tr-id = parent xray trace id, assign value to this key via metadata.MD
+//
+// How to set metadata at client side?
+//		ctx := context.Background()
+//		md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
+//		ctx = metadata.NewOutgoingContext(ctx, md)
 type Service struct {
 	// service properties
 	AppName string
@@ -106,18 +117,12 @@ type Service struct {
 	// setup optional auth server interceptor
 	// TODO:
 
+	// setup optional cloud logger interceptor
+	// TODO:
+
 	// setup optional rate limit server interceptor
 	RateLimit ratelimiter.RateLimiterIFace
-
-	// setup optional monitor server interceptor
-	// TODO:
-
-	// setup optional trace server interceptor
-	// TODO:
-
-	// setup optional logging server interceptor
-	// TODO:
-
+	
 	// one or more unary server interceptors for handling wrapping actions
 	UnaryServerInterceptors []grpc.UnaryServerInterceptor
 
@@ -204,6 +209,12 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		port = 0
 		return
 	} else {
+		// enable xray if configured
+		if s._config.Service.TracerUseXRay {
+			_ = xray.Init("127.0.0.1:2000", "1.2.0")
+			xray.SetXRayServiceOn()
+		}
+
 		//
 		// config server options
 		//
@@ -302,6 +313,10 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		}
 
 		// add unary server interceptors
+		if xray.XRayServiceOn() {
+			s.UnaryServerInterceptors = append(s.UnaryServerInterceptors, tracer.TracerUnaryServerInterceptor)
+		}
+
 		count := len(s.UnaryServerInterceptors)
 
 		if count == 1 {
@@ -311,6 +326,10 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		}
 
 		// add stream server interceptors
+		if xray.XRayServiceOn() {
+			s.StreamServerInterceptors = append(s.StreamServerInterceptors, tracer.TracerStreamServerInterceptor)
+		}
+
 		count = len(s.StreamServerInterceptors)
 
 		if count == 1 {
@@ -372,6 +391,13 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		if s._config.Instance.FavorPublicIP && util.LenTrim(s._config.Instance.PublicIPGateway) > 0 && util.LenTrim(s._config.Instance.PublicIPGatewayKey) > 0 {
 			validationToken := crypto.Sha256(util.FormatDate(time.Now().UTC()), s._config.Instance.PublicIPGatewayKey)
 
+			publicIPSeg := xray.NewSegmentNullable("GrpcService-SetupServer [Get PublicIP From: " + s._config.Instance.PublicIPGateway + "]")
+			if publicIPSeg != nil {
+				_ = publicIPSeg.Seg.AddMetadata("Public-IP-Gateway", s._config.Instance.PublicIPGateway)
+				_ = publicIPSeg.Seg.AddMetadata("Hash-Date", util.FormatDate(time.Now().UTC()))
+				_ = publicIPSeg.Seg.AddMetadata("Hash-Validation-Token", validationToken)
+			}
+
 			if status, body, err := rest.GET(s._config.Instance.PublicIPGateway, []*rest.HeaderKeyValue{
 				{
 					Key: "x-nts-gateway-token",
@@ -381,21 +407,45 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 				// get public ip error, still use local ip
 				buf := "!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token' Failed: " + err.Error() + ", Service Launch Stopped !!!"
 				log.Println(buf)
+
+				if publicIPSeg != nil {
+					_ = publicIPSeg.Seg.AddError(fmt.Errorf(buf))
+					publicIPSeg.Close()
+				}
+
 				return nil, "", 0, fmt.Errorf(buf)
 			} else if status != 200 {
 				// get public ip status not 200, still use local ip
 				buf := "!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token' Not Successful: Status Code " + util.Itoa(status) + ", Service Launch Stopped !!!"
 				log.Println(buf)
+
+				if publicIPSeg != nil {
+					_ = publicIPSeg.Seg.AddError(fmt.Errorf(buf))
+					publicIPSeg.Close()
+				}
+
 				return nil, "", 0, fmt.Errorf(buf)
 			} else {
 				// status 200, use public ip instead of local ip
 				if util.IsNumericIntOnly(strings.Replace(body, ".", "", -1)) {
 					// is public ip most likely
+					if publicIPSeg != nil {
+						_ = publicIPSeg.Seg.AddMetadata("Result-Private-IP", ip)
+						_ = publicIPSeg.Seg.AddMetadata("Result-Public-IP", body)
+						publicIPSeg.Close()
+					}
+
 					log.Println("=== Instance Using Public IP '" + body + "' From Discovery Gateway Per Service Config, Original LocalIP was '" + ip + "' ===")
 					ip = body
 				} else {
 					buf := "!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token' Not Successful: Status Code 200, But Content Not IP: " + body + ", Service Launch Stopped !!!"
 					log.Println(buf)
+
+					if publicIPSeg != nil {
+						_ = publicIPSeg.Seg.AddError(fmt.Errorf(buf))
+						publicIPSeg.Close()
+					}
+
 					return nil, "", 0, fmt.Errorf(buf)
 				}
 			}
@@ -416,7 +466,13 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		//
 		// setup sqs and sns if needed
 		//
-		if s._config.Service.DiscoveryUseSqsSns || s._config.Service.LoggerUseSqsSns || s._config.Service.MonitorUseSqsSns || s._config.Service.TracerUseSqsSns {
+		if s._config.Service.DiscoveryUseSqsSns || s._config.Service.LoggerUseSqs {
+			//
+			// get a list of all sns topics
+			//
+			var snsTopicArns []string
+			needConfigSave := false
+
 			//
 			// establish sqs and sns adapters
 			//
@@ -424,24 +480,18 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 				return nil, "", 0, fmt.Errorf("Get SQS Queue Adapter Failed: %s", err)
 			}
 
-			if s._sns, err = notification.NewNotificationAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil); err != nil {
-				return nil, "", 0, fmt.Errorf("Get SNS Notification Adapter Failed: %s", err)
-			}
-
 			//
-			// get a list of all sns topics
-			//
-			var snsTopicArns []string
-			needConfigSave := false
-
-			if snsTopicArns, err = notification.ListTopics(s._sns, time.Duration(s._config.Instance.SdTimeout)*time.Second); err != nil {
-				return nil, "", 0, fmt.Errorf("Get SNS Topics List Failed: %s", err)
-			}
-
-			//
-			// configure discovery sqs sns if needed
+			// setup discovery sqs sns if needed
 			//
 			if s._config.Service.DiscoveryUseSqsSns {
+				if s._sns, err = notification.NewNotificationAdapter(awsregion.GetAwsRegion(s._config.Target.Region), nil); err != nil {
+					return nil, "", 0, fmt.Errorf("Get SNS Notification Adapter Failed: %s", err)
+				}
+
+				if snsTopicArns, err = notification.ListTopics(s._sns, time.Duration(s._config.Instance.SdTimeout)*time.Second); err != nil {
+					return nil, "", 0, fmt.Errorf("Get SNS Topics List Failed: %s", err)
+				}
+
 				// create sns topic name if need be
 				if util.LenTrim(s._config.Topics.SnsDiscoveryTopicArn) == 0 || !util.StringSliceContains(&snsTopicArns, s._config.Topics.SnsDiscoveryTopicArn) {
 					discoverySnsTopic := s._config.Topics.SnsDiscoveryTopicNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
@@ -472,99 +522,18 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			}
 
 			//
-			// configure logger sqs sns if needed
+			// setup logger sqs if needed
 			//
-			if s._config.Service.LoggerUseSqsSns {
-				// create sns topic name if need be
-				if util.LenTrim(s._config.Topics.SnsLoggerTopicArn) == 0 || !util.StringSliceContains(&snsTopicArns, s._config.Topics.SnsLoggerTopicArn) {
-					loggerSnsTopic := s._config.Topics.SnsLoggerTopicNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
-					loggerSnsTopic, _ = util.ExtractAlphaNumericUnderscoreDash(util.Replace(loggerSnsTopic, ".", "-"))
-
-					if topicArn, e := notification.CreateTopic(s._sns, loggerSnsTopic, time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
-						return nil, "", 0, fmt.Errorf("Create SNS Topic %s Failed: %s", loggerSnsTopic, e)
-					} else {
-						snsTopicArns = append(snsTopicArns, topicArn)
-						s._config.SetSnsLoggerTopicArn(topicArn)
-						needConfigSave = true
-					}
-				}
-
-				// create sqs queue name if need be
+			if s._config.Service.LoggerUseSqs {
 				if util.LenTrim(s._config.Queues.SqsLoggerQueueArn) == 0 || util.LenTrim(s._config.Queues.SqsLoggerQueueUrl) == 0 {
 					loggerQueueName := s._config.Queues.SqsLoggerQueueNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
 					loggerQueueName, _ = util.ExtractAlphaNumericUnderscoreDash(util.Replace(loggerQueueName, ".", "-"))
 
-					if url, arn, e := queue.GetQueue(s._sqs, loggerQueueName, s._config.Queues.SqsLoggerMessageRetentionSeconds, s._config.Topics.SnsLoggerTopicArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
+					if url, arn, e := queue.GetQueue(s._sqs, loggerQueueName, s._config.Queues.SqsLoggerMessageRetentionSeconds, "", time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
 						return nil, "", 0, fmt.Errorf("Create SQS Queue %s Failed: %s", loggerQueueName, e)
 					} else {
 						s._config.SetSqsLoggerQueueUrl(url)
 						s._config.SetSqsLoggerQueueArn(arn)
-						needConfigSave = true
-					}
-				}
-			}
-
-			//
-			// configure monitor sqs sns if needed
-			//
-			if s._config.Service.MonitorUseSqsSns {
-				// create sns topic name if need be
-				if util.LenTrim(s._config.Topics.SnsMonitorTopicArn) == 0 || !util.StringSliceContains(&snsTopicArns, s._config.Topics.SnsMonitorTopicArn) {
-					monitorSnsTopic := s._config.Topics.SnsMonitorTopicNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
-					monitorSnsTopic, _ = util.ExtractAlphaNumericUnderscoreDash(util.Replace(monitorSnsTopic, ".", "-"))
-
-					if topicArn, e := notification.CreateTopic(s._sns, monitorSnsTopic, time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
-						return nil, "", 0, fmt.Errorf("Create SNS Topic %s Failed: %s", monitorSnsTopic, e)
-					} else {
-						snsTopicArns = append(snsTopicArns, topicArn)
-						s._config.SetSnsMonitorTopicArn(topicArn)
-						needConfigSave = true
-					}
-				}
-
-				// create sqs queue name if need be
-				if util.LenTrim(s._config.Queues.SqsMonitorQueueArn) == 0 || util.LenTrim(s._config.Queues.SqsMonitorQueueUrl) == 0 {
-					monitorQueueName := s._config.Queues.SqsMonitorQueueNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
-					monitorQueueName, _ = util.ExtractAlphaNumericUnderscoreDash(util.Replace(monitorQueueName, ".", "-"))
-
-					if url, arn, e := queue.GetQueue(s._sqs, monitorQueueName, s._config.Queues.SqsMonitorMessageRetentionSeconds, s._config.Topics.SnsMonitorTopicArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
-						return nil, "", 0, fmt.Errorf("Create SQS Queue %s Failed: %s", monitorQueueName, e)
-					} else {
-						s._config.SetSqsMonitorQueueUrl(url)
-						s._config.SetSqsMonitorQueueArn(arn)
-						needConfigSave = true
-					}
-				}
-			}
-
-			//
-			// configure tracer sqs sns if needed
-			//
-			if s._config.Service.TracerUseSqsSns {
-				// create sns topic name if need be
-				if util.LenTrim(s._config.Topics.SnsTracerTopicArn) == 0 || !util.StringSliceContains(&snsTopicArns, s._config.Topics.SnsTracerTopicArn) {
-					tracerSnsTopic := s._config.Topics.SnsTracerTopicNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
-					tracerSnsTopic, _ = util.ExtractAlphaNumericUnderscoreDash(util.Replace(tracerSnsTopic, ".", "-"))
-
-					if topicArn, e := notification.CreateTopic(s._sns, tracerSnsTopic, time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
-						return nil, "", 0, fmt.Errorf("Create SNS Topic %s Failed: %s", tracerSnsTopic, e)
-					} else {
-						snsTopicArns = append(snsTopicArns, topicArn)
-						s._config.SetSnsTracerTopicArn(topicArn)
-						needConfigSave = true
-					}
-				}
-
-				// create sqs queue name if need be
-				if util.LenTrim(s._config.Queues.SqsTracerQueueArn) == 0 || util.LenTrim(s._config.Queues.SqsTracerQueueUrl) == 0 {
-					tracerQueueName := s._config.Queues.SqsTracerQueueNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
-					tracerQueueName, _ = util.ExtractAlphaNumericUnderscoreDash(util.Replace(tracerQueueName, ".", "-"))
-
-					if url, arn, e := queue.GetQueue(s._sqs, tracerQueueName, s._config.Queues.SqsTracerMessageRetentionSeconds, s._config.Topics.SnsTracerTopicArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
-						return nil, "", 0, fmt.Errorf("Create SQS Queue %s Failed: %s", tracerQueueName, e)
-					} else {
-						s._config.SetSqsTracerQueueUrl(url)
-						s._config.SetSqsTracerQueueArn(arn)
 						needConfigSave = true
 					}
 				}
@@ -625,9 +594,20 @@ func (s *Service) CurrentlyServing() bool {
 }
 
 // startServer will start and serve grpc services, it will run in goroutine until terminated
-func (s *Service) startServer(lis net.Listener, quit chan bool) error {
+func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
+	seg := xray.NewSegmentNullable("GrpcService-StartServer  [Addr: " + lis.Addr().String() + "]")
+	if seg != nil {
+		defer seg.Close()
+		defer func() {
+			if err != nil {
+				_ = seg.Seg.AddError(err)
+			}
+		}()
+	}
+
 	if s._grpcServer == nil {
-		return fmt.Errorf("gRPC Server Not Setup")
+		err = fmt.Errorf("gRPC Server Not Setup")
+		return err
 	}
 
 	// set service default serving mode to 'not serving'
@@ -958,25 +938,48 @@ func (s *Service) awaitOsSigExit() {
 }
 
 // deleteServiceHealthReportFromDataStore will remove the health report service record from data store based on instanceId
-func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) error {
+func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err error) {
+	seg := xray.NewSegmentNullable("GrpcService-DeleteServiceHealthReportFromDataStore  [InstanceID: " + instanceId + "]")
+	if seg != nil {
+		defer seg.Close()
+		defer func() {
+			if err != nil {
+				_ = seg.Seg.AddError(err)
+			}
+		}()
+	}
+
 	if util.LenTrim(instanceId) == 0 {
-		return fmt.Errorf("Delete Health Report Service Record Requires InstanceID")
+		err = fmt.Errorf("Delete Health Report Service Record Requires InstanceID")
+		return err
 	}
 
 	if s._config == nil {
-		return fmt.Errorf("Delete Health Report Service Record Requires Config Object")
+		err = fmt.Errorf("Delete Health Report Service Record Requires Config Object")
+		return err
 	}
 
 	if util.LenTrim(s._config.Instance.HealthReportServiceUrl) == 0 {
-		return fmt.Errorf("Delete Health Report Service Record Requires HealthReportServiceUrl")
+		err = fmt.Errorf("Delete Health Report Service Record Requires HealthReportServiceUrl")
+		return err
 	}
 
 	if util.LenTrim(s._config.Instance.HashKeyName) == 0 {
-		return fmt.Errorf("Delete Health Report Service Record Requires HashKeyName")
+		err = fmt.Errorf("Delete Health Report Service Record Requires HashKeyName")
+		return err
 	}
 
 	if util.LenTrim(s._config.Instance.HashKeySecret) == 0 {
-		return fmt.Errorf("Delete Health Report Service Record Requires HashKeySecret")
+		err = fmt.Errorf("Delete Health Report Service Record Requires HashKeySecret")
+		return err
+	}
+
+	var subSeg *xray.XSegment
+
+	if seg != nil {
+		subSeg = seg.NewSubSegment("REST DEL: " + s._config.Instance.HealthReportServiceUrl + "/" + instanceId)
+		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-name", s._config.Instance.HashKeyName)
+		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-signature", crypto.Sha256(instanceId + util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret))
 	}
 
 	statusCode, _, e := rest.DELETE(s._config.Instance.HealthReportServiceUrl + "/" + instanceId, []*rest.HeaderKeyValue{
@@ -994,12 +997,18 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) erro
 										},
 									})
 
+	if subSeg != nil {
+		subSeg.Close()
+	}
+
 	if e != nil {
-		return fmt.Errorf("Delete Health Report Service Record Failed: %s", e.Error())
+		err = fmt.Errorf("Delete Health Report Service Record Failed: %s", e.Error())
+		return err
 	}
 
 	if statusCode != 200 {
-		return fmt.Errorf("Delete Health Report Service Record Failed: %s", "Status Code " + util.Itoa(statusCode))
+		err = fmt.Errorf("Delete Health Report Service Record Failed: %s", "Status Code " + util.Itoa(statusCode))
+		return err
 	}
 
 	return nil
@@ -1008,8 +1017,21 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) erro
 // setServiceHealthReportUpdateToDataStore updates this service with dynamodb Common-Hosts with last hit timestamp,
 // this is used by SNS Gateway service to auto clean up inactive services by de-register once more than 15 minutes stale
 func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
+	var err error
+
+	seg := xray.NewSegmentNullable("GrpcService-setServiceHealthReportUpdateToDataStore")
+	if seg != nil {
+		defer seg.Close()
+		defer func() {
+			if err != nil {
+				_ = seg.Seg.AddError(err)
+			}
+		}()
+	}
+
 	if s._config == nil {
-		log.Println("Set Service Health Report Update To Data Store Stopped: " + "Service Config Nil")
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "Service Config Nil")
+		log.Println(err.Error())
 		return false
 	}
 
@@ -1019,47 +1041,71 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 	}
 
 	if util.LenTrim(s._config.Instance.HashKeyName) == 0 {
-		log.Println("Set Service Health Report Update To Data Store Stopped: " + "Hash Key Name Not Defined in Config")
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "Hash Key Name Not Defined in Config")
+		log.Println(err.Error())
 		return false
 	}
 
 	if util.LenTrim(s._config.Instance.HashKeySecret) == 0 {
-		log.Println("Set Service Health Report Update To Data Store Stopped: " + "Hash Key Secret Not Defined in Config")
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "Hash Key Secret Not Defined in Config")
+		log.Println(err.Error())
 		return false
 	}
 
 	if util.LenTrim(s._config.Target.Region) == 0 {
-		log.Println("Set Service Health Report Update To Data Store Stopped: " + "AWS Region Not Defined in Config")
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "AWS Region Not Defined in Config")
+		log.Println(err.Error())
 		return false
 	}
 
 	if util.LenTrim(s._config.Namespace.Id) == 0 {
-		log.Println("Set Service Health Report Update To Data Store Stopped: " + "NamespaceID Not Defined in Config")
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "NamespaceID Not Defined in Config")
+		log.Println(err.Error())
 		return false
 	}
 
 	if util.LenTrim(s._config.Namespace.Name) == 0 {
-		log.Println("Set Service Health Report Update To Data Store Stopped: " + "NamespaceName Not Defined in Config")
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "NamespaceName Not Defined in Config")
+		log.Println(err.Error())
 		return false
 	}
 
 	if util.LenTrim(s._config.Service.Name) == 0 {
-		log.Println("Set Service Health Report Update To Data Store Stopped: " + "ServiceName Not Defined in Config")
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "ServiceName Not Defined in Config")
+		log.Println(err.Error())
 		return false
 	}
 
 	if util.LenTrim(s._config.Service.Id) == 0 {
-		log.Println("Set Service Health Report Update To Data Store Skipped: " + "ServiceID Not Defined in Config")
+		msg := "Set Service Health Report Update To Data Store Skipped: " + "ServiceID Not Defined in Config"
+
+		if seg != nil {
+			_ = seg.Seg.AddMetadata("Skipped-Reason", msg)
+		}
+
+		log.Println(msg)
 		return true
 	}
 
 	if util.LenTrim(s._config.Instance.Id) == 0 {
-		log.Println("Set Service Health Report Update To Data Store Skipped: " + "InstanceID Not Defined in Config")
+		msg := "Set Service Health Report Update To Data Store Skipped: " + "InstanceID Not Defined in Config"
+
+		if seg != nil {
+			_ = seg.Seg.AddMetadata("Skipped-Reason", msg)
+		}
+
+		log.Println(msg)
 		return true
 	}
 
 	if util.LenTrim(s._localAddress) == 0 {
-		log.Println("Set Service Health Report Update To Data Store Skipped: " + "Service Host Info Not Ready")
+		msg := "Set Service Health Report Update To Data Store Skipped: " + "Service Host Info Not Ready"
+
+		if seg != nil {
+			_ = seg.Seg.AddMetadata("Skipped-Reason", msg)
+		}
+
+		log.Println(msg)
 		return true
 	}
 
@@ -1082,8 +1128,16 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 	jsonData, e := util.MarshalJSONCompact(data)
 
 	if e != nil {
-		log.Println("Set Service Health Report Update To Data Store Failed: " + e.Error())
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Failed: %s", e.Error())
+		log.Println(err.Error())
 		return true
+	}
+
+	var subSeg *xray.XSegment
+
+	if seg != nil {
+		subSeg = seg.NewSubSegment("REST POST: " + s._config.Instance.HealthReportServiceUrl)
+		_ = subSeg.Seg.AddMetadata("Post-Data", jsonData)
 	}
 
 	// call sns gateway /healthreport to notify service live status
@@ -1094,15 +1148,21 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 												},
 											}, jsonData); e != nil {
 		// rest post invoke error
-		log.Println("Set Service Health Report Update To Data Store Failed: (Invoke REST POST '" + s._config.Instance.HealthReportServiceUrl + "' Error) " + e.Error())
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Failed: (Invoke REST POST '" + s._config.Instance.HealthReportServiceUrl + "' Error) " + e.Error())
+		log.Println(err.Error())
 
 	} else if statusCode != 200 {
 		// rest post result status not 200
-		log.Println("Set Service Health Report Update To Data Store Failed: (Invoke REST POST '" + s._config.Instance.HealthReportServiceUrl + "' Result Status " + util.Itoa(statusCode) + ") " + RespBody)
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Failed: (Invoke REST POST '" + s._config.Instance.HealthReportServiceUrl + "' Result Status " + util.Itoa(statusCode) + ") " + RespBody)
+		log.Println(err.Error())
 
 	} else {
 		// rest post success: 200
 		log.Println("Set Service Health Report Update To Data Store OK")
+	}
+
+	if subSeg != nil {
+		subSeg.Close()
 	}
 
 	return true
@@ -1447,54 +1507,6 @@ func (s *Service) unsubscribeSNS() {
 		}
 	} else {
 		log.Println("--- Discovery Push Notification is Disabled ---")
-	}
-
-	if s._config.Service.LoggerUseSqsSns {
-		if util.LenTrim(s._config.Topics.SnsLoggerSubscriptionArn) > 0 {
-			if err := notification.Unsubscribe(s._sns, s._config.Topics.SnsLoggerSubscriptionArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); err != nil {
-				log.Println("!!! Unsubscribe Logger Subscription Failed: " + err.Error() + " !!!")
-			} else {
-				log.Println("... Unsubscribe Logger Subscription OK")
-				s._config.SetSnsLoggerSubscriptionArn("")
-				doSave = true
-			}
-		} else {
-			log.Println("--- No Logger Subscription to Unsubscribe ---")
-		}
-	} else {
-		log.Println("--- Logger Push Notification is Disabled ---")
-	}
-
-	if s._config.Service.TracerUseSqsSns {
-		if util.LenTrim(s._config.Topics.SnsTracerSubscriptionArn) > 0 {
-			if err := notification.Unsubscribe(s._sns, s._config.Topics.SnsTracerSubscriptionArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); err != nil {
-				log.Println("!!! Unsubscribe Tracer Subscription Failed: " + err.Error() + " !!!")
-			} else {
-				log.Println("... Unsubscribe Tracer Subscription OK")
-				s._config.SetSnsTracerSubscriptionArn("")
-				doSave = true
-			}
-		} else {
-			log.Println("--- No Tracer Subscription to Unsubscribe ---")
-		}
-	} else {
-		log.Println("--- Tracer Push Notification is Disabled ---")
-	}
-
-	if s._config.Service.MonitorUseSqsSns {
-		if util.LenTrim(s._config.Topics.SnsMonitorSubscriptionArn) > 0 {
-			if err := notification.Unsubscribe(s._sns, s._config.Topics.SnsMonitorSubscriptionArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); err != nil {
-				log.Println("!!! Unsubscribe Monitor Subscription Failed: " + err.Error() + " !!!")
-			} else {
-				log.Println("... Unsubscribe Monitor Subscription OK")
-				s._config.SetSnsMonitorTopicArn("")
-				doSave = true
-			}
-		} else {
-			log.Println("--- No Monitor Subscription to Unsubscribe ---")
-		}
-	} else {
-		log.Println("--- Monitor Push Notification is Disabled ---")
 	}
 
 	log.Println("... Notification/Queue Services Unsubscribe End")

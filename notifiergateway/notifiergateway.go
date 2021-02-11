@@ -16,6 +16,7 @@ import (
 	"github.com/aldelo/connector/notifiergateway/config"
 	"github.com/aldelo/connector/notifiergateway/model"
 	"github.com/aldelo/connector/webserver"
+	"github.com/aldelo/common/wrapper/xray"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"log"
@@ -25,7 +26,7 @@ import (
 )
 
 /*
- * Copyright 2020 Aldelo, LP
+ * Copyright 2020-2021 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -245,13 +246,42 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 		}
 	}
 
-	// store health report update to dynamodb
-	if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo); e != nil {
-		log.Println("!!! Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store Failed: " + e.Error() + " !!!")
-		c.String(500, "Persist Instance Status to Data Store Failed")
+	if xray.XRayServiceOn() {
+		trace := xray.NewSegmentFromHeader(c.Request)
+		if !trace.Ready() {
+			trace = xray.NewSegment("healthreporter-write")
+		}
+		defer trace.Close()
+
+		trace.Capture("healthReporter.writeToDataStore", func() error {
+			if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo); e != nil {
+				log.Println("!!! Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store Failed: " + e.Error() + " !!!")
+				c.String(500, "Persist Instance Status to Data Store Failed")
+				return fmt.Errorf("Persist Instance Status to Data Store Failed: %s", e.Error())
+			} else {
+				log.Println("+++ Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store OK +++")
+				c.String(200, "Persist Instance Status to Data Store OK")
+				return nil
+			}
+		}, &xray.XTraceData{
+			Meta: map[string]interface{}{
+				"NamespaceId": data.NamespaceId,
+				"ServiceId":   data.ServiceId,
+				"InstanceId":  data.InstanceId,
+				"AwsRegion":   data.AwsRegion,
+				"ServiceInfo": data.ServiceInfo,
+				"HostInfo":    data.HostInfo,
+			},
+		})
 	} else {
-		log.Println("+++ Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store OK +++")
-		c.String(200, "Persist Instance Status to Data Store OK")
+		// store health report update to dynamodb
+		if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo); e != nil {
+			log.Println("!!! Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store Failed: " + e.Error() + " !!!")
+			c.String(500, "Persist Instance Status to Data Store Failed")
+		} else {
+			log.Println("+++ Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store OK +++")
+			c.String(200, "Persist Instance Status to Data Store OK")
+		}
 	}
 }
 
@@ -320,12 +350,37 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 	pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
 	sk := fmt.Sprintf("InstanceID^%s", instanceId)
 
-	if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeys{ PK: pk, SK: sk }); e != nil {
-		log.Println("!!! Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store Failed: " + e.Error() + " !!!")
-		c.String(500, "Delete Health Report Service Record From Data Store Failed")
+	if xray.XRayServiceOn() {
+		trace := xray.NewSegmentFromHeader(c.Request)
+		if !trace.Ready() {
+			trace = xray.NewSegment("healthreporter-delete")
+		}
+		defer trace.Close()
+
+		trace.Capture("healthReporter.deleteFromDataStore", func() error {
+			if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeys{PK: pk, SK: sk}); e != nil {
+				log.Println("!!! Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store Failed: " + e.Error() + " !!!")
+				c.String(500, "Delete Health Report Service Record From Data Store Failed")
+				return fmt.Errorf("Delete Health Report Service Record From Data Store Failed: %s", e.Error())
+			} else {
+				log.Println("--- Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store OK ---")
+				c.String(200, "Delete Health Report Service Record From Data Store OK")
+				return nil
+			}
+		}, &xray.XTraceData{
+			Meta: map[string]interface{}{
+				"PK": pk,
+				"SK": sk,
+			},
+		})
 	} else {
-		log.Println("--- Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store OK ---")
-		c.String(200, "Delete Health Report Service Record From Data Store OK")
+		if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeys{PK: pk, SK: sk}); e != nil {
+			log.Println("!!! Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store Failed: " + e.Error() + " !!!")
+			c.String(500, "Delete Health Report Service Record From Data Store Failed")
+		} else {
+			log.Println("--- Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store OK ---")
+			c.String(200, "Delete Health Report Service Record From Data Store OK")
+		}
 	}
 }
 
@@ -403,9 +458,23 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 	// bind body payload
 	confirm := &confirmation{}
 
+	var seg *xray.XSegment
+	if xray.XRayServiceOn() {
+		seg = xray.NewSegmentFromHeader(c.Request)
+		if !seg.Ready() {
+			seg = xray.NewSegment("sns-confirmation")
+		}
+
+		defer seg.Close()
+	}
+
 	if err := c.BindJSON(confirm); err != nil {
 		log.Println("/snsrouter 'subscriptionconfirmation' BindJSON Error: " + err.Error())
 		c.String(412, "Expected Confirmation Payload")
+
+		if seg != nil && seg.Ready() {
+			_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' BindJSON Error: %s", err.Error()))
+		}
 	} else {
 		// auto confirm
 		if url := confirm.SubscribeURL; util.LenTrim(url) > 0 {
@@ -415,6 +484,11 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 			if util.LenTrim(serverKey) <= 0 {
 				log.Println("/snsrouter 'subscriptionconfirmation' Missing serverKey From Invoker")
 				c.String(412, "Server Key is Required")
+
+				if seg != nil && seg.Ready() {
+					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' Missing serverKey From Invoker"))
+				}
+
 				return
 			}
 
@@ -429,10 +503,20 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				if serverUrl, err := model.GetServerRouteFromDataStore(serverKey); err != nil {
 					log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", serverKey, c.ClientIP(), err.Error())
 					c.String(412, "Server Key Not Valid")
+
+					if seg != nil && seg.Ready() {
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", serverKey, c.ClientIP(), err.Error()))
+					}
+
 					return
 				} else if util.LenTrim(serverUrl) == 0 && i == 2 {
 					log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", serverKey, c.ClientIP(), "ServerUrl Returned is Blank")
 					c.String(412, "Server Key Not Exist")
+
+					if seg != nil && seg.Ready() {
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", serverKey, c.ClientIP(), "ServerUrl Returned is Blank"))
+					}
+
 					return
 				} else if util.LenTrim(serverUrl) > 0 {
 					serverEndpointUrl = serverUrl
@@ -448,9 +532,17 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 			if status, body, err := rest.GET(url, nil); err != nil {
 				log.Println("/snsrouter 'subscriptionconfirmation' GET Failed: " + err.Error())
 				c.String(412, "Subscription Confirm Callback Failed: %s", err.Error())
+
+				if seg != nil && seg.Ready() {
+					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Failed: %s", err.Error()))
+				}
 			} else if status != 200 {
 				log.Println("/snsrouter 'subscriptionconfirmation' GET Not Status 200: [" + util.Itoa(status) + "] Body: " + body)
 				c.String(status, "Subscription Confirm Callback Status Code: %d", status)
+
+				if seg != nil && seg.Ready() {
+					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Not Status 200: [" + util.Itoa(status) + "] Body: %s", body))
+				}
 			} else {
 				// confirm success, with sns endpoint
 				buf := util.SplitString(body, "<SubscriptionArn>", -1)
@@ -465,8 +557,16 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 
 					if status, body, err := rest.POST(serverEndpointUrl, []*rest.HeaderKeyValue{}, buf); err != nil {
 						log.Println("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Failed: (SNS Subscription Still Valid, This is Warning Only) " + err.Error())
+
+						if seg != nil && seg.Ready() {
+							_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Failed: (SNS Subscription Still Valid, This is Warning Only) %s", err.Error()))
+						}
 					} else if status != 200 {
 						log.Println("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Not Receive Status 200: (SNS Subscription Still Valid, This is Warning Only) Info = " + body)
+
+						if seg != nil && seg.Ready() {
+							_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Not Receive Status 200: (SNS Subscription Still Valid, This is Warning Only) Info = %s", body))
+						}
 					} else {
 						log.Println("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Success (Status 200)")
 					}
@@ -475,11 +575,19 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				} else {
 					log.Println("/snsrouter 'subscriptionconfirmation' GET Status 200 But Response Did Not Include SubscriptionArn in XML From SNS: " + body)
 					c.Status(412)
+
+					if seg != nil && seg.Ready() {
+						_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Status 200 But Response Did Not Include SubscriptionArn in XML From SNS: %s", body))
+					}
 				}
 			}
 		} else {
 			log.Println("/snsrouter 'subscriptionconfirmation' Missing Expected SubscriberURL From SNS")
 			c.String(412, "Expected Subscription Confirm URL")
+
+			if seg != nil && seg.Ready() {
+				_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' Missing Expected SubscriberURL From SNS"))
+			}
 		}
 	}
 }
@@ -525,32 +633,66 @@ func snsnotification(c *gin.Context, serverKey string) {
 	// bind body payload
 	notify := &notification{}
 
+	var seg *xray.XSegment
+	if xray.XRayServiceOn() {
+		seg = xray.NewSegmentFromHeader(c.Request)
+		if !seg.Ready() {
+			seg = xray.NewSegment("sns-notification")
+		}
+
+		defer seg.Close()
+	}
+
 	if err := c.BindJSON(notify); err != nil {
 		log.Println("/snsrouter 'notification' BindJSON Error: " + err.Error())
 		c.String(412, "Expected Notification Payload: %s", err.Error())
+
+		if seg != nil && seg.Ready() {
+			_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' BindJSON Error: %s", err.Error()))
+		}
 	} else {
 		// valid notification data
 		if util.LenTrim(notify.MessageId) == 0 {
 			log.Println("/snsrouter 'notification' SNS Data Missing MessageId")
 			c.String(412, "Expected Notification Message ID")
+
+			if seg != nil && seg.Ready() {
+				_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' SNS Data Missing MessageId"))
+			}
+
 			return
 		}
 
 		if util.LenTrim(notify.TopicArn) == 0 {
 			log.Println("/snsrouter 'notification' SNS Data Missing TopicArn")
 			c.String(412, "Expected Notification Topic ARN")
+
+			if seg != nil && seg.Ready() {
+				_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' SNS Data Missing TopicArn"))
+			}
+
 			return
 		}
 
 		if util.LenTrim(notify.Message) == 0 {
 			log.Println("/snsrouter 'notification' SNS Data Missing Message")
 			c.String(412, "Expected Notification Message")
+
+			if seg != nil && seg.Ready() {
+				_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' SNS Data Missing Message"))
+			}
+
 			return
 		}
 
 		if util.LenTrim(notify.Timestamp) == 0 {
 			log.Println("/snsrouter 'notification' SNS Data Missing Timestamp")
 			c.String(412, "Expected Notification Timestamp")
+
+			if seg != nil && seg.Ready() {
+				_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' SNS Data Missing Timestamp"))
+			}
+
 			return
 		}
 
@@ -558,16 +700,28 @@ func snsnotification(c *gin.Context, serverKey string) {
 		if serverUrl, err := model.GetServerRouteFromDataStore(serverKey); err != nil {
 			log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", serverKey, c.ClientIP(), err.Error())
 			c.String(412, "Server Key Not Valid")
+
+			if seg != nil && seg.Ready() {
+				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", serverKey, c.ClientIP(), err.Error()))
+			}
 		} else if util.LenTrim(serverUrl) == 0 {
 			log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", serverKey, c.ClientIP(), "ServerUrl Returned is Blank")
 			unsubscribeSNS(notify)
 			c.String(412, "Server Key Not Exist")
+
+			if seg != nil && seg.Ready() {
+				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", serverKey, c.ClientIP(), "ServerUrl Returned is Blank"))
+			}
 		} else {
 			// perform sns notification routing task
 			// server url begins with http or https, then ip and port as the fully qualified url domain path (controller path not part of the url)
 			if notifyJson, err := util.MarshalJSONCompact(notify); err != nil {
 				log.Printf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", serverKey, serverUrl, err.Error())
 				c.String(412, "Notification Marshal Failed")
+
+				if seg != nil && seg.Ready() {
+					_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", serverKey, serverUrl, err.Error()))
+				}
 			} else {
 				// relay sns notification to target notify server
 				log.Println("/snsrouter 'notification' Relaying SNS Data To Notifier Server Endpoint '" + serverUrl + "': " + notifyJson)
@@ -583,10 +737,18 @@ func snsnotification(c *gin.Context, serverKey string) {
 					// error
 					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", serverKey, serverUrl, err.Error())
 					c.String(412, "Route Notification to Internal Host Failed")
+
+					if seg != nil && seg.Ready() {
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", serverKey, serverUrl, err.Error()))
+					}
 				} else if statusCode != 200 {
 					// not status 200
 					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", serverKey, serverUrl, statusCode)
 					c.Status(statusCode)
+
+					if seg != nil && seg.Ready() {
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", serverKey, serverUrl, statusCode))
+					}
 				} else {
 					// success, reply to sns success
 					log.Printf("Server Key %s at Host %s Route Notification Complete", serverKey, serverUrl)

@@ -1,7 +1,7 @@
 package webserver
 
 /*
- * Copyright 2020 Aldelo, LP
+ * Copyright 2020-2021 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,8 @@ import (
 	"github.com/aldelo/common/wrapper/gin/ginbindtype"
 	"github.com/aldelo/common/wrapper/gin/gingzipcompression"
 	"github.com/aldelo/common/wrapper/gin/ginjwtsignalgorithm"
+	"github.com/aldelo/common/wrapper/xray"
+
 	// "github.com/aldelo/common/wrapper/sns"
 	// "github.com/aldelo/common/wrapper/sqs"
 	"github.com/gin-contrib/cors"
@@ -71,15 +73,8 @@ type WebServer struct {
 	// read or persist web server config settings
 	_config *config
 
-	// sqs sns var
-	// _sqs *sqs.SQS
-	// _sns *sns.SNS
-
 	// instantiated web server objects
 	_ginwebserver *ginw.Gin
-
-	// web server mutex locking
-	// _mu sync.RWMutex
 }
 
 // NewWebServer creates a prepared web server for further setup and use
@@ -229,6 +224,16 @@ func (w *WebServer) setupWebServer() error {
 
 	if w._ginwebserver.Port > 65535 {
 		return fmt.Errorf("Setup Web Server Failed: %s", "Web Server Port is Required")
+	}
+
+	// setup xray if configured
+	if w._config.WebServer.TraceUseXRay {
+		// if there is parent xray segment that the gin handlers need to associate with,
+		// pass in via http headers:
+		//		X-Amzn-Seg-Id = Parent Segment ID
+		//		X-Amzn-Tr-Id = Segment Trace ID
+		_ = xray.Init("127.0.0.1:2000", "1.2.0")
+		xray.SetXRayServiceOn()
 	}
 
 	// set web server tls

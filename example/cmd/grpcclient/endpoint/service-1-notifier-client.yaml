@@ -33,15 +33,7 @@ target:
   service_name: notifier-server
 queues:
   sqs_discovery_queue_url:
-  sqs_monitor_queue_url:
-  sqs_tracer_queue_url:
   sqs_logger_queue_url:
 topics:
   sns_discovery_topic_arn: arn:aws:sns:us-east-1:565261360522:service-discovery-notify-grpc-test-service-payx-aldelo-internal
   sns_discovery_subscription_arn:
-  sns_monitor_topic_arn:
-  sns_monitor_subscription_arn:
-  sns_tracer_topic_arn:
-  sns_tracer_subscription_arn:
-  sns_logger_topic_arn:
-  sns_logger_subscription_arn:

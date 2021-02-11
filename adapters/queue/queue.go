@@ -1,7 +1,7 @@
 package queue
 
 /*
- * Copyright 2020 Aldelo, LP
+ * Copyright 2020-2021 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,6 +44,7 @@ func NewQueueAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2.HttpCl
 
 // GetQueue will retrieve queueUrl and queueArn based on queueName,
 // if queue is not found, a new queue will be created with the given queueName
+// snsTopicArn = optional, set sns topic arn if needing to allow sns topic to send message to this newly created sqs
 func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTopicArn string, timeoutDuration ...time.Duration) (queueUrl string, queueArn string, err error) {
 	if q == nil {
 		return "", "", fmt.Errorf("Queue Object is Required")

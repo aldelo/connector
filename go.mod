@@ -5,6 +5,7 @@ go 1.15
 require (
 	github.com/aldelo/common v1.1.0
 	github.com/aws/aws-sdk-go v1.34.8
+	github.com/aws/aws-xray-sdk-go v1.2.0
 	github.com/gin-contrib/cors v1.3.1
 	github.com/gin-gonic/gin v1.6.3
 	github.com/golang/protobuf v1.4.3

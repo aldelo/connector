@@ -1,7 +1,7 @@
 package auth
 
 /*
- * Copyright 2020 Aldelo, LP
+ * Copyright 2020-2021 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc
 		} else {
 			token := strings.TrimPrefix(a[0], "Bearer ")
 
-			// TODO: not implemented
+			// TODO: not implemented at this time
 			if token != "xyz" {
 				return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
 			}
@@ -49,7 +49,7 @@ func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc
 	}
 }
 
-
 func ServerAuthStreamInterceptor(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	return nil
+	// TODO: not implemented at this time
+	return handler(srv, stream)
 }
