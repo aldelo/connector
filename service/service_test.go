@@ -22,7 +22,6 @@ import (
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	ginw "github.com/aldelo/common/wrapper/gin"
-	"github.com/aldelo/connector/adapters/metadata"
 	testpb "github.com/aldelo/connector/example/proto/test"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -78,10 +77,6 @@ func TestService_Serve(t *testing.T) {
 		func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
 			log.Println("In - Unary Server Interceptor: " + info.FullMethod)
 
-			meta := &metadata.MetaServer{}
-			meta.SendHeader(ctx, map[string]string{
-				"server": svc._localAddress,
-			})
 
 			return handler(ctx, req)
 		},
