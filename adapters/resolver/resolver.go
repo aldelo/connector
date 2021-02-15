@@ -21,9 +21,12 @@ import (
 	util "github.com/aldelo/common"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/resolver/manual"
+	"strings"
 )
 
-func NewManualResolver(schemeName string, endpointAddrs []string) error {
+var schemeMap map[string]*manual.Resolver
+
+func NewManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
 	if util.LenTrim(schemeName) == 0 {
 		schemeName = "clb"
 	}
@@ -31,8 +34,6 @@ func NewManualResolver(schemeName string, endpointAddrs []string) error {
 	if len(endpointAddrs) == 0 {
 		return fmt.Errorf("Endpoint Address is Required")
 	}
-
-	// r, _ := manual.GenerateAndRegisterManualResolver()
 
 	r :=  manual.NewBuilderWithScheme(schemeName)
 
@@ -48,11 +49,53 @@ func NewManualResolver(schemeName string, endpointAddrs []string) error {
 		Addresses: addrs,
 	})
 
+	if schemeMap == nil {
+		schemeMap = make(map[string]*manual.Resolver)
+	}
+
+	schemeMap[strings.ToLower(schemeName + serviceName)] = r
+
 	var builder resolver.Builder
 	builder = r
 
 	resolver.Register(builder)
-	resolver.SetDefaultScheme(schemeName)
+	//resolver.SetDefaultScheme(schemeName)
 
 	return nil
+}
+
+func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
+	if schemeMap == nil {
+		return fmt.Errorf("Resolver SchemeMap Nil")
+	}
+
+	if len(endpointAddrs) == 0 {
+		return fmt.Errorf("Endpoint Addresses Required")
+	}
+
+	if util.LenTrim(schemeName) == 0 {
+		return fmt.Errorf("SchemeName is Required")
+	}
+
+	if util.LenTrim(serviceName) == 0 {
+		return fmt.Errorf("ServiceName is Required")
+	}
+
+	if r := schemeMap[strings.ToLower(schemeName + serviceName)]; r != nil {
+		addrs := []resolver.Address{}
+
+		for _, v := range endpointAddrs {
+			addrs = append(addrs, resolver.Address{
+				Addr: v,
+			})
+		}
+
+		r.UpdateState(resolver.State{
+			Addresses: addrs,
+		})
+
+		return nil
+	} else {
+		return fmt.Errorf("No Resolver Found for SchemeName '" + schemeName + "' in SchemeMap")
+	}
 }

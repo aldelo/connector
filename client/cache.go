@@ -160,13 +160,18 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 // for a given serviceName
 //
 // serviceName = lowercase of servicename.namespacename
-func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string) (liveEndpoints []*serviceEndpoint) {
+func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, ignoreExpired ...bool) (liveEndpoints []*serviceEndpoint) {
 	if util.LenTrim(serviceName) == 0 {
 		return []*serviceEndpoint{}
 	}
 
 	if c.ServiceEndpoints == nil {
 		return []*serviceEndpoint{}
+	}
+
+	ignExp := false
+	if len(ignoreExpired) > 0 {
+		ignExp = ignoreExpired[0]
 	}
 
 	c._mu.Lock()
@@ -185,21 +190,27 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string) (liv
 		log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + util.Itoa(len(eps)) + " Found")
 		expiredList := []int{}
 
-		for i, v := range eps{
-			if v.CacheExpire.After(time.Now()){
-				// not yet expired
-				if util.LenTrim(version) > 0 {
-					// has version, check to match version
-					if strings.ToLower(v.Version) != strings.ToLower(version) {
-						log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
-						continue
+		if !ignExp {
+			for i, v := range eps {
+				if v.CacheExpire.After(time.Now()) {
+					// not yet expired
+					if util.LenTrim(version) > 0 {
+						// has version, check to match version
+						if strings.ToLower(v.Version) != strings.ToLower(version) {
+							log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
+							continue
+						}
 					}
-				}
 
+					liveEndpoints = append(liveEndpoints, v)
+				} else {
+					log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
+					expiredList = append(expiredList, i)
+				}
+			}
+		} else {
+			for _, v := range eps {
 				liveEndpoints = append(liveEndpoints, v)
-			} else{
-				log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
-				expiredList = append(expiredList, i)
 			}
 		}
 

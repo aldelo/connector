@@ -25,19 +25,17 @@ import (
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	ginw "github.com/aldelo/common/wrapper/gin"
-	"github.com/aldelo/common/wrapper/sns"
-	"github.com/aldelo/common/wrapper/sns/snsprotocol"
 	"github.com/aldelo/common/wrapper/sqs"
+	"github.com/aldelo/common/wrapper/xray"
 	data "github.com/aldelo/common/wrapper/zap"
 	"github.com/aldelo/connector/adapters/circuitbreaker"
 	"github.com/aldelo/connector/adapters/circuitbreaker/plugins"
 	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/connector/adapters/loadbalancer"
-	"github.com/aldelo/connector/adapters/metadata"
-	"github.com/aldelo/connector/adapters/notification"
 	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
+	res "github.com/aldelo/connector/adapters/resolver"
 	ws "github.com/aldelo/connector/webserver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -45,8 +43,8 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/stats"
-	"log"
 	"path"
 	"strconv"
 	"strings"
@@ -63,7 +61,12 @@ func init() {
 	_cache = new(Cache)
 }
 
-// Client represents a gRPC client's connection and entry point
+func ClearEndpointCache() {
+	_cache = new(Cache)
+}
+
+// Client represents a gRPC client's connection and entry point,
+// also provides optional gin based web server upon dial
 //
 // note:
 //		1) Using Compressor with RPC
@@ -80,7 +83,7 @@ type Client struct {
 	ConfigFileName string
 	CustomConfigPath string
 
-	// web server config
+	// web server config - for optional gin web server to be launched upon grpc client dial
 	WebServerConfig *WebServerConfig
 
 	// indicate if after dial, client will wait for target service health probe success before continuing to allow rpc
@@ -115,10 +118,11 @@ type Client struct {
 	// read or persist client config settings
 	_config *config
 
-	// service discovery object cached
+	// service discovery object
 	_sd *cloudmap.CloudMap
+
+	// sqs object
 	_sqs *sqs.SQS
-	_sns *sns.SNS
 
 	// define circuit breaker commands
 	_circuitBreakers map[string]circuitbreaker.CircuitBreakerIFace
@@ -139,10 +143,8 @@ type Client struct {
 	// for auto service discovery callback notifications
 	_notifierClient *NotifierClient
 
-	// *** Setup by Dial Action ***
-	// helper for creating metadata context,
-	// and evaluate metadata header or trailer value when received from rpc
-	MetadataHelper *metadata.MetaClient
+	// zap logger instead of standard log
+	_z *data.ZapLog
 }
 
 // serviceEndpoint represents a specific service endpoint connection target
@@ -186,6 +188,16 @@ func (c *Client) readConfig() error {
 		return fmt.Errorf("Configured Instance Port Not Valid: %s", "Tcp Port Max is 65535")
 	}
 
+	// setup logger
+	c._z = &data.ZapLog{
+		DisableLogger:   !c._config.Target.ZapLogEnabled,
+		OutputToConsole: c._config.Target.ZapLogOutputConsole,
+		AppName:         c._config.AppName,
+	}
+	if e := c._z.Init(); e != nil {
+		return fmt.Errorf("Init ZapLog Failed: %s", e.Error())
+	}
+
 	return nil
 }
 
@@ -212,8 +224,17 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		opts = append(opts, grpc.WithInsecure())
 	}
 
+	//
+	// setup xray is configured via yaml
+	//
+	if c._config.Target.TraceUseXRay {
+		_ = xray.Init("127.0.0.1:2000", "1.2.0")
+		xray.SetXRayServiceOn()
+	}
+
 	/*
 	// set per rpc auth via oauth2
+	// TODO:
 	if c.FetchOAuth2Token != nil {
 		perRpc := oauth.NewOauthAccess(c.FetchOAuth2Token())
 
@@ -291,8 +312,13 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// add unary client interceptors
 	if c._config.Grpc.CircuitBreakerEnabled {
-		log.Println("Setup Unary Circuit Breaker Interceptor")
+		c._z.Printf("Setup Unary Circuit Breaker Interceptor")
 		c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryCircuitBreakerHandler)
+	}
+
+	if xray.XRayServiceOn() {
+		c._z.Printf("Setup Unary XRay Tracer Interceptor")
+		c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryXRayTracerHandler)
 	}
 
 	count := len(c.UnaryClientInterceptors)
@@ -305,8 +331,13 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// add stream client interceptors
 	if c._config.Grpc.CircuitBreakerEnabled {
-		log.Println("Setup Stream Circuit Breaker Interceptor")
+		c._z.Printf("Setup Stream Circuit Breaker Interceptor")
 		c.StreamClientInterceptors = append(c.StreamClientInterceptors, c.streamCircuitBreakerHandler)
+	}
+
+	if xray.XRayServiceOn() {
+		c._z.Printf("Setup Stream XRay Tracer Interceptor")
+		c.StreamClientInterceptors = append(c.StreamClientInterceptors, c.streamXRayTracerHandler)
 	}
 
 	count = len(c.StreamClientInterceptors)
@@ -327,6 +358,32 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	//
 	err = nil
 	return
+}
+
+// ZLog access internal zap logger
+func (c *Client) ZLog() *data.ZapLog {
+	if c._z != nil {
+		return c._z
+	} else {
+		appName := "Default-BeforeConfigLoad"
+		disableLogger := true
+		outputConsole := true
+
+		if c._config != nil {
+			appName = c._config.AppName
+			disableLogger = !c._config.Target.ZapLogEnabled
+			outputConsole = c._config.Target.ZapLogOutputConsole
+		}
+
+		c._z = &data.ZapLog{
+			DisableLogger: disableLogger,
+			OutputToConsole: outputConsole,
+			AppName: appName,
+		}
+		_ = c._z.Init()
+
+		return c._z
+	}
 }
 
 // PreloadConfigData will load the config data before Dial()
@@ -400,6 +457,15 @@ func (c *Client) ConfiguredSNSDiscoveryTopicArn() string {
 	return c._config.Topics.SnsDiscoveryTopicArn
 }
 
+// Ready indicates client connection is ready to invoke grpc methods
+func (c *Client) Ready() bool {
+	if c._conn != nil && len(c._endpoints) > 0 && (c._conn.GetState() == connectivity.Ready || c._conn.GetState() == connectivity.Idle) {
+		return true
+	} else {
+		return false
+	}
+}
+
 // Dial will dial grpc service and establish client connection
 func (c *Client) Dial(ctx context.Context) error {
 	c._remoteAddress = ""
@@ -416,27 +482,17 @@ func (c *Client) Dial(ctx context.Context) error {
 		return fmt.Errorf(c.ConfigFileName + " Not Yet Configured for gRPC Client Dial, Please Check Config File")
 	}
 
-	log.Println("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
+	c._z.Printf("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
 
 	// setup sqs and sns if configured
-	if util.LenTrim(c._config.Queues.SqsDiscoveryQueueUrl) > 0 || util.LenTrim(c._config.Queues.SqsLoggerQueueUrl) > 0 || util.LenTrim(c._config.Queues.SqsTracerQueueUrl) > 0 || util.LenTrim(c._config.Queues.SqsMonitorQueueUrl) > 0 {
+	if util.LenTrim(c._config.Queues.SqsLoggerQueueUrl) > 0 {
 		var e error
 		if c._sqs, e = queue.NewQueueAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil); e != nil {
-			log.Println("Get SQS Queue Adapter Failed: " + e.Error())
+			c._z.Errorf("Get SQS Queue Adapter Failed: %s", e.Error())
 			c._sqs = nil
 		}
 	} else {
 		c._sqs = nil
-	}
-
-	if util.LenTrim(c._config.Topics.SnsDiscoveryTopicArn) > 0 || util.LenTrim(c._config.Topics.SnsLoggerTopicArn) > 0 || util.LenTrim(c._config.Topics.SnsTracerTopicArn) > 0 || util.LenTrim(c._config.Topics.SnsMonitorTopicArn) > 0 {
-		var e error
-		if c._sns, e = notification.NewNotificationAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil); e != nil {
-			log.Println("Get SNS Notification Adapter Failed: " + e.Error())
-			c._sns = nil
-		}
-	} else {
-		c._sns = nil
 	}
 
 	// circuit breakers prep
@@ -454,7 +510,7 @@ func (c *Client) Dial(ctx context.Context) error {
 		return fmt.Errorf("No Service Endpoints Discovered for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
 	}
 
-	log.Println("... Service Discovery for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + " Found " + strconv.Itoa(len(c._endpoints)) + " Endpoints:")
+	c._z.Printf("... Service Discovery for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + " Found " + strconv.Itoa(len(c._endpoints)) + " Endpoints:")
 
 	// get endpoint addresses
 	endpointAddrs := []string{}
@@ -467,7 +523,7 @@ func (c *Client) Dial(ctx context.Context) error {
 		info += "Version=" + ep.Version + ", "
 		info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
 
-		log.Println("       - " + info)
+		c._z.Printf("       - " + info)
 	}
 
 	// setup resolver and setup load balancer
@@ -477,7 +533,10 @@ func (c *Client) Dial(ctx context.Context) error {
 	if c._config.Target.ServiceDiscoveryType != "direct" {
 		var err error
 
-		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin("clb", fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
+		schemeName, _ := util.ExtractAlpha(c._config.AppName)
+		schemeName = "clb" + schemeName
+
+		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(schemeName, fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
 
 		if err != nil {
 			return fmt.Errorf("Build Client Load Balancer Failed: " + err.Error())
@@ -492,24 +551,24 @@ func (c *Client) Dial(ctx context.Context) error {
 		return fmt.Errorf("Build gRPC Client Dial Options Failed: " + err.Error())
 	} else {
 		if c.BeforeClientDial != nil {
-			log.Println("Before gRPC Client Dial Begin...")
+			c._z.Printf("Before gRPC Client Dial Begin...")
 
 			c.BeforeClientDial(c)
 
-			log.Println("... Before gRPC Client Dial End")
+			c._z.Printf("... Before gRPC Client Dial End")
 		}
 
 		defer func() {
 			if c.AfterClientDial != nil {
-				log.Println("After gRPC Client Dial Begin...")
+				c._z.Printf("After gRPC Client Dial Begin...")
 
 				c.AfterClientDial(c)
 
-				log.Println("... After gRPC Client Dial End")
+				c._z.Printf("... After gRPC Client Dial End")
 			}
 		}()
 
-		log.Println("Dialing gRPC Service @ " + target + "...")
+		c._z.Printf("Dialing gRPC Service @ " + target + "...")
 
 		dialSec := c._config.Grpc.DialMinConnectTimeout
 		if dialSec == 0 {
@@ -519,33 +578,44 @@ func (c *Client) Dial(ctx context.Context) error {
 		ctxWithTimeout, cancel := context.WithTimeout(ctx, time.Duration(dialSec)*time.Second)
 		defer cancel()
 
+		seg := xray.NewSegmentNullable("GrpcClient-Dial")
+		if seg !=  nil {
+			defer seg.Close()
+		}
+
 		if c._conn, err = grpc.DialContext(ctxWithTimeout, target, opts...); err != nil {
-			log.Println("Dial Failed: (If TLS/mTLS, Check Certificate SAN) " + err.Error())
-			return fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: (If TLS/mTLS, Check Certificate SAN) %s", target, err.Error())
+			c._z.Errorf("Dial Failed: (If TLS/mTLS, Check Certificate SAN) %s", err.Error())
+			e := fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: (If TLS/mTLS, Check Certificate SAN) %s", target, err.Error())
+			if seg != nil {
+				_ = seg.Seg.AddError(e)
+			}
+			return e
 		} else {
 			// dial grpc service endpoint success
-			log.Println("Dial Successful")
+			c._z.Printf("Dial Successful")
 
 			c._remoteAddress = target
 
-			log.Println("Remote Address = " + target)
+			c._z.Printf("Remote Address = " + target)
 
 			c.setupHealthManualChecker()
-			c.MetadataHelper = new(metadata.MetaClient)
 
-			log.Println("... gRPC Service @ " + target + " [" + c._remoteAddress + "] Connected")
+			c._z.Printf("... gRPC Service @ " + target + " [" + c._remoteAddress + "] Connected")
 
 			if c.WaitForServerReady {
 				if e := c.waitForEndpointReady(time.Duration(dialSec)*time.Second); e != nil {
 					// health probe failed
 					_ = c._conn.Close()
+					if seg != nil {
+						_ = seg.Seg.AddError(fmt.Errorf("gRPC Service Server Not Ready: " + e.Error()))
+					}
 					return fmt.Errorf("gRPC Service Server Not Ready: " + e.Error())
 				}
 			}
 
 			// dial successful, now start web server for notification callbacks (webhook)
 			if c.WebServerConfig != nil && util.LenTrim(c.WebServerConfig.ConfigFileName) > 0 {
-				log.Println("Starting Http Web Server...")
+				c._z.Printf("Starting Http Web Server...")
 				startWebServerFail := make(chan bool)
 
 				go func() {
@@ -553,10 +623,10 @@ func (c *Client) Dial(ctx context.Context) error {
 					// start http web server
 					//
 					if err := c.startWebServer(); err != nil {
-						log.Printf("!!! Serve Http Web Server %s Failed: %s !!!\n", c.WebServerConfig.AppName, err)
+						c._z.Errorf("Serve Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
 						startWebServerFail <- true
 					} else {
-						log.Println("... Http Web Server Quit Command Received")
+						c._z.Printf("... Http Web Server Quit Command Received")
 					}
 				}()
 
@@ -565,18 +635,18 @@ func (c *Client) Dial(ctx context.Context) error {
 
 				select {
 				case <- startWebServerFail:
-					log.Println("... Http Web Server Fail to Start")
+					c._z.Errorf("... Http Web Server Fail to Start")
 				default:
 					// wait short time to check if web server was started up successfully
 					if e := c.waitForWebServerReady(time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
 						// web server error
-						log.Printf("!!! Http Web Server %s Failed: %s !!!\n", c.WebServerConfig.AppName, e)
+						c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
+						if seg != nil {
+							_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
+						}
 					} else {
 						// web server ok
-						log.Printf("... Http Web Server Started: %s\n", c.WebServerConfig.WebServerLocalAddress)
-
-						// if sns topic arn is set for discovery service, subscribe to the topic (if not yet subscribed)
-						c.subscribeToSNS("Discovery", c._config.Topics.SnsDiscoveryTopicArn, c._config.Topics.SnsDiscoverySubscriptionArn, c._config.SetSnsDiscoverySubscriptionArn)
+						c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
 					}
 				}
 			}
@@ -589,18 +659,89 @@ func (c *Client) Dial(ctx context.Context) error {
 	}
 }
 
+// UpdateLoadBalanceResolves updates client load balancer resolver state with new endpoint addresses
+func (c *Client) UpdateLoadBalanceResolver() error {
+	if c._conn == nil {
+		c._z.Errorf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Requires Current Client Connection Already Established First")
+		return fmt.Errorf("UpdateLoadBalanceResolver Requires Current Client Connection Already Established First")
+	}
+
+	if c._config.Target.ServiceDiscoveryType == "direct" {
+		c._z.Warnf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Service Discovery Type is Direct")
+		return nil
+	}
+
+	c._z.Printf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Started...")
+
+	if len(c._endpoints) == 0 {
+		if e := c.discoverEndpoints(); e != nil {
+			s := "UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Error) " + e.Error()
+			c._z.Errorf(s)
+			return fmt.Errorf(s)
+		}
+	}
+
+	// get endpoint addresses
+	endpointAddrs := []string{}
+
+	for i, ep := range c._endpoints {
+		endpointAddrs = append(endpointAddrs, fmt.Sprintf("%s:%s", ep.Host, util.UintToStr(ep.Port)))
+
+		info := strconv.Itoa(i+1) + ") "
+		info += ep.SdType + "=" + ep.Host + ":" + util.UintToStr(ep.Port) + ", "
+		info += "Version=" + ep.Version + ", "
+		info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
+
+		c._z.Printf("       - " + info)
+	}
+
+	if len(endpointAddrs) == 0 {
+		s := "UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Endpoint Addresses Required"
+		c._z.Errorf(s)
+		return fmt.Errorf(s)
+	}
+
+	// update load balance resolver with new endpoint addresses
+	serviceName := fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
+
+	schemeName, _ := util.ExtractAlpha(c._config.AppName)
+	schemeName = "clb" + schemeName
+
+	if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
+		c._z.Errorf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: " + e.Error())
+		return e
+	}
+
+	c._z.Printf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' OK")
+
+	return nil
+}
+
 // DoNotifierAlertService should be called from goroutine after the client dial completes,
 // this service is to subscribe and receive callbacks from notifier server of service host online offline statuses
-func (c *Client) DoNotifierAlertService() {
+//
+// Example:
+//		go func() {
+//					  svc1Cli.DoNotifierAlertService()
+//				  }()
+func (c *Client) DoNotifierAlertService() (err error) {
 	// finally, run notifier client to subscribe for notification callbacks
 	// the notifier client uses the same client config yaml, but a copy of it to keep the scope separated
 	// within the notifier client config yaml, named xyz-notifier-client.yaml, where xyz is the endpoint service name,
 	// the discovery topicArn as pre-created on aws is stored within, this enables callback for this specific topicArn from notifier server,
 	// note that the service discovery of notifier client is to the notifier server cluster
-	if util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName + "-notifier-client.yaml")) {
-		c._notifierClient = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
+	doConnection := false
 
-		if c._notifierClient.ConfiguredForNotifierClientDial() {
+	if c._notifierClient != nil {
+		doConnection = true
+	}
+
+	if doConnection || util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName + "-notifier-client.yaml")) {
+		if !doConnection {
+			c._notifierClient = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
+		}
+
+		if doConnection || c._notifierClient.ConfiguredForNotifierClientDial() {
 			/*
 				use default logging for the commented out handlers
 
@@ -613,155 +754,96 @@ func (c *Client) DoNotifierAlertService() {
 				c._notifierClient.StreamClientInterceptorHandlers
 
 				c._notifierClient.ServiceAlertStartedHandler
-				c._notifierClient.ServiceAlertStoppedHandler
 
 				c._notifierClient.ServiceAlertSkippedHandler
 			*/
 
-			c._notifierClient.ServiceHostOnlineHandler = func(host string, port uint) {
-				if _cache != nil && c._config != nil {
-					if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
-						cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
-						if cacheExpSeconds == 0 {
-							cacheExpSeconds = 300
-						}
+			if !doConnection {
+				c._notifierClient.ServiceHostOnlineHandler = func(host string, port uint) {
+					if _cache != nil && c._config != nil {
+						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
+							cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
+							if cacheExpSeconds == 0 {
+								cacheExpSeconds = 300
+							}
 
-						_cache.AddServiceEndpoints(strings.ToLower(c._config.Target.ServiceName + "." + c._config.Target.NamespaceName), []*serviceEndpoint{
-							{
-								SdType: c._config.Target.ServiceDiscoveryType,
-								Host: host,
-								Port: port,
-								InstanceId: "",	// not used
-								ServiceId: "",	// not used
-								Version: c._config.Target.InstanceVersion,
-								CacheExpire: time.Now().Add(time.Duration(cacheExpSeconds)*time.Second),
-							},
-						})
+							_cache.AddServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), []*serviceEndpoint{
+								{
+									SdType:      c._config.Target.ServiceDiscoveryType,
+									Host:        host,
+									Port:        port,
+									InstanceId:  "", // not used
+									ServiceId:   "", // not used
+									Version:     c._config.Target.InstanceVersion,
+									CacheExpire: time.Now().Add(time.Duration(cacheExpSeconds) * time.Second),
+								},
+							})
+
+							c._endpoints = _cache.GetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true)
+
+							if e := c.UpdateLoadBalanceResolver(); e != nil {
+								c.ZLog().Errorf(e.Error())
+							}
+						}
 					}
 				}
-			}
 
-			c._notifierClient.ServiceHostOfflineHandler = func(host string, port uint) {
-				if _cache != nil && c._config != nil {
-					if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
-						_cache.PurgeServiceEndpointByHostAndPort(strings.ToLower(c._config.Target.ServiceName + "." + c._config.Target.NamespaceName), host, port)
+				c._notifierClient.ServiceHostOfflineHandler = func(host string, port uint) {
+					if _cache != nil && c._config != nil {
+						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
+							_cache.PurgeServiceEndpointByHostAndPort(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), host, port)
+						}
+
+						c._endpoints = _cache.GetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true)
+
+						if e := c.UpdateLoadBalanceResolver(); e != nil {
+							c.ZLog().Errorf(e.Error())
+						}
+					}
+				}
+
+				c._notifierClient.ServiceAlertStoppedHandler = func(reason string) {
+					if strings.Contains(strings.ToLower(reason), "transport is closing") {
+						c._z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+
+						c._notifierClient.PurgeEndpointCache()
+						time.Sleep(5 * time.Second)
+
+						for {
+							if e := c.DoNotifierAlertService(); e != nil {
+								c._z.Errorf("... Reconnect Notifier Server Failed: " + e.Error() + " (Will Retry in 5 Seconds)")
+								time.Sleep(5 * time.Second)
+							} else {
+								return
+							}
+						}
+					} else {
+						c._z.Printf("--- Notifier Client Service Disconnected Normally: " + reason + " ---")
 					}
 				}
 			}
 
 			// dial notifier client to notifier server endpoint and begin service operations
-			if err := c._notifierClient.Dial(); err != nil {
-				log.Println("!!! Notifier Client Service Dial Failed: " + err.Error() + " !!!")
+			if err = c._notifierClient.Dial(); err != nil {
+				c._z.Errorf("!!! Notifier Client Service Dial Failed: " + err.Error() + " !!!")
+				c._notifierClient.Close() // close to clean up
+				return err
 			} else {
-				if err := c._notifierClient.Subscribe(c._notifierClient.ConfiguredSNSDiscoveryTopicArn()); err != nil {
-					log.Println("!!! Notifier Client Service Subscribe Failed: " + err.Error() + " !!!")
+				if err = c._notifierClient.Subscribe(c._notifierClient.ConfiguredSNSDiscoveryTopicArn()); err != nil {
+					c._z.Errorf("!!! Notifier Client Service Subscribe Failed: " + err.Error() + " !!!")
 					c._notifierClient.Close() // close to clean up
+					return err
 				} else {
 					// subscribe successful, notifier client alert services started
-					log.Println("~~~ Notifier Client Service Started ~~~")
+					c._z.Printf("~~~ Notifier Client Service Started ~~~")
 				}
 			}
 		} else {
-			log.Println("### Notifier Client Service Skipped, Not Yet Configured for Dial ###")
+			c._z.Printf("### Notifier Client Service Skipped, Not Yet Configured for Dial ###")
 		}
 	}
-}
 
-// deprecated: SNS http callback requires public http endpoint, for service discovery, use NotifierClient instead (already configured within Dial)
-func (c *Client) subscribeToSNS(actionName string, topicArn string, topicSubArn string, setConfigSnsSubArnFunc func(string)) {
-	if c._sns != nil && util.LenTrim(topicArn) > 0 && util.LenTrim(topicSubArn) == 0 {
-		if util.LenTrim(c.WebServerConfig.WebServerLocalAddress) == 0 {
-			log.Println("!!! " + actionName + " SNS Topic '" + topicArn + "' Subscribe Failed: Web Server Host Local Address is Empty !!!")
-			return
-		}
-
-		if setConfigSnsSubArnFunc == nil {
-			log.Println("!!! " + actionName + " SNS Topic '" + topicArn + "' Subscribe Failed: setConfigSnsSubArnFunc Parameter Required")
-			return
-		}
-
-		p := snsprotocol.Http
-
-		if util.Left(strings.ToLower(c.WebServerConfig.WebServerLocalAddress), 5) == "https" {
-			p = snsprotocol.Https
-		}
-
-		if subArn, e := notification.Subscribe(c._sns, topicArn, p, c.WebServerConfig.WebServerLocalAddress, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
-			log.Println("!!! " + actionName + " SNS Topic '" + topicArn + "' Subscribe Failed: " + e.Error() + " !!!")
-		} else {
-			setConfigSnsSubArnFunc(subArn)
-
-			if e := c._config.Save(); e != nil {
-				setConfigSnsSubArnFunc("")
-				log.Println("!!! " + actionName + " SNS Topic '" + topicArn + "' Subscribe Failed: Persist Config Error, " + e.Error() + " !!!")
-			} else {
-				log.Println("... " + actionName + " SNS Topic '" + topicArn + "' Subscribe OK: " + subArn)
-			}
-		}
-	} else if util.LenTrim(topicSubArn) > 0 {
-		log.Println("--- " + actionName + " SNS Topic '" + topicArn + "' Already Subscribed: " + topicSubArn + " ---")
-	}
-}
-
-// deprecated: SNS http callback requires public http endpoint, for service discovery, use NotifierClient instead (already configured within Dial)
-func (c *Client) unsubscribeFromSNS() {
-	doSave := false
-
-	if c._sns != nil {
-		if util.LenTrim(c._config.Topics.SnsDiscoverySubscriptionArn) > 0 {
-			if e := notification.Unsubscribe(c._sns, c._config.Topics.SnsDiscoverySubscriptionArn, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
-				log.Println("!!! Discovery SNS Topic '" + c._config.Topics.SnsDiscoveryTopicArn + "' Unsubscribe Failed: " + e.Error() + " !!!")
-			} else {
-				log.Println("... Unsubscribe Discovery SNS Topic '" + c._config.Topics.SnsDiscoveryTopicArn + "' OK")
-				c._config.SetSnsDiscoverySubscriptionArn("")
-				doSave = true
-			}
-		} else {
-			log.Println("--- No Discovery SNS Topic to Unsubscribe ---")
-		}
-
-		if util.LenTrim(c._config.Topics.SnsLoggerSubscriptionArn) > 0 {
-			if e := notification.Unsubscribe(c._sns, c._config.Topics.SnsLoggerSubscriptionArn, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
-				log.Println("!!! Logger SNS Topic '" + c._config.Topics.SnsLoggerTopicArn + "' Unsubscribe Failed: " + e.Error() + " !!!")
-			} else {
-				log.Println("... Unsubscribe Logger SNS Topic '" + c._config.Topics.SnsLoggerTopicArn + "' OK")
-				c._config.SetSnsLoggerSubscriptionArn("")
-				doSave = true
-			}
-		} else {
-			log.Println("--- No Logger SNS Topic to Unsubscribe ---")
-		}
-
-		if util.LenTrim(c._config.Topics.SnsTracerSubscriptionArn) > 0 {
-			if e := notification.Unsubscribe(c._sns, c._config.Topics.SnsTracerSubscriptionArn, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
-				log.Println("!!! Tracer SNS Topic '" + c._config.Topics.SnsTracerTopicArn + "' Unsubscribe Failed: " + e.Error() + " !!!")
-			} else {
-				log.Println("... Unsubscribe Tracer SNS Topic '" + c._config.Topics.SnsTracerTopicArn + "' OK")
-				c._config.SetSnsTracerSubscriptionArn("")
-				doSave = true
-			}
-		} else {
-			log.Println("--- No Tracer SNS Topic to Unsubscribe ---")
-		}
-
-		if util.LenTrim(c._config.Topics.SnsMonitorSubscriptionArn) > 0 {
-			if e := notification.Unsubscribe(c._sns, c._config.Topics.SnsMonitorSubscriptionArn, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
-				log.Println("!!! Monitor SNS Topic '" + c._config.Topics.SnsMonitorTopicArn + "' Unsubscribe Failed: " + e.Error() + " !!!")
-			} else {
-				log.Println("... Unsubscribe Monitor SNS Topic '" + c._config.Topics.SnsMonitorTopicArn + "' OK")
-				c._config.SetSnsMonitorSubscriptionArn("")
-				doSave = true
-			}
-		} else {
-			log.Println("--- No Monitor SNS Topic to Unsubscribe ---")
-		}
-
-		if doSave {
-			if e := c._config.Save(); e != nil {
-				log.Println("!!! Persist Unsubscribed Status To Config Failed: " + e.Error() + " !!!")
-			}
-		}
-	}
+	return nil
 }
 
 // waitForWebServerReady is called after web server is expected to start,
@@ -793,25 +875,25 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 	go func() {
 		for {
 			if status, _, e := rest.GET(healthUrl, nil); e != nil {
-				log.Println("Web Server Health Check Failed: " + e.Error())
+				c._z.Errorf("Web Server Health Check Failed: %s", e.Error())
 				wg.Done()
 				chanErrorInfo <- "Web Server Health Check Failed: " + e.Error()
 				return
 			} else {
 				if status == 200 {
-					log.Println("Web Server Health OK")
+					c._z.Printf("Web Server Health OK")
 					wg.Done()
 					chanErrorInfo <- "OK"
 					return
 				} else {
-					log.Println("Web Server Not Ready!")
+					c._z.Warnf("Web Server Not Ready!")
 				}
 			}
 
 			time.Sleep(2500*time.Millisecond)
 
 			if time.Now().After(expireDateTime) {
-				log.Println("Web Server Health Check Timeout")
+				c._z.Warnf("Web Server Health Check Timeout")
 				wg.Done()
 				chanErrorInfo <- "Web Server Health Check Failed: Timeout"
 				return
@@ -821,7 +903,7 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 
 	wg.Wait()
 
-	log.Println("Web Server Heath Check Finalized...")
+	c._z.Printf("Web Server Heath Check Finalized...")
 
 	errInfo := <-chanErrorInfo
 
@@ -856,18 +938,18 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 	go func() {
 		for {
 			if status, e := c.HealthProbe("", timeout); e != nil {
-				log.Println("Health Status Check Failed: " + e.Error())
+				c._z.Errorf("Health Status Check Failed: %s", e.Error())
 				wg.Done()
 				chanErrorInfo <- "Health Status Check Failed: " + e.Error()
 				return
 			} else {
 				if status == grpc_health_v1.HealthCheckResponse_SERVING {
-					log.Println("Serving Status Detected")
+					c._z.Printf("Serving Status Detected")
 					wg.Done()
 					chanErrorInfo <- "OK"
 					return
 				} else {
-					log.Println("Not Serving!")
+					c._z.Warnf("Not Serving!")
 				}
 			}
 
@@ -877,7 +959,7 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 
 	wg.Wait()
 
-	log.Println("Heath Status Check Finalized...")
+	c._z.Printf("Heath Status Check Finalized...")
 
 	errInfo := <-chanErrorInfo
 
@@ -913,8 +995,8 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 		}
 	}
 
-	log.Println("Health Probe - Manual Check Begin...")
-	defer log.Println("... Health Probe - Manual Check End")
+	c._z.Printf("Health Probe - Manual Check Begin...")
+	defer c._z.Printf("... Health Probe - Manual Check End")
 
 	return c._healthManualChecker.Check(serviceName, timeoutDuration...)
 }
@@ -931,30 +1013,28 @@ func (c *Client) GetState() connectivity.State {
 // Close will close grpc client connection
 func (c *Client) Close() {
 	if c.BeforeClientClose != nil {
-		log.Println("Before gRPC Client Close Begin...")
+		c._z.Printf("Before gRPC Client Close Begin...")
 
 		c.BeforeClientClose(c)
 
-		log.Println("... Before gRPC Client Close End")
+		c._z.Printf("... Before gRPC Client Close End")
 	}
 
 	defer func() {
 		if c.AfterClientClose != nil {
-			log.Println("After gRPC Client Close Begin...")
+			c._z.Printf("After gRPC Client Close Begin...")
 
 			c.AfterClientClose(c)
 
-			log.Println("... After gRPC Client Close End")
+			c._z.Printf("... After gRPC Client Close End")
 		}
 	}()
-
-	c.unsubscribeFromSNS()
 
 	// clean up notifier client connection
 	if c._notifierClient != nil {
 		if c._notifierClient.NotifierClientAlertServicesStarted() {
 			if err := c._notifierClient.Unsubscribe(); err != nil {
-				log.Println("!!! Notifier Client Alert Services Unsubscribe Failed: " + err.Error() + " !!!")
+				c._z.Errorf("!!! Notifier Client Alert Services Unsubscribe Failed: " + err.Error() + " !!!")
 			}
 		}
 
@@ -967,10 +1047,6 @@ func (c *Client) Close() {
 
 	if c._sqs != nil {
 		c._sqs.Disconnect()
-	}
-
-	if c._sns != nil {
-		c._sns.Disconnect()
 	}
 
 	if c._sd != nil {
@@ -1091,9 +1167,9 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 
 	if len(found) > 0 {
 		c._endpoints = found
-		log.Println("Using DNS Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
+		c._z.Printf("Using DNS Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
 		for _, v := range c._endpoints {
-			log.Println("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
+			c._z.Printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
 		}
 		return nil
 	}
@@ -1170,9 +1246,9 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 
 	if len(found) > 0 {
 		c._endpoints = found
-		log.Println("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
+		c._z.Printf("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
 		for _, v := range c._endpoints {
-			log.Println("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
+			c._z.Printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
 		}
 		return nil
 	}
@@ -1288,7 +1364,7 @@ func (c *Client) updateHealth(p *serviceEndpoint, healthy bool) error {
 // deregisterInstance will remove instance from cloudmap and route 53
 func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 	if c._sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
-		log.Println("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Begin...")
+		c._z.Printf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Begin...")
 
 		var timeoutDuration []time.Duration
 
@@ -1297,7 +1373,7 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		}
 
 		if operationId, err := registry.DeregisterInstance(c._sd, p.InstanceId, p.ServiceId, timeoutDuration...); err != nil {
-			log.Println("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: " + err.Error())
+			c._z.Errorf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: " + err.Error())
 			return fmt.Errorf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "'Fail: %s", err.Error())
 		} else {
 			tryCount := 0
@@ -1306,19 +1382,19 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 
 			for {
 				if status, e := registry.GetOperationStatus(c._sd, operationId, timeoutDuration...); e != nil {
-					log.Println("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: " + e.Error())
+					c._z.Errorf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: " + e.Error())
 					return fmt.Errorf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "'Fail: %s", e.Error())
 				} else {
 					if status == sdoperationstatus.Success {
-						log.Println("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' OK")
+						c._z.Printf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' OK")
 					} else {
 						// wait 250 ms then retry, up until 20 counts of 250 ms (5 seconds)
 						if tryCount < 20 {
 							tryCount++
-							log.Println("... Checking De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Completion Status, Attempt " + strconv.Itoa(tryCount) + " (100ms)")
+							c._z.Printf("... Checking De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Completion Status, Attempt " + strconv.Itoa(tryCount) + " (100ms)")
 							time.Sleep(250*time.Millisecond)
 						} else {
-							log.Println("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: Operation Timeout After 5 Seconds")
+							c._z.Errorf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: Operation Timeout After 5 Seconds")
 							return fmt.Errorf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "'Fail When Operation Timed Out After 5 Seconds")
 						}
 					}
@@ -1332,12 +1408,12 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 
 func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 	if c._config.Grpc.CircuitBreakerEnabled {
-		log.Println("In - Unary Circuit Breaker Handler: " + method)
+		c._z.Printf("In - Unary Circuit Breaker Handler: " + method)
 
 		cb := c._circuitBreakers[method]
 
 		if cb == nil {
-			log.Println("... Creating Circuit Breaker for: " + method)
+			c._z.Printf("... Creating Circuit Breaker for: " + method)
 
 			z := &data.ZapLog{
 				DisableLogger: false,
@@ -1355,34 +1431,34 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 											   int(c._config.Grpc.CircuitBreakerSleepWindow),
 											   int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
 											   z); e != nil {
-				log.Println("!!! Create Circuit Breaker for: " + method + " Failed !!!")
-				log.Println("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+				c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+				c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
 
 				return invoker(ctx, method, req, reply, cc, opts...)
 			} else {
-				log.Println("... Circuit Breaker Created for: " + method)
+				c._z.Printf("... Circuit Breaker Created for: " + method)
 
 				c._circuitBreakers[method] = cb
 			}
 		} else {
-			log.Println("... Using Cached Circuit Breaker Command: " + method)
+			c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
 		}
 
 		_, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-								log.Println("Run Circuit Breaker Action for: " + method + "...")
+								c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
 
 								err = invoker(ctx, method, req, reply, cc, opts...)
 
 								if err != nil {
-									log.Println("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+									c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
 								} else {
-									log.Println("... Circuit Breaker Action for " + method + " Invoked")
+									c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
 								}
 								return nil, err
 
 							}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
-								log.Println("Circuit Breaker Action for " + method + " Fallback...")
-								log.Println("... Error = " + errIn.Error())
+								c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
+								c._z.Warnf("... Error = " + errIn.Error())
 
 								return nil, errIn
 							}, nil)
@@ -1395,12 +1471,12 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 
 func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 	if c._config.Grpc.CircuitBreakerEnabled {
-		log.Println("In - Stream Circuit Breaker Handler: " + method)
+		c._z.Printf("In - Stream Circuit Breaker Handler: " + method)
 
 		cb := c._circuitBreakers[method]
 
 		if cb == nil {
-			log.Println("... Creating Circuit Breaker for: " + method)
+			c._z.Printf("... Creating Circuit Breaker for: " + method)
 
 			z := &data.ZapLog{
 				DisableLogger: false,
@@ -1418,34 +1494,34 @@ func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.Str
 				int(c._config.Grpc.CircuitBreakerSleepWindow),
 				int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
 				z); e != nil {
-				log.Println("!!! Create Circuit Breaker for: " + method + " Failed !!!")
-				log.Println("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+				c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+				c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
 
 				return streamer(ctx, desc, cc, method, opts...)
 			} else {
-				log.Println("... Circuit Breaker Created for: " + method)
+				c._z.Printf("... Circuit Breaker Created for: " + method)
 
 				c._circuitBreakers[method] = cb
 			}
 		} else {
-			log.Println("... Using Cached Circuit Breaker Command: " + method)
+			c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
 		}
 
 		gres, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-			log.Println("Run Circuit Breaker Action for: " + method + "...")
+			c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
 
 			dataOut, err = streamer(ctx, desc, cc, method, opts...)
 
 			if err != nil {
-				log.Println("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+				c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
 			} else {
-				log.Println("... Circuit Breaker Action for " + method + " Invoked")
+				c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
 			}
 			return dataOut, err
 
 		}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
-			log.Println("Circuit Breaker Action for " + method + " Fallback...")
-			log.Println("... Error = " + errIn.Error())
+			c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
+			c._z.Warnf("... Error = " + errIn.Error())
 
 			return nil, errIn
 		}, nil)
@@ -1459,6 +1535,116 @@ func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.Str
 		} else {
 			return nil, gerr
 		}
+	} else {
+		return streamer(ctx, desc, cc, method, opts...)
+	}
+}
+
+func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
+	if xray.XRayServiceOn() {
+		parentSegID := ""
+		parentTraceID := ""
+
+		var md metadata.MD
+		var ok bool
+
+		if md, ok = metadata.FromIncomingContext(ctx); ok {
+			if v, ok2 := md["x-amzn-seg-id"]; ok2 && len(v) > 0 {
+				parentSegID = v[0]
+			}
+
+			if v, ok2 := md["x-amzn-tr-id"]; ok2 && len(v) > 0 {
+				parentTraceID = v[0]
+			}
+		}
+
+		var seg *xray.XSegment
+
+		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
+			seg = xray.NewSegment("GrpcClient-UnaryRPC [" + method + "]", &xray.XRayParentSegment{
+				SegmentID: parentSegID,
+				TraceID: parentTraceID,
+			})
+		} else {
+			seg = xray.NewSegment("GrpcClient-UnaryRPC [" + method + "]")
+		}
+		defer seg.Close()
+		defer func() {
+			if err != nil {
+				_ = seg.Seg.AddError(err)
+			}
+		}()
+
+		if md == nil {
+			md = make(metadata.MD)
+		}
+
+		md.Set("x-amzn-seg-id", seg.Seg.ID)
+		md.Set("x-amzn-tr-id", seg.Seg.TraceID)
+
+		// header is sent by itself
+		_ = grpc.SendHeader(ctx, md)
+
+		err = invoker(ctx, method, req, reply, cc, opts...)
+		return err
+	} else {
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+}
+
+func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (cs grpc.ClientStream, err error) {
+	if xray.XRayServiceOn() {
+		parentSegID := ""
+		parentTraceID := ""
+
+		var md metadata.MD
+		var ok bool
+
+		streamType := "StreamRPC"
+		if desc.ClientStreams {
+			streamType = "Client" + streamType
+		} else if desc.ServerStreams {
+			streamType = "Server" + streamType
+		}
+
+		if md, ok = metadata.FromIncomingContext(ctx); ok {
+			if v, ok2 := md["x-amzn-seg-id"]; ok2 && len(v) > 0 {
+				parentSegID = v[0]
+			}
+
+			if v, ok2 := md["x-amzn-tr-id"]; ok2 && len(v) > 0 {
+				parentTraceID = v[0]
+			}
+		}
+
+		var seg *xray.XSegment
+
+		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
+			seg = xray.NewSegment("GrpcClient-" + streamType + " [" + method + "]", &xray.XRayParentSegment{
+				SegmentID: parentSegID,
+				TraceID: parentTraceID,
+			})
+		} else {
+			seg = xray.NewSegment("GrpcClient-" + streamType + " [" + method + "]")
+		}
+		defer seg.Close()
+		defer func() {
+			if err != nil {
+				_ = seg.Seg.AddError(err)
+			}
+		}()
+
+		if md == nil {
+			md = make(metadata.MD)
+		}
+
+		md.Set("x-amzn-seg-id", seg.Seg.ID)
+		md.Set("x-amzn-tr-id", seg.Seg.TraceID)
+
+		_ = grpc.SendHeader(ctx, md)
+
+		cs, err = streamer(ctx, desc, cc, method, opts...)
+		return cs, err
 	} else {
 		return streamer(ctx, desc, cc, method, opts...)
 	}

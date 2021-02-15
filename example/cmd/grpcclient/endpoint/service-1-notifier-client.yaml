@@ -31,9 +31,10 @@ target:
   sd_timeout: 5
   service_discovery_type: api
   service_name: notifier-server
+  trace_use_xray: false
+  zaplog_enabled: true
+  zaplog_output_console: true
 queues:
-  sqs_discovery_queue_url:
   sqs_logger_queue_url:
 topics:
   sns_discovery_topic_arn: arn:aws:sns:us-east-1:565261360522:service-discovery-notify-grpc-test-service-payx-aldelo-internal
-  sns_discovery_subscription_arn:

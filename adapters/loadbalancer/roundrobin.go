@@ -32,7 +32,7 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required")
 	}
 
-	_ = res.NewManualResolver(schemeName, endpointAddrs)
+	_ = res.NewManualResolver(schemeName, serviceName, endpointAddrs)
 
 	// note: load balancer round robin is per call, rather than per connection
 	// this means, load balancer will connect to all discovered ip and perform per call actions in round robin fashion across all channels

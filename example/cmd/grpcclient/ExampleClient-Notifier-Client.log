@@ -1,0 +1,30 @@
+{"level":"info","ts":1613340561.586532,"msg":"Client ExampleClient-Notifier-Client Starting to Connect with notifier-server.notifier-nae.aldelo.internal..."}
+{"level":"info","ts":1613340561.976047,"msg":"... Service Discovery for notifier-server.notifier-nae.aldelo.internal Found 1 Endpoints:"}
+{"level":"info","ts":1613340561.976114,"msg":"       - 1) api=52.90.49.194:37573, Version=v0.0.1, CacheExpires=2021-02-14 02:14:21 PM"}
+{"level":"info","ts":1613340561.976149,"msg":"Setup Unary Circuit Breaker Interceptor"}
+{"level":"info","ts":1613340561.976167,"msg":"Setup Stream Circuit Breaker Interceptor"}
+{"level":"info","ts":1613340561.9761841,"msg":"Before gRPC Client Dial Begin..."}
+{"level":"info","ts":1613340561.976206,"msg":"... Before gRPC Client Dial End"}
+{"level":"info","ts":1613340561.9762182,"msg":"Dialing gRPC Service @ clb:///notifier-server.notifier-nae.aldelo.internal..."}
+{"level":"info","ts":1613340562.156485,"msg":"Dial Successful"}
+{"level":"info","ts":1613340562.156548,"msg":"Remote Address = clb:///notifier-server.notifier-nae.aldelo.internal"}
+{"level":"info","ts":1613340562.156563,"msg":"... gRPC Service @ clb:///notifier-server.notifier-nae.aldelo.internal [clb:///notifier-server.notifier-nae.aldelo.internal] Connected"}
+{"level":"info","ts":1613340562.1565921,"msg":"Health Probe - Manual Check Begin..."}
+{"level":"info","ts":1613340562.1566179,"msg":"In - Unary Circuit Breaker Handler: /grpc.health.v1.Health/Check"}
+{"level":"info","ts":1613340562.15664,"msg":"... Creating Circuit Breaker for: /grpc.health.v1.Health/Check"}
+{"level":"info","ts":1613340562.156947,"msg":"... Circuit Breaker Created for: /grpc.health.v1.Health/Check"}
+{"level":"info","ts":1613340562.157015,"msg":"Run Circuit Breaker Action for: /grpc.health.v1.Health/Check..."}
+{"level":"info","ts":1613340562.248665,"msg":"... Circuit Breaker Action for /grpc.health.v1.Health/Check Invoked"}
+{"level":"info","ts":1613340562.2487428,"msg":"... Health Probe - Manual Check End"}
+{"level":"info","ts":1613340562.248767,"msg":"Serving Status Detected"}
+{"level":"info","ts":1613340562.248783,"msg":"Heath Status Check Finalized..."}
+{"level":"info","ts":1613340562.248839,"msg":"After gRPC Client Dial Begin..."}
+{"level":"info","ts":1613340562.248867,"msg":"... After gRPC Client Dial End"}
+{"level":"info","ts":1613340562.248887,"msg":"Notifier Client Subscribe to TopicArn 'arn:aws:sns:us-east-1:565261360522:service-discovery-notify-grpc-test-service-payx-aldelo-internal' Started..."}
+{"level":"info","ts":1613340562.2489321,"msg":"In - Stream Circuit Breaker Handler: /notifierserver.NotifierService/Subscribe"}
+{"level":"info","ts":1613340562.2489479,"msg":"... Creating Circuit Breaker for: /notifierserver.NotifierService/Subscribe"}
+{"level":"info","ts":1613340562.249457,"msg":"... Circuit Breaker Created for: /notifierserver.NotifierService/Subscribe"}
+{"level":"info","ts":1613340562.249536,"msg":"Run Circuit Breaker Action for: /notifierserver.NotifierService/Subscribe..."}
+{"level":"info","ts":1613340562.249599,"msg":"... Circuit Breaker Action for /notifierserver.NotifierService/Subscribe Invoked"}
+{"level":"info","ts":1613340562.249702,"msg":"+++ Notifier Client Subscribe TopicArn Success +++"}
+{"level":"info","ts":1613340562.24972,"msg":"~~~ Notifier Client Awaits Notifier Server's Notification Data Arrival ~~~"}

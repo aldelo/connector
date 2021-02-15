@@ -53,7 +53,7 @@ func main() {
 	defer svc1Cli.Close()
 
 	go func() {
-		svc1Cli.DoNotifierAlertService()
+		_ = svc1Cli.DoNotifierAlertService()
 	}()
 
 	//
@@ -70,6 +70,11 @@ func main() {
 
 		switch util.RightTrimLF(choice) {
 		case "1":
+			if !svc1Cli.Ready() {
+				log.Println("*** CLIENT CONN NOT READY ***")
+				break
+			}
+
 			answerClient := testpb.NewAnswerServiceClient(svc1Cli.ClientConnection())
 
 			// call service 1000 times
