@@ -13,4 +13,5 @@ require (
 	google.golang.org/protobuf v1.25.0
 )
 
+// remove the following code
 replace github.com/aldelo/common => ../common

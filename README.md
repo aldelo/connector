@@ -7,24 +7,27 @@ productivity as well as reducing amount of repetitive typing / boilerplate codin
 
 On the server end, the entry point is /service folder's Service struct. 
 On the client side, the entry point is /client folder's Client struct.
-Both server and client supports config file based setup.
+Both server and client supports yaml config file based setup.
 
 Since we use AWS extensively, many features integrates with AWS: (Goal is for these features to work automatically with minimum configuration)
+Additionally, SNS is used for service discovery push notification to all connected clients, so that when new gRPC services are spun up, the clients can 
+utilize automatically.
 
 - Service Discovery
     - connector's service upon launch, auto registers with AWS cloud map for service discovery
     - On the client side, service discovery is automatic, see config for discovery options
+    - SNS is used for service discovery push notification to all subscribed clients, so whenever new services are started up,
+      or existing services shuts down, connected gRPC clients may auto refresh endpoints dynamically
 - Health Checks
     - service instance health is integrated with cloud map's health check status
     - auto register and deregister on service discovery based on instance health
     - container-level service serving status utilizes the gRPC health v1
     - config can be set on client to auto health check for serving status, as well as manual health probe
-    - TODO: need to create out of process health witness for instance health management
+    - DynamoDB is also used to track service state information, so that a custom service can be used to clean up any stale connections. See example under /example/cmd/snsgateway
 - Load Balancing
     - client side name resolver is setup to retrieve multiple service endpoints and perform round robin load balancing
     - load balancing is per rpc call rather than per connection
-- Metadata
-    - Metadata helper methods provided
+    - SNS service discovery will dynamically update load balancer's endpoints whenever services starts or shuts down
 - RpcError
     - Rpc Error helper methods provided
 - Compressor
@@ -35,7 +38,7 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
     - see /build/openssl-pem/make-pem.sh for CA, Server and Client Pem and Key self-signed creation  
     - server TLS / mTLS setup in gRPC service and client is required in order to secure channel
 - Auth
-    - TODO: will integrate via interceptor
+    - TODO: Future Implementation, currently using mTLS for transport level security
 - Circuit Breaker
     - client side, default using Hystrix-Go package for circuit breaker
     - circuit breaker is handled in client side unary and stream interceptors
@@ -45,15 +48,26 @@ Since we use AWS extensively, many features integrates with AWS: (Goal is for th
     - rate limit is handled in server side In-Tap-Handle
     - rate limit option configured via server config file
 - Logger
-    - TODO: Currently local logging using log.* but will update to zap
+    - TODO: Future Implementation for Cloud Logging to DynamoDB table as log destination
 - Monitoring
-    - TODO: looking to use prometheus, but might end up using something else
+    - TODO: Future Implementation
 - Tracer
-    - TODO: planning on using aws xray
+    - AWS XRay is used for distributed tracing
+    - enabled via yaml config file for /service, /client, /notifiergateay, /notifierserver code
+    - XRay tracing is already built in for the following code wrappers:
+      - kms, s3, dynamodb, redis, mysql via sqlx, ses, sns, sqs, cloudmap
+      - gin web server
+      - gRPC service, gRPC client
+    - XRay requires aws xray daemon to be deployed as sidecar on EC2 or ECS, see AWS documentation for details,
+      simple comments inline under XRay code wrapper provided too for setup guidance
 - Queue
-    - TODO: SQS
+    - AWS SQS is used as the message queue within this package
 - Notification
-    - TODO: SNS
+    - AWS SNS is used as the notification services within this package
+    - SNS callback requires public accessible host, see /notifiergateway for supporting this requirement
+    - gRPC client to /notifiergateway, and enabling SNS callback to stream down to the gRPC client requires /notifierserver
+    - Using /notifiergateway deployed on public host such as under ALB, and /notifierserver deployed either public or private within VPC, 
+      enables gRPC clients to be completely private in or out of VPC, where SNS callbacks can stream to gRPC client in real-time
 
 # Service connector
 #### Overview
@@ -131,3 +145,7 @@ See /example/cmd/client for a working gRPC client setup to consume the gRPC serv
 - https://github.com/grpc/grpc-go/tree/master/cmd/protoc-gen-go-grpc
 #### 6) Latest genproto Version
 - https://pkg.go.dev/google.golang.org/genproto
+
+#go.mod Edit
+#### remove the following code (Unless github.com/aldelo/common is in the path)
+     replace github.com/aldelo/common => ../common
