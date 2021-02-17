@@ -55,12 +55,12 @@ func TracerUnaryServerInterceptor(ctx context.Context, req interface{}, info *gr
 		var seg *xray.XSegment
 
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcService-UnaryRPC [" + info.FullMethod + "]", &xray.XRayParentSegment{
+			seg = xray.NewSegment("GrpcService-UnaryRPC-" + info.FullMethod, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
 				TraceID: parentTraceID,
 			})
 		} else {
-			seg = xray.NewSegment("GrpcService-UnaryRPC [" + info.FullMethod + "]")
+			seg = xray.NewSegment("GrpcService-UnaryRPC-" + info.FullMethod)
 		}
 		defer seg.Close()
 		defer func() {
@@ -125,12 +125,12 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		var seg *xray.XSegment
 
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcService-" + streamType + " [" + info.FullMethod + "]", &xray.XRayParentSegment{
+			seg = xray.NewSegment("GrpcService-" + streamType + "-" + info.FullMethod, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
 				TraceID: parentTraceID,
 			})
 		} else {
-			seg = xray.NewSegment("GrpcService-" + streamType + " [" + info.FullMethod + "]")
+			seg = xray.NewSegment("GrpcService-" + streamType + "-" + info.FullMethod)
 		}
 		defer seg.Close()
 		defer func() {

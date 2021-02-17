@@ -110,6 +110,13 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 		return nil, fmt.Errorf("Read Notifier Gateway Config Failed: %s", err.Error())
 	}
 
+	// setup self-signed server ca if any (so that callback to webhook whose servers had self-signed ca functions)
+	if util.LenTrim(cfg.NotifierGatewayData.ServerCACertPemFile) > 0 {
+		if err := rest.AppendServerCAPemFiles(cfg.NotifierGatewayData.ServerCACertPemFile); err != nil {
+			log.Println("!!! Load Self-Signed Server CA '" + cfg.NotifierGatewayData.ServerCACertPemFile + "' Failed: " + err.Error() + " !!!")
+		}
+	}
+
 	// establish data store connection
 	if err := model.ConnectDataStore(cfg); err != nil {
 		return nil, fmt.Errorf("Connect Notifier Gateway Data Store Failed: %s", err.Error())
@@ -424,7 +431,7 @@ func snsrouter(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	log.Println("/snsrouter Invoked: x-amx-sns-message-type = " + c.GetHeader("x-amz-sns-message-type") + ", serverKey = " + c.Param("serverKey"))
+	log.Println("/snsrouter Invoked: x-amz-sns-message-type = " + c.GetHeader("x-amz-sns-message-type") + ", serverKey = " + c.Param("serverKey"))
 
 	// handle confirmation or notification according to header
 	switch strings.ToUpper(c.GetHeader("x-amz-sns-message-type")) {
@@ -432,6 +439,12 @@ func snsrouter(c *gin.Context, bindingInputPtr interface{}) {
 		// subscription confirmation
 		log.Println("/snsrouter Received Header is 'subscriptionconfirmation'")
 		snsconfirmation(c, c.Param("serverKey"))
+		return
+
+	case "UNSUBSCRIBECONFIRMATION":
+		// unsubscribe confirmation
+		log.Println("/snsrouter Received Header is 'unsubscribeconfirmation'")
+		c.Status(200)
 		return
 
 	case "NOTIFICATION":

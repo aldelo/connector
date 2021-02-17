@@ -20,8 +20,8 @@ import (
 	"context"
 	"fmt"
 	util "github.com/aldelo/common"
-	"github.com/aldelo/common/crypto"
 	"github.com/aldelo/common/rest"
+	"github.com/aldelo/common/tlsconfig"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	ginw "github.com/aldelo/common/wrapper/gin"
@@ -213,7 +213,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// set tls credential dial option
 	if util.LenTrim(c._config.Grpc.ServerCACertFiles) > 0 {
-		tls := new(crypto.TlsConfig)
+		tls := new(tlsconfig.TlsConfig)
 		if tc, e := tls.GetClientTlsConfig(strings.Split(c._config.Grpc.ServerCACertFiles, ","), c._config.Grpc.ClientCertFile, c._config.Grpc.ClientKeyFile); e != nil {
 			return []grpc.DialOption{}, fmt.Errorf("Set Dial Option Client TLS Failed: %s", e.Error())
 		} else {
@@ -1561,12 +1561,12 @@ func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req 
 		var seg *xray.XSegment
 
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcClient-UnaryRPC [" + method + "]", &xray.XRayParentSegment{
+			seg = xray.NewSegment("GrpcClient-UnaryRPC-" + method, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
 				TraceID: parentTraceID,
 			})
 		} else {
-			seg = xray.NewSegment("GrpcClient-UnaryRPC [" + method + "]")
+			seg = xray.NewSegment("GrpcClient-UnaryRPC-" + method)
 		}
 		defer seg.Close()
 		defer func() {
@@ -1620,12 +1620,12 @@ func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamD
 		var seg *xray.XSegment
 
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcClient-" + streamType + " [" + method + "]", &xray.XRayParentSegment{
+			seg = xray.NewSegment("GrpcClient-" + streamType + "-" + method, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
 				TraceID: parentTraceID,
 			})
 		} else {
-			seg = xray.NewSegment("GrpcClient-" + streamType + " [" + method + "]")
+			seg = xray.NewSegment("GrpcClient-" + streamType + "-" + method)
 		}
 		defer seg.Close()
 		defer func() {

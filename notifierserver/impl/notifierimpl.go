@@ -25,7 +25,6 @@ import (
 	"github.com/aldelo/common/wrapper/sns"
 	"github.com/aldelo/common/wrapper/sns/snsprotocol"
 	"github.com/aldelo/connector/adapters/notification"
-	"github.com/aldelo/connector/notifiergateway/model"
 	"github.com/aldelo/connector/notifierserver/config"
 	pb "github.com/aldelo/connector/notifierserver/proto"
 	"log"
@@ -362,6 +361,13 @@ func (n *NotifierImpl) ConnectSNS(awsRegionStr awsregion.AWSRegion) (err error) 
 // UnsubscribeAllPriorSNSTopics will attempt to clean up all prior SNS topic subscriptions based in the config
 func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 	log.Println("=== Notifier Server Unsubscribe All Prior SNS Topics Invoked ===")
+	defer func() {
+		if util.LenTrim(n.ConfigData.NotifierServerData.ServerKey) > 0 {
+			if e := n.deleteServerRouteFromDataStore(n.ConfigData.NotifierServerData.ServerKey); e != nil {
+				log.Println("!!! DeleteServerRouteFromDataStore with Key '" + n.ConfigData.NotifierServerData.ServerKey + "' Failed: " + e.Error())
+			}
+		}
+	}()
 
 	if len(n.ConfigData.SubscriptionsData) == 0 {
 		return
@@ -400,10 +406,6 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 	}
 
 	_ = n.ConfigData.Save()
-
-	if len(n.ConfigData.SubscriptionsData) == 0 {
-		_ = model.DeleteServerRouteFromDataStore(n.ConfigData.NotifierServerData.ServerKey)
-	}
 
 	log.Println("=== Notifier Server Unsubscribe All Prior SNS Topics: OK ===")
 }
@@ -632,7 +634,9 @@ func (n *NotifierImpl) Unsubscribe(c context.Context, s *pb.NotificationSubscrib
 				}
 			}
 
-			_ = model.DeleteServerRouteFromDataStore(n.ConfigData.NotifierServerData.ServerKey)
+			if e := n.deleteServerRouteFromDataStore(n.ConfigData.NotifierServerData.ServerKey); e != nil {
+				log.Println("!!! DeleteServerRouteFromDataStore for Key '" + n.ConfigData.NotifierServerData.ServerKey + "' Failed: " + e.Error() + " !!!")
+			}
 
 			log.Println("### Notifier Server RPC Unsubscribe Completed, All Client Endpoints Removed for TopicArn '" + s.Topic + "' ###")
 			return &pb.NotificationDone{}, nil

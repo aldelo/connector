@@ -39,6 +39,7 @@ type notifierGatewayData struct {
 	DynamoDBTable string						`mapstructure:"dynamodb_table"`
 	DynamoDBTimeoutSeconds uint					`mapstructure:"dynamodb_timeout_seconds"`
 	DynamoDBActionRetries uint					`mapstructure:"dynamodb_action_retries"`
+	ServerCACertPemFile string					`mapstructure:"server_ca_cert"`
 	GatewayKey string							`mapstructure:"gateway_key"`
 	ServiceDiscoveryTimeoutSeconds uint			`mapstructure:"service_discovery_timeout_seconds"`
 	HealthReportCleanUpFrequencySeconds uint	`mapstructure:"health_report_cleanup_frequency_seconds"`
@@ -90,6 +91,13 @@ func (c *Config) SetDynamoDBActionRetries(i uint) {
 	if c._v != nil {
 		c._v.Set("notifier_gateway.dynamodb_action_retries", i)
 		c.NotifierGatewayData.DynamoDBActionRetries = i
+	}
+}
+
+func (c *Config) SetServerCACertPemFile(s string) {
+	if c._v != nil {
+		c._v.Set("notifier_gateway.server_ca_cert", s)
+		c.NotifierGatewayData.ServerCACertPemFile = s
 	}
 }
 
@@ -156,6 +164,7 @@ func (c *Config) Read() error {
 		"notifier_gateway.dynamodb_table", "").Default(					// required, dynamodb table name
 		"notifier_gateway.dynamodb_timeout_seconds", 5).Default(			// optional, dynamodb action timeout seconds
 		"notifier_gateway.dynamodb_action_retries", 3).Default(			// optional, dynamodb actions retry count
+		"notifier_gateway.server_ca_cert", "").Default(					// optional, self-signed server ca cert pem file path
 		"notifier_gateway.gateway_key", "").Default(						// optional, gateway key is used to validate inbound request when such request is to be validated
 		"notifier_gateway.service_discovery_timeout_seconds", 5)			// optional, service discovery actions timeout seconds, defaults to 5 seconds
 

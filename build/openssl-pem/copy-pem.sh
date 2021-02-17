@@ -4,6 +4,7 @@ cd keys/ca
 cp ca_cert.pem $GOPATH/src/github.com/aldelo/connector/example/cmd/grpcclient/x509/ca_cert.pem
 cp ca_cert.pem $GOPATH/src/github.com/aldelo/connector/example/cmd/grpcserver/x509/ca_cert.pem
 cp ca_cert.pem $GOPATH/src/github.com/aldelo/connector/example/cmd/grpcnotifier/x509/ca_cert.pem
+cp ca_cert.pem $GOPATH/src/github.com/aldelo/connector/example/cmd/snsgateway/x509/ca_cert.pem
 
 cd ..
 cd client

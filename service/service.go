@@ -22,6 +22,7 @@ import (
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/crypto"
 	"github.com/aldelo/common/rest"
+	"github.com/aldelo/common/tlsconfig"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/common/wrapper/cloudmap/sdhealthchecktype"
@@ -226,7 +227,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		}
 
 		if util.LenTrim(s._config.Grpc.ServerCertFile) > 0 && util.LenTrim(s._config.Grpc.ServerKeyFile) > 0 {
-			tls := new(crypto.TlsConfig)
+			tls := new(tlsconfig.TlsConfig)
 			if tc, e := tls.GetServerTlsConfig(s._config.Grpc.ServerCertFile, s._config.Grpc.ServerKeyFile, strings.Split(s._config.Grpc.ClientCACertFiles, ",")); e != nil {
 				log.Fatal("Setup gRPC Server TLS Failed: " + e.Error())
 			} else {
@@ -391,7 +392,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		if s._config.Instance.FavorPublicIP && util.LenTrim(s._config.Instance.PublicIPGateway) > 0 && util.LenTrim(s._config.Instance.PublicIPGatewayKey) > 0 {
 			validationToken := crypto.Sha256(util.FormatDate(time.Now().UTC()), s._config.Instance.PublicIPGatewayKey)
 
-			publicIPSeg := xray.NewSegmentNullable("GrpcService-SetupServer [Get PublicIP From: " + s._config.Instance.PublicIPGateway + "]")
+			publicIPSeg := xray.NewSegmentNullable("GrpcService-SetupServer")
 			if publicIPSeg != nil {
 				_ = publicIPSeg.Seg.AddMetadata("Public-IP-Gateway", s._config.Instance.PublicIPGateway)
 				_ = publicIPSeg.Seg.AddMetadata("Hash-Date", util.FormatDate(time.Now().UTC()))
@@ -595,7 +596,7 @@ func (s *Service) CurrentlyServing() bool {
 
 // startServer will start and serve grpc services, it will run in goroutine until terminated
 func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
-	seg := xray.NewSegmentNullable("GrpcService-StartServer  [Addr: " + lis.Addr().String() + "]")
+	seg := xray.NewSegmentNullable("GrpcService-StartServer")
 	if seg != nil {
 		defer seg.Close()
 		defer func() {
@@ -939,7 +940,7 @@ func (s *Service) awaitOsSigExit() {
 
 // deleteServiceHealthReportFromDataStore will remove the health report service record from data store based on instanceId
 func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err error) {
-	seg := xray.NewSegmentNullable("GrpcService-DeleteServiceHealthReportFromDataStore  [InstanceID: " + instanceId + "]")
+	seg := xray.NewSegmentNullable("GrpcService-DeleteServiceHealthReportFromDataStore")
 	if seg != nil {
 		defer seg.Close()
 		defer func() {
@@ -977,7 +978,7 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 	var subSeg *xray.XSegment
 
 	if seg != nil {
-		subSeg = seg.NewSubSegment("REST DEL: " + s._config.Instance.HealthReportServiceUrl + "/" + instanceId)
+		subSeg = seg.NewSubSegment("REST DEL: " + s._config.Instance.HealthReportServiceUrl)
 		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-name", s._config.Instance.HashKeyName)
 		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-signature", crypto.Sha256(instanceId + util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret))
 	}

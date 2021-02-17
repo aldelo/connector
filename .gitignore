@@ -88,6 +88,7 @@ example/cmd/grpcnotifier/x509/server_key.pem
 example/cmd/snsgateway/gateway-config.yaml
 example/cmd/snsgateway/gateway-webserver.yaml
 example/cmd/snsgateway/build.sh
+example/cmd/snsgateway/x509/ca_cert.pem
 example/cmd/snsgateway/snsgateway.service
 example/cmd/snsgateway/snsgateway
 example/cmd/snsgateway/snsgateway-linux

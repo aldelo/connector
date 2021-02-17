@@ -11,6 +11,8 @@ notifier_gateway:
   dynamodb_timeout_seconds: 5
   # optional, dynamodb action retries count
   dynamodb_action_retries: 3
+  # optional, self-signed server ca pem file path
+  server_ca_cert:
   # optional, gateway secret key phrase, used for hashing or other validation purposes
   gateway_key:
   # optional, service discovery action timeout seconds
