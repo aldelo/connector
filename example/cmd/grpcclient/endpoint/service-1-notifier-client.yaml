@@ -34,6 +34,7 @@ target:
   trace_use_xray: false
   zaplog_enabled: true
   zaplog_output_console: true
+  rest_target_ca_cert_files:
 queues:
   sqs_logger_queue_url:
 topics:

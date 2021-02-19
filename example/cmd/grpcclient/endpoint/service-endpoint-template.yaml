@@ -48,6 +48,9 @@ target:
   zaplog_enabled: true
   # option to output zap log to console (screen), true = console, false = file, default = true
   zaplog_output_console: true
+  # optional, self-signed ca certs file path, separated by comma if multiple ca pems,
+  # used by rest get/post/put/delete against target server hosts that use self-signed certs for tls, to avoid bad certificate error during tls handshake
+  rest_target_ca_cert_files:
 queues:
   # the queue url pre-created on aws sqs for the target logger service to use
   sqs_logger_queue_url:

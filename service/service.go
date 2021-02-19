@@ -216,6 +216,13 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			xray.SetXRayServiceOn()
 		}
 
+		// if rest target ca cert files defined, load self-signed ca certs so that this service may use those host resources
+		if util.LenTrim(s._config.Service.RestTargetCACertFiles) > 0 {
+			if err := rest.AppendServerCAPemFiles(strings.Split(s._config.Service.RestTargetCACertFiles, ",")...); err != nil {
+				log.Println("!!! Load Rest Target Self-Signed CA Cert Files '" + s._config.Service.RestTargetCACertFiles + "' Failed: " + err.Error() + " !!!")
+			}
+		}
+
 		//
 		// config server options
 		//
@@ -1719,6 +1726,7 @@ func (s *Service) startWebServer() error {
 	s.WebServerConfig.CleanUp = func() {
 		server.RemoveDNSRecordset()
 	}
+	log.Println("Web Server Host Starting On: " + s.WebServerConfig.WebServerLocalAddress)
 
 	// serve web server - blocking mode
 	if err := server.Serve(); err != nil {

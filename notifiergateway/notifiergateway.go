@@ -110,13 +110,6 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 		return nil, fmt.Errorf("Read Notifier Gateway Config Failed: %s", err.Error())
 	}
 
-	// setup self-signed server ca if any (so that callback to webhook whose servers had self-signed ca functions)
-	if util.LenTrim(cfg.NotifierGatewayData.ServerCACertPemFile) > 0 {
-		if err := rest.AppendServerCAPemFiles(cfg.NotifierGatewayData.ServerCACertPemFile); err != nil {
-			log.Println("!!! Load Self-Signed Server CA '" + cfg.NotifierGatewayData.ServerCACertPemFile + "' Failed: " + err.Error() + " !!!")
-		}
-	}
-
 	// establish data store connection
 	if err := model.ConnectDataStore(cfg); err != nil {
 		return nil, fmt.Errorf("Connect Notifier Gateway Data Store Failed: %s", err.Error())

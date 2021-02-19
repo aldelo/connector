@@ -17,6 +17,7 @@ package webserver
  */
 
 import (
+	"github.com/aldelo/common/rest"
 	ginw "github.com/aldelo/common/wrapper/gin"
 	"github.com/aldelo/common/wrapper/gin/ginbindtype"
 	"github.com/aldelo/common/wrapper/gin/gingzipcompression"
@@ -303,6 +304,13 @@ func (w *WebServer) setupWebServer() error {
 		//		X-Amzn-Tr-Id = Segment Trace ID
 		_ = xray.Init("127.0.0.1:2000", "1.2.0")
 		xray.SetXRayServiceOn()
+	}
+
+	// if rest target ca cert files defined, load self-signed ca certs so that this service may use those host resources
+	if util.LenTrim(w._config.WebServer.RestTargetCACertFiles) > 0 {
+		if err := rest.AppendServerCAPemFiles(strings.Split(w._config.WebServer.RestTargetCACertFiles, ",")...); err != nil {
+			log.Println("!!! Load Rest Target Self-Signed CA Cert Files '" + w._config.WebServer.RestTargetCACertFiles + "' Failed: " + err.Error() + " !!!")
+		}
 	}
 
 	// set web server tls

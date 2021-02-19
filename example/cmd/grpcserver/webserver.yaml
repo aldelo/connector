@@ -23,6 +23,9 @@ web_server:
   ws_route53_domain_suffix:
   # optional, if using route53 for host url, configure route53 ttl seconds, default = 60
   ws_route53_ttl: 60
+  # optional, self-signed ca certs file path, separated by comma if multiple ca pems,
+  # used by rest get/post/put/delete against target server hosts that use self-signed certs for tls, to avoid bad certificate error during tls handshake
+  rest_target_ca_cert_files:
 recovery:
   # optional, true or false, indicates if web server uses custom recovery logic, default = false
   custom_recovery: false

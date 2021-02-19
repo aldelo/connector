@@ -52,6 +52,7 @@ type webServerData struct {
 	Route53HostedZoneID string					`mapstructure:"ws_route53_hosted_zone_id"`
 	Route53DomainSuffix string					`mapstructure:"ws_route53_domain_suffix"`
 	Route53TTL uint								`mapstructure:"ws_route53_ttl"`
+	RestTargetCACertFiles string				`mapstructure:"rest_target_ca_cert_files"`
 }
 
 type recoveryData struct {
@@ -218,6 +219,13 @@ func (c *config) SetRoute53TTL(i uint) {
 	if c._v != nil {
 		c._v.Set("web_server.ws_route53_hosted_zone_id", i)
 		c.WebServer.Route53TTL = i
+	}
+}
+
+func (c *config) SetRestTargetCACertFiles(s string) {
+	if c._v != nil {
+		c._v.Set("web_server.rest_target_ca_cert_files", s)
+		c.WebServer.RestTargetCACertFiles = s
 	}
 }
 
@@ -527,7 +535,10 @@ func (c *config) Read() error {
 	"web_server.ws_host_use_route53", false).Default(							// optional, enable route53 dns for host url, where host ip auto maintained by route53 api integration (if host using tls, use dns instead of ip for webhook callback)
 	"web_server.ws_route53_hosted_zone_id", "").Default(						// optional, if using route53 for host url, configure route53 hosted zone id (pre-created in aws route53)
 	"web_server.ws_route53_domain_suffix", "").Default(						// optional, if using route53 for host url, configure route53 domain suffix such as example.com (must match domain pre-configured in aws route53)
-	"web_server.ws_route53_ttl", 60)											// optional, if using route53 for host url, configure route53 ttl seconds, default = 60
+	"web_server.ws_route53_ttl", 60).Default(									// optional, if using route53 for host url, configure route53 ttl seconds, default = 60
+	"web_server.rest_target_ca_cert_files", "")								// optional, self-signed ca certs file path, separated by comma if multiple ca pems,
+																						// 			 used by rest get/post/put/delete against target server hosts that use self-signed certs for tls,
+																						//			 to avoid bad certificate error during tls handshake
 
 	c._v.Default("recovery.custom_recovery", false)							// optional, true or false, indicates if web server uses custom recovery logic, default = false
 

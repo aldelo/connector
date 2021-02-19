@@ -45,6 +45,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/stats"
+	"log"
 	"path"
 	"strconv"
 	"strings"
@@ -480,6 +481,13 @@ func (c *Client) Dial(ctx context.Context) error {
 	if !c.ConfiguredForClientDial() {
 		c._config = nil
 		return fmt.Errorf(c.ConfigFileName + " Not Yet Configured for gRPC Client Dial, Please Check Config File")
+	}
+
+	// if rest target ca cert files defined, load self-signed ca certs so that this service may use those host resources
+	if util.LenTrim(c._config.Target.RestTargetCACertFiles) > 0 {
+		if err := rest.AppendServerCAPemFiles(strings.Split(c._config.Target.RestTargetCACertFiles, ",")...); err != nil {
+			log.Println("!!! Load Rest Target Self-Signed CA Cert Files '" + c._config.Target.RestTargetCACertFiles + "' Failed: " + err.Error() + " !!!")
+		}
 	}
 
 	c._z.Printf("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
@@ -1029,6 +1037,11 @@ func (c *Client) Close() {
 			c._z.Printf("... After gRPC Client Close End")
 		}
 	}()
+
+	// clean up web server route53 dns if applicable
+	if c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
+		c.WebServerConfig.CleanUp()
+	}
 
 	// clean up notifier client connection
 	if c._notifierClient != nil {
@@ -1679,6 +1692,9 @@ type WebServerConfig struct {
 
 	// getter only
 	WebServerLocalAddress string
+
+	// clean up func
+	CleanUp func()
 }
 
 func (c *Client) startWebServer() error {
@@ -1730,10 +1746,15 @@ func (c *Client) startWebServer() error {
 		httpVerb = "http"
 	}
 
-	c.WebServerConfig.WebServerLocalAddress = fmt.Sprintf("%s://%s:%d", httpVerb, util.GetLocalIP(), server.Port())
+	c.WebServerConfig.WebServerLocalAddress = fmt.Sprintf("%s://%s:%d", httpVerb, server.GetHostAddress(), server.Port())
+	c.WebServerConfig.CleanUp = func() {
+		server.RemoveDNSRecordset()
+	}
+	log.Println("Web Server Host Starting On: " + c.WebServerConfig.WebServerLocalAddress)
 
 	// serve web server
 	if err := server.Serve(); err != nil {
+		server.RemoveDNSRecordset()
 		return fmt.Errorf("Start Web Server Failed: (Serve Error) %s", err)
 	}
 

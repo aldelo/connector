@@ -20,6 +20,9 @@ service:
   sv_tracer_use_xray: false
   # indicate if this service will use sqs for service logging staging, default = false
   sv_logger_use_sqs: false
+  # optional, self-signed ca certs file path, separated by comma if multiple ca pems,
+  # used by rest get/post/put/delete against target server hosts that use self-signed certs for tls, to avoid bad certificate error during tls handshake
+  rest_target_ca_cert_files:
 queues:
   # sqs queue name prefix used for service discovery data queuing, if name is not provided, default = service-discovery-data-
   sqs_discovery_queue_name_prefix:

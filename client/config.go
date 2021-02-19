@@ -50,6 +50,7 @@ type targetData struct {
 	TraceUseXRay bool				`mapstructure:"trace_use_xray"`
 	ZapLogEnabled bool				`mapstructure:"zaplog_enabled"`
 	ZapLogOutputConsole bool		`mapstructure:"zaplog_output_console"`
+	RestTargetCACertFiles string	`mapstructure:"rest_target_ca_cert_files"`
 }
 
 type queuesData struct {
@@ -178,6 +179,13 @@ func (c *config) SetZapLogOutputConsole(b bool) {
 	if c._v != nil {
 		c._v.Set("target.zaplog_output_console", b)
 		c.Target.ZapLogOutputConsole = b
+	}
+}
+
+func (c *config) SetRestTargetCACertFiles(s string) {
+	if c._v != nil {
+		c._v.Set("target.rest_target_ca_cert_files", s)
+		c.Target.RestTargetCACertFiles = s
 	}
 }
 
@@ -375,6 +383,9 @@ func (c *config) Read() error {
 		"target.trace_use_xray", false).Default(							// indicates if this client will use aws xray tracing, default is false
 		"target.zaplog_enabled", false).Default(							// indicates if app logs will use zap log, default = false, meaning no log written
 		"target.zaplog_output_console", true).Default(					// indicates if zap log outputs to console (screen) or to file, true = console, false = file; default = true
+		"target.rest_target_ca_cert_files", "").Default(					// optional, self-signed ca certs file path, separated by comma if multiple ca pems,
+																					// 			 used by rest get/post/put/delete against target server hosts that use self-signed certs for tls,
+																					//			 to avoid bad certificate error during tls handshake
 		"queues.sqs_logger_queue_url", "").Default(						// the queue url pre-created on aws sqs for the target logger service this config file targets
 		"topics.sns_discovery_topic_arn", "").Default(					// the topic arn pre-created on aws sns for the target discovery service this config file targets
 		"grpc.dial_blocking_mode", true).Default(							// indicate if grpc dial is blocking mode or not, default is true
