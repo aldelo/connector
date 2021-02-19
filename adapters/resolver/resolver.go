@@ -21,6 +21,7 @@ import (
 	util "github.com/aldelo/common"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/resolver/manual"
+	"log"
 	"strings"
 )
 
@@ -93,6 +94,8 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		r.UpdateState(resolver.State{
 			Addresses: addrs,
 		})
+
+		log.Println("[NOTE] Please Ignore Error 'Health check is requested but health check function is not set'; UpdateManualResolver is Completed")
 
 		return nil
 	} else {

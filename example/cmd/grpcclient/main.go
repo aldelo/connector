@@ -65,7 +65,7 @@ func main() {
 		fmt.Println("Please Select Choice:")
 		fmt.Println("... 1 = Call service-1 RPC Test Method")
 		fmt.Println("... 2 = Call service-1 Server Stream RPC Test Method")
-		fmt.Println("... 3 = Re-Dial service-1 Client Connection")
+		fmt.Println("... 3 = Call service-1 Health Probe")
 		_, _ = fmt.Scanln(&choice)
 
 		switch util.RightTrimLF(choice) {
@@ -117,9 +117,11 @@ func main() {
 			}
 
 		case "3":
-			svc1Cli.Close()
-			if svc1Cli, err = DialService1(); err != nil {
-				log.Fatal("Re-Dial Client Failed: " + err.Error())
+			v, e := svc1Cli.HealthProbe("")
+			if e != nil {
+				log.Println("Error = " + e.Error())
+			} else {
+				log.Println("Probe = " + v.String())
 			}
 
 		default:

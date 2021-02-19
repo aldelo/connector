@@ -119,8 +119,8 @@ func startServiceHandler(port int) {
 
 	// per service grpc health check handler
 	grpcServer.ServiceHealthCheckHandlers = map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus{
-		"ExampleService": func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus {
-			log.Println("Service gRPC Health Check Invoked: ExampleService")
+		"grpc-test-client": func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus {
+			log.Println("Service gRPC Health Check Invoked: grpc-test-client")
 
 			// currently serving status is set by service after grpc server starts and sd instance health update completes
 			if grpcServer.CurrentlyServing() {

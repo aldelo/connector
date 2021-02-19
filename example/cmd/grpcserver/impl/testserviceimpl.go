@@ -18,8 +18,11 @@ package impl
 
 import (
 	util "github.com/aldelo/common"
+	"github.com/aldelo/common/wrapper/xray"
 	testpb "github.com/aldelo/connector/example/proto/test"
 	"context"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 type TestServiceImpl struct{
@@ -28,6 +31,19 @@ type TestServiceImpl struct{
 
 // implemented service greeting
 func (*TestServiceImpl) Greeting(ctx context.Context, q *testpb.Question) (*testpb.Answer, error) {
+	seg := xray.NewSegment("TestApp-Greeting-RPC")
+	defer seg.Close()
+
+	md := metadata.MD{
+		"x-amzn-seg-id": []string{
+			seg.Seg.ID,
+		},
+		"x-amzn-tr-id": []string{
+			seg.Seg.TraceID,
+		},
+	}
+	_ = grpc.SendHeader(ctx, md)
+
 	s := q.Question + " = " + "Reply OK"
 	return &testpb.Answer{
 		Answer: s,

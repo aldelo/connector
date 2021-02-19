@@ -15,6 +15,14 @@ web_server:
   ws_trace_use_xray: false
   # optional, enable cloud logging
   ws_logging_use_sqs: false
+  # optional, enable route53 dns for host url, where host ip auto maintained by route53 api integration (if host using tls, use dns instead of ip for webhook callback)
+  ws_host_use_route53: false
+  # optional, if using route53 for host url, configure route53 hosted zone id (pre-created in aws route53)
+  ws_route53_hosted_zone_id:
+  # optional, if using route53 for host url, configure route53 domain suffix such as example.com (must match domain pre-configured in aws route53)
+  ws_route53_domain_suffix:
+  # optional, if using route53 for host url, configure route53 ttl seconds, default = 60
+  ws_route53_ttl: 60
 recovery:
   # optional, true or false, indicates if web server uses custom recovery logic, default = false
   custom_recovery: false

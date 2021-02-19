@@ -48,6 +48,10 @@ type webServerData struct {
 	GoogleRecaptchaSecret string				`mapstructure:"google_recaptcha_secret"`
 	TraceUseXRay bool							`mapstructure:"ws_trace_use_xray"`
 	LoggingUseSQS bool							`mapstructure:"ws_logging_use_sqs"`
+	HostUseRoute53 bool							`mapstructure:"ws_host_use_route53"`
+	Route53HostedZoneID string					`mapstructure:"ws_route53_hosted_zone_id"`
+	Route53DomainSuffix string					`mapstructure:"ws_route53_domain_suffix"`
+	Route53TTL uint								`mapstructure:"ws_route53_ttl"`
 }
 
 type recoveryData struct {
@@ -186,6 +190,34 @@ func (c *config) SetLoggingUseSQS(b bool) {
 	if c._v != nil {
 		c._v.Set("web_server.ws_logging_use_sqs", b)
 		c.WebServer.LoggingUseSQS = b
+	}
+}
+
+func (c *config) SetHostUseRoute53(b bool) {
+	if c._v != nil {
+		c._v.Set("web_server.ws_host_use_route53", b)
+		c.WebServer.HostUseRoute53 = b
+	}
+}
+
+func (c *config) SetRoute53HostedZoneID(s string) {
+	if c._v != nil {
+		c._v.Set("web_server.ws_route53_hosted_zone_id", s)
+		c.WebServer.Route53HostedZoneID = s
+	}
+}
+
+func (c *config) SetRoute53DomainSuffix(s string) {
+	if c._v != nil {
+		c._v.Set("web_server.ws_route53_domain_suffix", s)
+		c.WebServer.Route53DomainSuffix = s
+	}
+}
+
+func (c *config) SetRoute53TTL(i uint) {
+	if c._v != nil {
+		c._v.Set("web_server.ws_route53_hosted_zone_id", i)
+		c.WebServer.Route53TTL = i
 	}
 }
 
@@ -491,7 +523,11 @@ func (c *config) Read() error {
 	"web_server.ws_server_key", "").Default(									// optional, web server tls server certificate key file path, default = blank
 	"web_server.google_recaptcha_secret", "").Default(						// optional, google recaptcha v2 secret assigned by google services
 	"web_server.ws_trace_use_xray", false).Default(							// optional, enable xray tracing, default false
-	"web_server.ws_logging_use_sqs", false)									// optional, enable cloud logging, default false
+	"web_server.ws_logging_use_sqs", false).Default(							// optional, enable cloud logging, default false
+	"web_server.ws_host_use_route53", false).Default(							// optional, enable route53 dns for host url, where host ip auto maintained by route53 api integration (if host using tls, use dns instead of ip for webhook callback)
+	"web_server.ws_route53_hosted_zone_id", "").Default(						// optional, if using route53 for host url, configure route53 hosted zone id (pre-created in aws route53)
+	"web_server.ws_route53_domain_suffix", "").Default(						// optional, if using route53 for host url, configure route53 domain suffix such as example.com (must match domain pre-configured in aws route53)
+	"web_server.ws_route53_ttl", 60)											// optional, if using route53 for host url, configure route53 ttl seconds, default = 60
 
 	c._v.Default("recovery.custom_recovery", false)							// optional, true or false, indicates if web server uses custom recovery logic, default = false
 

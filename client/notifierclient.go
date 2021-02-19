@@ -368,7 +368,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 				n._grpcClient.ZLog().Printf("### Notifier Client Received Stop Notification Services Signal ###")
 
 				recvMap = nil
-				err = fmt.Errorf("Notifier Client Con")
+				err = fmt.Errorf("Notifier Client Received Stop Notification Signal")
 				return err
 
 			default:

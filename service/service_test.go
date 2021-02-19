@@ -22,6 +22,7 @@ import (
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	ginw "github.com/aldelo/common/wrapper/gin"
+	"github.com/aldelo/common/wrapper/route53"
 	testpb "github.com/aldelo/connector/example/proto/test"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -261,4 +262,30 @@ func TestSliceDeleteFunc(t *testing.T){
 	for _, v := range newSlice{
 		t.Log(v)
 	}
+}
+
+func TestRoute53AddRecordset(t *testing.T) {
+	r := &route53.Route53{}
+
+	_ = r.Connect()
+	defer r.Disconnect()
+
+	if e := r.CreateUpdateResourceRecordset("Z002784014TW7VUT92MDD", "i-10-2-31-128.notifier-ws-aldelo.nae", "10.2.31.128", 60, "A"); e != nil {
+		log.Println(e.Error())
+	}
+
+	log.Println("OK")
+}
+
+func TestRoute53DeleteRecordset(t *testing.T) {
+	r := &route53.Route53{}
+
+	_ = r.Connect()
+	defer r.Disconnect()
+
+	if e := r.DeleteResourceRecordset("Z002784014TW7VUT92MDD", "i-10-2-31-128.notifier-ws-aldelo.nae", "10.2.31.128", 60, "A"); e != nil {
+		log.Println(e.Error())
+	}
+
+	log.Println("OK")
 }

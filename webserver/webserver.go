@@ -21,6 +21,7 @@ import (
 	"github.com/aldelo/common/wrapper/gin/ginbindtype"
 	"github.com/aldelo/common/wrapper/gin/gingzipcompression"
 	"github.com/aldelo/common/wrapper/gin/ginjwtsignalgorithm"
+	"github.com/aldelo/common/wrapper/route53"
 	"github.com/aldelo/common/wrapper/xray"
 
 	// "github.com/aldelo/common/wrapper/sns"
@@ -75,6 +76,12 @@ type WebServer struct {
 
 	// instantiated web server objects
 	_ginwebserver *ginw.Gin
+
+	// dns info used
+	_dnsHostZoneId string
+	_dnsIp string
+	_dnsUrl string
+	_dnsTtl uint
 }
 
 // NewWebServer creates a prepared web server for further setup and use
@@ -165,6 +172,68 @@ func (w *WebServer) UseTls() bool {
 		return false
 	} else {
 		return util.LenTrim(w._config.WebServer.ServerKey) > 0 && util.LenTrim(w._config.WebServer.ServerPem) > 0
+	}
+}
+
+// GetHostAddress returns either the dns based url as configured,
+// if route53 dns url is configured, this function will first create dns recordset for the local ip, then return dns url
+func (w *WebServer) GetHostAddress() string {
+	// remove prior dns registration if any
+	w.RemoveDNSRecordset()
+
+	if w._config != nil {
+		if w._config.WebServer.HostUseRoute53 {
+			if util.LenTrim(w._config.WebServer.Route53HostedZoneID) > 0 && util.LenTrim(w._config.WebServer.Route53DomainSuffix) > 0 {
+				// get local ip
+				ip := util.GetLocalIP()
+				url := "i-" + util.Replace(ip, ".", "-") + "." + w._config.WebServer.Route53DomainSuffix
+				ttl := w._config.WebServer.Route53TTL
+				if ttl == 0 {
+					ttl = 60
+				} else if ttl < 15 {
+					ttl = 15
+				} else if ttl > 300 {
+					ttl = 300
+				}
+
+				r := &route53.Route53{}
+				if e := r.Connect(); e != nil {
+					log.Println("!!! Web Server Get Host Address Fallback to Local IP: " + e.Error() + " !!!")
+					return ip
+				}
+				defer r.Disconnect()
+
+				if e := r.CreateUpdateResourceRecordset(w._config.WebServer.Route53HostedZoneID, url, ip, ttl, "A"); e != nil {
+					log.Println("!!! Web Server Get Host Address Fallback to Local IP: " + e.Error() + " !!!")
+					return ip
+				} else {
+					w._dnsHostZoneId = w._config.WebServer.Route53HostedZoneID
+					w._dnsUrl = url
+					w._dnsIp = ip
+					w._dnsTtl = ttl
+					return url
+				}
+			} else {
+				log.Println("!!! Web Server Get Host Address Fallback to Local IP: Route53HostedZoneID and/or Route53DomainSuffix Not Defined in Config Yaml !!!")
+				return util.GetLocalIP()
+			}
+		} else {
+			return util.GetLocalIP()
+		}
+	} else {
+		log.Println("!!! Web Server Get Host Address Fallback to Local IP: Config Yaml Object Nil !!!")
+		return util.GetLocalIP()
+	}
+}
+
+// RemoveDNSRecordset will delete dns resource recordset for the currently registered entry from route53 (originally registered via GetHostAddress function)
+func (w *WebServer) RemoveDNSRecordset() {
+	if util.LenTrim(w._dnsHostZoneId) > 0 && util.LenTrim(w._dnsIp) > 0 && util.LenTrim(w._dnsUrl) > 0 && w._dnsTtl > 0 {
+		r := &route53.Route53{}
+		if e := r.Connect(); e == nil {
+			defer r.Disconnect()
+			_ = r.DeleteResourceRecordset(w._dnsHostZoneId, w._dnsUrl, w._dnsIp, w._dnsTtl, "A")
+		}
 	}
 }
 

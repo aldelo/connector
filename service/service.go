@@ -645,6 +645,11 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 				// stop health report clean up service
 				stopHealthReportService <-true
 
+				// clean up web server dns recordset if any
+				if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
+					s.WebServerConfig.CleanUp()
+				}
+
 				// on exit, stop serving
 				s._mu.Lock()
 				s._serving = false
@@ -1529,6 +1534,10 @@ func (s *Service) GracefulStop() {
 
 	_ = s.deleteServiceHealthReportFromDataStore(s._config.Instance.Id)
 
+	if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
+		s.WebServerConfig.CleanUp()
+	}
+
 	// start clean up
 	s._localAddress = ""
 
@@ -1571,6 +1580,12 @@ func (s *Service) ImmediateStop() {
 
 	// perform unsubscribe if any
 	s.unsubscribeSNS()
+
+	_ = s.deleteServiceHealthReportFromDataStore(s._config.Instance.Id)
+
+	if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
+		s.WebServerConfig.CleanUp()
+	}
 
 	// start clean up
 	s._localAddress = ""
@@ -1641,6 +1656,9 @@ type WebServerConfig struct {
 
 	// getter only
 	WebServerLocalAddress string
+
+	// clean up func
+	CleanUp func()
 }
 
 // GetWebServerLocalAddress returns FQDN url to the local web server
@@ -1697,10 +1715,14 @@ func (s *Service) startWebServer() error {
 		httpVerb = "http"
 	}
 
-	s.WebServerConfig.WebServerLocalAddress = fmt.Sprintf("%s://%s:%d", httpVerb, util.GetLocalIP(), server.Port())
+	s.WebServerConfig.WebServerLocalAddress = fmt.Sprintf("%s://%s:%d", httpVerb, server.GetHostAddress(), server.Port())
+	s.WebServerConfig.CleanUp = func() {
+		server.RemoveDNSRecordset()
+	}
 
-	// serve web server
+	// serve web server - blocking mode
 	if err := server.Serve(); err != nil {
+		server.RemoveDNSRecordset()
 		return fmt.Errorf("Start Web Server Failed: (Serve Error) %s", err)
 	}
 
