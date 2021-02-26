@@ -238,7 +238,7 @@ func (w *WebServer) RemoveDNSRecordset() {
 	}
 }
 
-// Serve will setup and start the web server
+// Serve will setup and start the web server, in blocking mode
 func (w *WebServer) Serve() error {
 	if w._config == nil {
 		return fmt.Errorf("Config Object Not Initialized, Use NewWebServer(...) First")
