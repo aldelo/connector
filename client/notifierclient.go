@@ -83,7 +83,8 @@ type NotifierClient struct {
 	_subscriberID string
 	_subscriberTopicArn string
 	_notificationServicesStarted bool
-	_stopNotificationServices chan bool
+
+	//_stopNotificationServices chan bool
 }
 
 // NewNotifierClient creates a new prepared notifier client for use in service discovery notification
@@ -261,7 +262,7 @@ func (n *NotifierClient) Dial() error {
 // Close will disconnect the notifier client from the notifier server
 func (n *NotifierClient) Close() {
 	if n._notificationServicesStarted {
-		n._stopNotificationServices <-true
+		//n._stopNotificationServices <-true
 		n._notificationServicesStarted = false
 	}
 
@@ -332,7 +333,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 			n.ServiceAlertStartedHandler()
 		}
 
-		n._stopNotificationServices = make(chan bool)
+		//n._stopNotificationServices = make(chan bool)
 
 		n._grpcClient.ZLog().Printf("+++ Notifier Client Subscribe TopicArn Success +++")
 
@@ -358,6 +359,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 				err = fmt.Errorf("Notifier Client Context Done")
 				return err
 
+			/*
 			case <-n._stopNotificationServices:
 				if n.ServiceAlertStoppedHandler != nil {
 					n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
@@ -370,6 +372,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 				recvMap = nil
 				err = fmt.Errorf("Notifier Client Received Stop Notification Signal")
 				return err
+			 */
 
 			default:
 				// process notification receive event
@@ -571,7 +574,7 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 
 	// first, stop notification alert services
 	if n._notificationServicesStarted {
-		n._stopNotificationServices <-true
+		//n._stopNotificationServices <-true
 		n._notificationServicesStarted = false
 	}
 

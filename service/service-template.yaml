@@ -12,7 +12,8 @@ namespace:
 service:
   # from aws cloud map or leave blank for auto creation
   sv_id:
-  # from aws cloud map or leave blank for auto creation
+  # from aws cloud map or leave blank for auto creation,
+  # if blank, will use AppName or target.app_name as default value, or set it as the actual name desired
   sv_name:
   # indicate if this service will use sqs and sns for service discovery, default = false
   sv_discovery_use_sqs_sns: false
@@ -65,6 +66,7 @@ instance:
   instance_prefix: ams-
   # instance favor public ip when possible, will contact snsgateway callerid service to request public ip if available
   # warning: if favor public ip = true, but public ip fail to obtain, service launch will stop
+  # warning: if grpc service is deployed inside AWS, using public ip will cause security group to require IP of source/target rather than using defined security groups
   instance_favor_public_ip: false
   # full url path including http or https to the gateway service that providers public ip discovery, typically this is the endpoint pointing to snsgateway services
   # warning: required if favor public ip = true, but public ip fail to obtain, service launch will stop

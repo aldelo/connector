@@ -1342,8 +1342,36 @@ func (s *Service) autoCreateService() error {
 											   		dnsConf,
 											   		healthConf,
 										   "", timeoutDuration...); err != nil {
-				log.Println("Auto Create Service Failed: " + err.Error())
-				return err
+				buf := err.Error()
+
+				if strings.Contains(strings.ToLower(buf), "service already exists") {
+					// service already exists
+					buf = util.SplitString(strings.ToLower(buf), `serviceid: "`, -1)
+					buf = util.Trim(util.SplitString(buf, `"`, 0))
+
+					if len(buf) > 0 {
+						// found prior service id already created
+						svcId = buf
+						log.Println("Auto Create Service OK: (Found Existing SvcID) " + svcId + " - " + name)
+
+						s._config.SetServiceId(svcId)
+						s._config.SetServiceName(name)
+
+						if e := s._config.Save(); e != nil {
+							return e
+						} else {
+							return nil
+						}
+					} else {
+						// error
+						log.Println("Auto Create Service Failed: " + err.Error())
+						return err
+					}
+				} else {
+					// error
+					log.Println("Auto Create Service Failed: " + err.Error())
+					return err
+				}
 			} else {
 				// service id obtained, update to config
 				log.Println("Auto Create Service OK: " + svcId + " - " + name)
