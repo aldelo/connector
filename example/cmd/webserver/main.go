@@ -17,16 +17,16 @@ package main
  */
 
 import (
+	"fmt"
 	util "github.com/aldelo/common"
-	ws "github.com/aldelo/connector/webserver"
 	ginw "github.com/aldelo/common/wrapper/gin"
 	"github.com/aldelo/common/wrapper/gin/ginbindtype"
 	"github.com/aldelo/common/wrapper/gin/ginhttpmethod"
+	ws "github.com/aldelo/connector/webserver"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"log"
 	"time"
-	"fmt"
 )
 
 type SimpleData struct {

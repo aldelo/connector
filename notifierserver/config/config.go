@@ -91,7 +91,7 @@ func (c *Config) SetSubscriptionData(topicArn string, subscriptionArn string) {
 	}
 }
 
-// topicArn = blank to remove all subscription data from config
+// RemoveSubscriptionData hint: topicArn = blank to remove all subscription data from config
 func (c *Config) RemoveSubscriptionData(topicArn string) {
 	if c._v != nil {
 		if util.LenTrim(topicArn) == 0 {

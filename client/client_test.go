@@ -60,7 +60,7 @@ func TestClient_Dial(t *testing.T) {
 		if result, e := a.Greeting(context.Background(), &testpb.Question{Question: "What's for dinner?"}, grpc.Header(&header)); e != nil {
 			t.Error(e)
 		} else {
-			log.Println("Answer = " + result.Answer + ", From = " + cli.MetadataHelper.Value(header, "server"))
+			log.Println("Answer = " + result.Answer + ", From = " + header.Get("server")[0])
 		}
 	}
 

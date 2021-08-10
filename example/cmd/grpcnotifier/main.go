@@ -17,8 +17,8 @@ package main
  */
 
 import (
-	"github.com/aldelo/connector/notifierserver"
 	"github.com/aldelo/common/wrapper/systemd"
+	"github.com/aldelo/connector/notifierserver"
 	"github.com/aldelo/connector/service"
 	"log"
 )

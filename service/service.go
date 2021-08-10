@@ -59,6 +59,7 @@ import (
 	"time"
 )
 
+// healthreport struct info,
 // notifiergateway/notifiergateway.go also contains this struct as a mirror;
 //
 // HashSignature = security validation is via sha256 hash signature for use with notifiergateway /healthreport,

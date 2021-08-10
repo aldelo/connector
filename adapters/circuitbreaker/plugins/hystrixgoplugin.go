@@ -17,14 +17,14 @@ package plugins
  */
 
 import (
+	"context"
 	"fmt"
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/hystrixgo"
-	"context"
 	data "github.com/aldelo/common/wrapper/zap"
 )
 
-// each hystrixgoplugin represents a specific command
+// HystrixGoPlugin each instance represents a specific command
 // circuit breaker is tracking against multiple commands
 // use a map to track all commands and invoke circuit breaker per command
 type HystrixGoPlugin struct {

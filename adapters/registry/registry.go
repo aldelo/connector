@@ -19,9 +19,9 @@ package registry
 import (
 	"fmt"
 	util "github.com/aldelo/common"
+	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"time"
-	"github.com/aldelo/common/wrapper/cloudmap"
 )
 
 type InstanceInfo struct {

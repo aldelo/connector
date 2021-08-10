@@ -29,6 +29,8 @@ import (
 	"time"
 )
 
+// HostDiscoveryNotification struct contains the field values for notification discovery payload
+//
 // `{"msg_type":"host-discovery", "action":"online | offline", "host":"123.123.123.123:9999"}`
 type HostDiscoveryNotification struct {
 	MsgType string		`json:"msg_type"`

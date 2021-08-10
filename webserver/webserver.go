@@ -456,11 +456,11 @@ func (w *WebServer) setupWebServer() error {
 
 	// set html templates renderer
 	if util.LenTrim(w._config.HtmlTemplates.TemplateBaseDir) > 0 {
-		var tmpl []ginw.TemplateDefintion
+		var tmpl []ginw.TemplateDefinition
 
 		if len(w._config.HtmlTemplates.TemplateDefinitions) > 0 {
 			for _, v := range w._config.HtmlTemplates.TemplateDefinitions {
-				tmpl = append(tmpl, ginw.TemplateDefintion{
+				tmpl = append(tmpl, ginw.TemplateDefinition{
 					LayoutPath: v.LayoutPath,
 					PagePath: v.PagePath,
 				})

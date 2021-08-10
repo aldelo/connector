@@ -25,7 +25,7 @@ type RateLimitPlugin struct {
 	RateLimit *ratelimit.RateLimiter
 }
 
-// NewHystrixGoPlugin creates a hystrixgo plugin struct object
+// NewRateLimitPlugin creates a hystrixgo plugin struct object
 // this plugin implements the CircuitBreakerIFace interface
 //
 // rateLimitPerSecond = number of actions per second allowed, 0 for no rate limit control

@@ -83,6 +83,7 @@ type snsNotification struct {
 	UnsubscribeURL string		`json:"UnsubscribeURL"`
 }
 
+// NewNotifierServer info,
 // NOTE: notifier server grpc config should not favor public ip when deploy to aws, otherwise EC2 security groups cannot be used for inbound security permissions,
 //		 if notifier server is discovered via public ip, then inbound security group must be setup to indicate inbound ec2 ip address rather than its security groups
 func NewNotifierServer(appName string, configFileNameGrpcServer string, configFileNameWebServer string, configFileNameNotifier string, customConfigPath string) (*service.Service, error) {

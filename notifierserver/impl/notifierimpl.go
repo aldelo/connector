@@ -299,6 +299,7 @@ func (m *clientEndpointMap) ClientsByTopicCount(topicArn string) int {
 // ---------------------------------------------------------------------------------------------------------------------
 // define NotifierImpl
 // ---------------------------------------------------------------------------------------------------------------------
+
 type NotifierImpl struct {
 	pb.UnimplementedNotifierServiceServer
 

@@ -162,7 +162,7 @@ type serviceEndpoint struct {
 	CacheExpire time.Time
 }
 
-// create client
+// NewClient creates grpc client
 func NewClient(appName string, configFileName string, customConfigPath string) *Client {
 	return &Client{
 		AppName: appName,
@@ -1667,6 +1667,7 @@ func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamD
 // HTTP WEB SERVER
 // =====================================================================================================================
 
+// WebServerConfig info,
 // note: WebServerLocalAddress = read only getter
 //
 // note: WebServerRoutes = map[string]*ginw.RouteDefinition{
