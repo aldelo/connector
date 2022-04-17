@@ -60,6 +60,7 @@ build/openssl-pem/test-pem.sh
 example/cmd/grpcclient/endpoint/client.yaml
 example/cmd/grpcclient/endpoint/service-1.yaml
 example/cmd/grpcclient/endpoint/service-2.yaml
+example/cmd/grpcclient/endpoint/service-1-notifier-client.yaml
 example/cmd/grpcclient/grpcclient
 example/cmd/grpcserver/service.yaml
 example/cmd/grpcclient/x509/ca_cert.pem
@@ -72,6 +73,8 @@ example/cmd/grpcserver/backup.yaml
 example/cmd/grpcserver/grpcserver
 example/cmd/grpcclient/ExampleClient-internal-err.log
 example/cmd/grpcclient/ExampleClient.log
+example/cmd/grpcclient/ExampleClient-Notifier-Client-internal-err.log
+example/cmd/grpcclient/ExampleClient-Notifier-Client.log
 example/cmd/webserver/webserver
 example/cmd/grpcnotifier/grpcnotifier
 example/cmd/grpcnotifier/notifierserver-linux
@@ -92,6 +95,8 @@ example/cmd/snsgateway/x509/ca_cert.pem
 example/cmd/snsgateway/snsgateway.service
 example/cmd/snsgateway/snsgateway
 example/cmd/snsgateway/snsgateway-linux
+example/cmd/tcpserver/tcpserver
+example/cmd/tcpclient/tcpclient
 
 # CMake
 cmake-build-*/

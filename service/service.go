@@ -68,14 +68,14 @@ import (
 // hash value is comprised of namespaceid + serviceid + instanceid + current date in UTC in yyyy-mm-dd format;
 // the sha256 hash salt uses named HashKey on both client and server side
 type healthreport struct {
-	NamespaceId string		`json:"NamespaceId"`
-	ServiceId string		`json:"ServiceId"`
-	InstanceId string		`json:"InstanceId"`
-	AwsRegion string		`json:"AWSRegion"`
-	ServiceInfo string		`json:"ServiceInfo"`
-	HostInfo string			`json:"HostInfo"`
-	HashKeyName string		`json:"HashKeyName"`
-	HashSignature string	`json:"HashSignature"`
+	NamespaceId   string `json:"NamespaceId"`
+	ServiceId     string `json:"ServiceId"`
+	InstanceId    string `json:"InstanceId"`
+	AwsRegion     string `json:"AWSRegion"`
+	ServiceInfo   string `json:"ServiceInfo"`
+	HostInfo      string `json:"HostInfo"`
+	HashKeyName   string `json:"HashKeyName"`
+	HashSignature string `json:"HashSignature"`
 }
 
 // Service represents a gRPC server's service definition and entry point
@@ -95,8 +95,8 @@ type healthreport struct {
 //		ctx = metadata.NewOutgoingContext(ctx, md)
 type Service struct {
 	// service properties
-	AppName string
-	ConfigFileName string
+	AppName          string
+	ConfigFileName   string
 	CustomConfigPath string
 
 	// web server config
@@ -113,7 +113,7 @@ type Service struct {
 	RegisterServiceHandlers func(grpcServer *grpc.Server)
 
 	// setup optional health check handlers
-	DefaultHealthCheckHandler func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	DefaultHealthCheckHandler  func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 	ServiceHealthCheckHandlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 
 	// setup optional auth server interceptor
@@ -124,7 +124,7 @@ type Service struct {
 
 	// setup optional rate limit server interceptor
 	RateLimit ratelimiter.RateLimiterIFace
-	
+
 	// one or more unary server interceptors for handling wrapping actions
 	UnaryServerInterceptors []grpc.UnaryServerInterceptor
 
@@ -153,25 +153,25 @@ type Service struct {
 	_config *config
 
 	// service discovery object cached
-	_sd *cloudmap.CloudMap
+	_sd  *cloudmap.CloudMap
 	_sqs *sqs.SQS
 	_sns *sns.SNS
 
 	// instantiated internal objects
-	_grpcServer *grpc.Server
+	_grpcServer   *grpc.Server
 	_localAddress string
 
 	// grpc serving status and mutex locking
 	_serving bool
-	_mu sync.RWMutex
+	_mu      sync.RWMutex
 }
 
 // create service
 func NewService(appName string, configFileName string, customConfigPath string, registerServiceHandlers func(grpcServer *grpc.Server)) *Service {
 	return &Service{
-		AppName: appName,
-		ConfigFileName: configFileName,
-		CustomConfigPath: customConfigPath,
+		AppName:                 appName,
+		ConfigFileName:          configFileName,
+		CustomConfigPath:        customConfigPath,
 		RegisterServiceHandlers: registerServiceHandlers,
 	}
 }
@@ -179,8 +179,8 @@ func NewService(appName string, configFileName string, customConfigPath string, 
 // readConfig will read in config data
 func (s *Service) readConfig() error {
 	s._config = &config{
-		AppName: s.AppName,
-		ConfigFileName: s.ConfigFileName,
+		AppName:          s.AppName,
+		ConfigFileName:   s.ConfigFileName,
 		CustomConfigPath: s.CustomConfigPath,
 	}
 
@@ -231,7 +231,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 		if s._config.Grpc.ConnectionTimeout > 0 {
 			// default 120 seconds
-			opts = append(opts, grpc.ConnectionTimeout(time.Duration(s._config.Grpc.ConnectionTimeout) * time.Second))
+			opts = append(opts, grpc.ConnectionTimeout(time.Duration(s._config.Grpc.ConnectionTimeout)*time.Second))
 		}
 
 		if util.LenTrim(s._config.Grpc.ServerCertFile) > 0 && util.LenTrim(s._config.Grpc.ServerKeyFile) > 0 {
@@ -260,7 +260,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			}
 
 			opts = append(opts, grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-				MinTime: minTime,
+				MinTime:             minTime,
 				PermitWithoutStream: s._config.Grpc.KeepAlivePermitWithoutStream,
 			}))
 		}
@@ -365,7 +365,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		if s.RateLimit != nil {
 			log.Println("Setup Rate Limiter - In Tap Handle")
 
-			opts = append(opts, grpc.InTapHandle(func(ctx context.Context, info *tap.Info) (context.Context, error){
+			opts = append(opts, grpc.InTapHandle(func(ctx context.Context, info *tap.Info) (context.Context, error) {
 				log.Println("Rate Limit Take = " + info.FullMethodName + "...")
 
 				t := s.RateLimit.Take()
@@ -409,7 +409,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 			if status, body, err := rest.GET(s._config.Instance.PublicIPGateway, []*rest.HeaderKeyValue{
 				{
-					Key: "x-nts-gateway-token",
+					Key:   "x-nts-gateway-token",
 					Value: validationToken,
 				},
 			}); err != nil {
@@ -651,7 +651,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 				}
 
 				// stop health report clean up service
-				stopHealthReportService <-true
+				stopHealthReportService <- true
 
 				// clean up web server dns recordset if any
 				if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
@@ -738,18 +738,35 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 
 					// trigger sd initial health update
 					go func() {
-						waitTime := int(s._config.SvcCreateData.HealthFailThreshold*30+5)
+						waitTime := int(s._config.SvcCreateData.HealthFailThreshold * 45)
 
-						log.Println(">>> Instance Health Check Warm-Up: " +  util.Itoa(waitTime) + " Seconds - Please Wait >>>")
-						time.Sleep(time.Duration(waitTime)*time.Second)
+						log.Println(">>> Instance Health Check Warm-Up: " + util.Itoa(waitTime) + " Seconds - Please Wait >>>")
+						time.Sleep(time.Duration(waitTime) * time.Second)
 						log.Println("<<< Instance Health Check Warm-Up: OK <<<")
 
 						log.Println("+++ Updating Instance as Healthy with Service Discovery: Please Wait +++")
 
+						var continueProcessing bool
+
 						// on initial health update, set sd instance health status to healthy (true)
 						if err := s.updateHealth(true); err != nil {
-							log.Println("!!! Update Instance Health Status with Service Discovery Failed: " + err.Error() + " !!!")
+							if strings.Contains(err.Error(), "ServiceNotFound") {
+								log.Println("~~~ Service Discovery Not Ready - Waiting 45 More Seconds ~~~")
+								time.Sleep(45 * time.Second)
+
+								if err = s.updateHealth(true); err != nil {
+									log.Println("!!! Update Instance Health Status with Service Discovery Failed: (With Retry) " + err.Error() + " !!!")
+								} else {
+									continueProcessing = true
+								}
+							} else {
+								log.Println("!!! Update Instance Health Status with Service Discovery Failed: " + err.Error() + " !!!")
+							}
 						} else {
+							continueProcessing = true
+						}
+
+						if continueProcessing {
 							log.Println("+++ Update Instance as Healthy with Service Discovery: OK +++")
 
 							// queue new grpc service host healthy notification
@@ -853,7 +870,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 									}
 
 									// each update wait
-									time.Sleep(time.Duration(freq)*time.Second)
+									time.Sleep(time.Duration(freq) * time.Second)
 								}
 							}
 						}
@@ -866,7 +883,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 				}
 			}
 
-			time.Sleep(10*time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 
@@ -943,7 +960,7 @@ func (s *Service) awaitOsSigExit() {
 	}()
 
 	log.Println("=== Press 'Ctrl + C' to Shutdown ===")
-	log.Print("Please Wait for Instance Service Discovery To Complete... (This may take 30+ Seconds)")
+	log.Printf("Please Wait for Instance Service Discovery To Complete... (This may take %v Seconds)", s._config.SvcCreateData.HealthFailThreshold*45)
 
 	<-done
 
@@ -993,23 +1010,23 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 	if seg != nil {
 		subSeg = seg.NewSubSegment("REST DEL: " + s._config.Instance.HealthReportServiceUrl)
 		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-name", s._config.Instance.HashKeyName)
-		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-signature", crypto.Sha256(instanceId + util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret))
+		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-signature", crypto.Sha256(instanceId+util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret))
 	}
 
-	statusCode, _, e := rest.DELETE(s._config.Instance.HealthReportServiceUrl + "/" + instanceId, []*rest.HeaderKeyValue{
-										{
-											Key: "Content-Type",
-											Value: "application/json",
-										},
-										{
-											Key: "x-nts-gateway-hash-name",
-											Value: s._config.Instance.HashKeyName,
-										},
-										{
-											Key: "x-nts-gateway-hash-signature",
-											Value: crypto.Sha256(instanceId + util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret),
-										},
-									})
+	statusCode, _, e := rest.DELETE(s._config.Instance.HealthReportServiceUrl+"/"+instanceId, []*rest.HeaderKeyValue{
+		{
+			Key:   "Content-Type",
+			Value: "application/json",
+		},
+		{
+			Key:   "x-nts-gateway-hash-name",
+			Value: s._config.Instance.HashKeyName,
+		},
+		{
+			Key:   "x-nts-gateway-hash-signature",
+			Value: crypto.Sha256(instanceId+util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret),
+		},
+	})
 
 	if subSeg != nil {
 		subSeg.Close()
@@ -1021,7 +1038,7 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 	}
 
 	if statusCode != 200 {
-		err = fmt.Errorf("Delete Health Report Service Record Failed: %s", "Status Code " + util.Itoa(statusCode))
+		err = fmt.Errorf("Delete Health Report Service Record Failed: %s", "Status Code "+util.Itoa(statusCode))
 		return err
 	}
 
@@ -1126,16 +1143,16 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 	// create hash signature
 	// sha256 of namespaceid + serviceid + instanceid + current date in UTC yyyy-mm-dd
 	// sha256 salt = Hash Key Secret
-	hashSignature := crypto.Sha256(s._config.Namespace.Id + s._config.Service.Id + s._config.Instance.Id + util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret)
+	hashSignature := crypto.Sha256(s._config.Namespace.Id+s._config.Service.Id+s._config.Instance.Id+util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret)
 
 	data := &healthreport{
-		NamespaceId: s._config.Namespace.Id,
-		ServiceId: s._config.Service.Id,
-		InstanceId: s._config.Instance.Id,
-		AwsRegion: s._config.Target.Region,
-		ServiceInfo: strings.ToLower(s._config.Service.Name + "." + s._config.Namespace.Name),
-		HostInfo: s._localAddress,
-		HashKeyName: s._config.Instance.HashKeyName,
+		NamespaceId:   s._config.Namespace.Id,
+		ServiceId:     s._config.Service.Id,
+		InstanceId:    s._config.Instance.Id,
+		AwsRegion:     s._config.Target.Region,
+		ServiceInfo:   strings.ToLower(s._config.Service.Name + "." + s._config.Namespace.Name),
+		HostInfo:      s._localAddress,
+		HashKeyName:   s._config.Instance.HashKeyName,
 		HashSignature: hashSignature,
 	}
 
@@ -1156,11 +1173,11 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 
 	// call sns gateway /healthreport to notify service live status
 	if statusCode, RespBody, e := rest.POST(s._config.Instance.HealthReportServiceUrl, []*rest.HeaderKeyValue{
-												{
-													Key: "Content-Type",
-													Value: "application/json",
-												},
-											}, jsonData); e != nil {
+		{
+			Key:   "Content-Type",
+			Value: "application/json",
+		},
+	}, jsonData); e != nil {
 		// rest post invoke error
 		err = fmt.Errorf("Set Service Health Report Update To Data Store Failed: (Invoke REST POST '" + s._config.Instance.HealthReportServiceUrl + "' Error) " + e.Error())
 		log.Println(err.Error())
@@ -1280,9 +1297,9 @@ func (s *Service) autoCreateService() error {
 			}
 
 			dnsConf := &cloudmap.DnsConf{
-				TTL: int64(ttl),
+				TTL:        int64(ttl),
 				MultiValue: multivalue,
-				SRV: srv,
+				SRV:        srv,
 			}
 
 			if util.LenTrim(s._config.SvcCreateData.DnsRouting) == 0 {
@@ -1325,8 +1342,8 @@ func (s *Service) autoCreateService() error {
 			}
 
 			healthConf := &cloudmap.HealthCheckConf{
-				Custom: s._config.SvcCreateData.HealthCustom,
-				FailureThreshold: int64(failThreshold),
+				Custom:                  s._config.SvcCreateData.HealthCustom,
+				FailureThreshold:        int64(failThreshold),
 				PubDns_HealthCheck_Type: healthType,
 				PubDns_HealthCheck_Path: healthPath,
 			}
@@ -1334,15 +1351,15 @@ func (s *Service) autoCreateService() error {
 			var timeoutDuration []time.Duration
 
 			if s._config.Instance.SdTimeout > 0 {
-				timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout) * time.Second)
+				timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout)*time.Second)
 			}
 
 			if svcId, err := registry.CreateService(s._sd,
-						 					   		name,
-											   		s._config.Namespace.Id,
-											   		dnsConf,
-											   		healthConf,
-										   "", timeoutDuration...); err != nil {
+				name,
+				s._config.Namespace.Id,
+				dnsConf,
+				healthConf,
+				"", timeoutDuration...); err != nil {
 				buf := err.Error()
 
 				if strings.Contains(strings.ToLower(buf), "service already exists") {
@@ -1400,7 +1417,7 @@ func (s *Service) registerInstance(ip string, port uint, healthy bool, version s
 		var timeoutDuration []time.Duration
 
 		if s._config.Instance.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout) * time.Second)
+			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout)*time.Second)
 		}
 
 		// if prior instance id already exist, deregister prior first (clean up prior in case instance ghosted)
@@ -1417,7 +1434,7 @@ func (s *Service) registerInstance(ip string, port uint, healthy bool, version s
 
 			log.Println("Auto Register Instance Initiated... " + instanceId)
 
-			time.Sleep(250*time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 
 			for {
 				if status, e := registry.GetOperationStatus(s._sd, operationId, timeoutDuration...); e != nil {
@@ -1441,7 +1458,7 @@ func (s *Service) registerInstance(ip string, port uint, healthy bool, version s
 						if tryCount < 20 {
 							tryCount++
 							log.Println("... Checking Register Instance Completion Status, Attempt " + strconv.Itoa(tryCount) + " (100ms)")
-							time.Sleep(250*time.Millisecond)
+							time.Sleep(250 * time.Millisecond)
 						} else {
 							log.Println("... Auto Register Instance Failed: Operation Timeout After 5 Seconds")
 							return fmt.Errorf("Register Instance Fail When Operation Timed Out After 5 Seconds")
@@ -1461,7 +1478,7 @@ func (s *Service) updateHealth(healthy bool) error {
 		var timeoutDuration []time.Duration
 
 		if s._config.Instance.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout) * time.Second)
+			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout)*time.Second)
 		}
 
 		return registry.UpdateHealthStatus(s._sd, s._config.Instance.Id, s._config.Service.Id, healthy)
@@ -1478,7 +1495,7 @@ func (s *Service) deregisterInstance() error {
 		var timeoutDuration []time.Duration
 
 		if s._config.Instance.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout) * time.Second)
+			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout)*time.Second)
 		}
 
 		if operationId, err := registry.DeregisterInstance(s._sd, s._config.Instance.Id, s._config.Service.Id, timeoutDuration...); err != nil {
@@ -1487,7 +1504,7 @@ func (s *Service) deregisterInstance() error {
 		} else {
 			tryCount := 0
 
-			time.Sleep(250*time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 
 			for {
 				if status, e := registry.GetOperationStatus(s._sd, operationId, timeoutDuration...); e != nil {
@@ -1511,7 +1528,7 @@ func (s *Service) deregisterInstance() error {
 						if tryCount < 20 {
 							tryCount++
 							log.Println("... Checking De-Register Instance Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
-							time.Sleep(250*time.Millisecond)
+							time.Sleep(250 * time.Millisecond)
 						} else {
 							log.Println("... De-Register Instance Failed: Operation Timeout After 5 Seconds")
 							return fmt.Errorf("De-register Instance Fail When Operation Timed Out After 5 Seconds")
@@ -1683,8 +1700,8 @@ func (s *Service) LocalAddress() string {
 //		},
 //	}
 type WebServerConfig struct {
-	AppName string
-	ConfigFileName string
+	AppName          string
+	ConfigFileName   string
 	CustomConfigPath string
 
 	// define web server router info
@@ -1765,4 +1782,3 @@ func (s *Service) startWebServer() error {
 
 	return nil
 }
-
