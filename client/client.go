@@ -41,6 +41,7 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
@@ -80,8 +81,8 @@ func ClearEndpointCache() {
 //					where xyz is the target gRPC service endpoint name
 type Client struct {
 	// client properties
-	AppName string
-	ConfigFileName string
+	AppName          string
+	ConfigFileName   string
 	CustomConfigPath string
 
 	// web server config - for optional gin web server to be launched upon grpc client dial
@@ -132,7 +133,7 @@ type Client struct {
 	_endpoints []*serviceEndpoint
 
 	// instantiated internal objects
-	_conn *grpc.ClientConn
+	_conn          *grpc.ClientConn
 	_remoteAddress string
 
 	// upon dial completion successfully,
@@ -150,14 +151,14 @@ type Client struct {
 
 // serviceEndpoint represents a specific service endpoint connection target
 type serviceEndpoint struct {
-	SdType string	// srv, api, direct
+	SdType string // srv, api, direct
 
 	Host string
 	Port uint
 
 	InstanceId string
-	ServiceId string
-	Version string
+	ServiceId  string
+	Version    string
 
 	CacheExpire time.Time
 }
@@ -165,8 +166,8 @@ type serviceEndpoint struct {
 // NewClient creates grpc client
 func NewClient(appName string, configFileName string, customConfigPath string) *Client {
 	return &Client{
-		AppName: appName,
-		ConfigFileName: configFileName,
+		AppName:          appName,
+		ConfigFileName:   configFileName,
 		CustomConfigPath: customConfigPath,
 	}
 }
@@ -174,8 +175,8 @@ func NewClient(appName string, configFileName string, customConfigPath string) *
 // readConfig will read in config data
 func (c *Client) readConfig() error {
 	c._config = &config{
-		AppName: c.AppName,
-		ConfigFileName: c.ConfigFileName,
+		AppName:          c.AppName,
+		ConfigFileName:   c.ConfigFileName,
 		CustomConfigPath: c.CustomConfigPath,
 	}
 
@@ -222,7 +223,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		}
 	} else {
 		// if not tls secured, use inSecure dial option
-		opts = append(opts, grpc.WithInsecure())
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
 	//
@@ -234,15 +235,15 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	}
 
 	/*
-	// set per rpc auth via oauth2
-	// TODO:
-	if c.FetchOAuth2Token != nil {
-		perRpc := oauth.NewOauthAccess(c.FetchOAuth2Token())
+		// set per rpc auth via oauth2
+		// TODO:
+		if c.FetchOAuth2Token != nil {
+			perRpc := oauth.NewOauthAccess(c.FetchOAuth2Token())
 
-		if perRpc != nil {
-			opts = append(opts, grpc.WithPerRPCCredentials(perRpc))
+			if perRpc != nil {
+				opts = append(opts, grpc.WithPerRPCCredentials(perRpc))
+			}
 		}
-	}
 	*/
 
 	// set user agent if defined
@@ -278,7 +279,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	// set connect timeout value
 	if c._config.Grpc.DialMinConnectTimeout > 0 {
 		opts = append(opts, grpc.WithConnectParams(grpc.ConnectParams{
-			Backoff: backoff.DefaultConfig,
+			Backoff:           backoff.DefaultConfig,
 			MinConnectTimeout: time.Duration(c._config.Grpc.DialMinConnectTimeout) * time.Second,
 		}))
 	}
@@ -377,9 +378,9 @@ func (c *Client) ZLog() *data.ZapLog {
 		}
 
 		c._z = &data.ZapLog{
-			DisableLogger: disableLogger,
+			DisableLogger:   disableLogger,
 			OutputToConsole: outputConsole,
-			AppName: appName,
+			AppName:         appName,
 		}
 		_ = c._z.Init()
 
@@ -587,7 +588,7 @@ func (c *Client) Dial(ctx context.Context) error {
 		defer cancel()
 
 		seg := xray.NewSegmentNullable("GrpcClient-Dial")
-		if seg !=  nil {
+		if seg != nil {
 			defer seg.Close()
 		}
 
@@ -611,7 +612,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			c._z.Printf("... gRPC Service @ " + target + " [" + c._remoteAddress + "] Connected")
 
 			if c.WaitForServerReady {
-				if e := c.waitForEndpointReady(time.Duration(dialSec)*time.Second); e != nil {
+				if e := c.waitForEndpointReady(time.Duration(dialSec) * time.Second); e != nil {
 					// health probe failed
 					_ = c._conn.Close()
 					if seg != nil {
@@ -639,14 +640,14 @@ func (c *Client) Dial(ctx context.Context) error {
 				}()
 
 				// give slight time delay to allow time slice for non blocking code to complete in goroutine above
-				time.Sleep(150*time.Millisecond)
+				time.Sleep(150 * time.Millisecond)
 
 				select {
-				case <- startWebServerFail:
+				case <-startWebServerFail:
 					c._z.Errorf("... Http Web Server Fail to Start")
 				default:
 					// wait short time to check if web server was started up successfully
-					if e := c.waitForWebServerReady(time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+					if e := c.waitForWebServerReady(time.Duration(c._config.Target.SdTimeout) * time.Second); e != nil {
 						// web server error
 						c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
 						if seg != nil {
@@ -744,7 +745,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		doConnection = true
 	}
 
-	if doConnection || util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName + "-notifier-client.yaml")) {
+	if doConnection || util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName+"-notifier-client.yaml")) {
 		if !doConnection {
 			c._notifierClient = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
 		}
@@ -866,7 +867,7 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 	if len(timeoutDuration) > 0 {
 		timeout = timeoutDuration[0]
 	} else {
-		timeout = 5*time.Second
+		timeout = 5 * time.Second
 	}
 
 	expireDateTime := time.Now().Add(timeout)
@@ -898,7 +899,7 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 				}
 			}
 
-			time.Sleep(2500*time.Millisecond)
+			time.Sleep(2500 * time.Millisecond)
 
 			if time.Now().After(expireDateTime) {
 				c._z.Warnf("Web Server Health Check Timeout")
@@ -931,7 +932,7 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 	if len(timeoutDuration) > 0 {
 		timeout = timeoutDuration[0]
 	} else {
-		timeout = 5*time.Second
+		timeout = 5 * time.Second
 	}
 
 	//
@@ -961,7 +962,7 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 				}
 			}
 
-			time.Sleep(2500*time.Millisecond)
+			time.Sleep(2500 * time.Millisecond)
 		}
 	}()
 
@@ -1072,7 +1073,7 @@ func (c *Client) Close() {
 }
 
 // ClientConnection returns the currently loaded grpc client connection
-func (c *Client) ClientConnection() grpc.ClientConnInterface{
+func (c *Client) ClientConnection() grpc.ClientConnInterface {
 	return c._conn
 }
 
@@ -1120,10 +1121,10 @@ func (c *Client) discoverEndpoints() error {
 		fallthrough
 	case "a":
 		return c.setDnsDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceDiscoveryType == "srv", c._config.Target.ServiceName,
-										 c._config.Target.NamespaceName, c._config.Target.InstancePort)
+			c._config.Target.NamespaceName, c._config.Target.InstancePort)
 	case "api":
 		return c.setApiDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceName, c._config.Target.NamespaceName, c._config.Target.InstanceVersion,
-										 int64(c._config.Target.SdInstanceMaxResult), c._config.Target.SdTimeout)
+			int64(c._config.Target.SdInstanceMaxResult), c._config.Target.SdTimeout)
 	default:
 		return fmt.Errorf("Unexpected Service Discovery Type: " + c._config.Target.ServiceDiscoveryType)
 	}
@@ -1146,9 +1147,9 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 	}
 
 	c._endpoints = append(c._endpoints, &serviceEndpoint{
-		SdType:  "direct",
-		Host: ip,
-		Port: port,
+		SdType:      "direct",
+		Host:        ip,
+		Port:        port,
 		CacheExpire: cacheExpires,
 	})
 
@@ -1176,7 +1177,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	//
 	// check for existing cache
 	//
-	found := _cache.GetLiveServiceEndpoints(serviceName + "." + namespaceName, "")
+	found := _cache.GetLiveServiceEndpoints(serviceName+"."+namespaceName, "")
 
 	if len(found) > 0 {
 		c._endpoints = found
@@ -1190,7 +1191,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	//
 	// acquire dns ip port from service discovery
 	//
-	if ipList, err := registry.DiscoverDnsIps(serviceName + "." + namespaceName, srv); err != nil {
+	if ipList, err := registry.DiscoverDnsIps(serviceName+"."+namespaceName, srv); err != nil {
 		return fmt.Errorf("Service Discovery By DNS Failed: " + err.Error())
 	} else {
 		sdType := ""
@@ -1223,14 +1224,14 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 			}
 
 			c._endpoints = append(c._endpoints, &serviceEndpoint{
-				SdType:  sdType,
-				Host: ip,
-				Port: port,
+				SdType:      sdType,
+				Host:        ip,
+				Port:        port,
 				CacheExpire: cacheExpires,
 			})
 		}
 
-		_cache.AddServiceEndpoints(serviceName + "." + namespaceName, c._endpoints)
+		_cache.AddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
 
 		return nil
 	}
@@ -1255,7 +1256,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	//
 	// check for existing cache
 	//
-	found := _cache.GetLiveServiceEndpoints(serviceName + "." + namespaceName, version)
+	found := _cache.GetLiveServiceEndpoints(serviceName+"."+namespaceName, version)
 
 	if len(found) > 0 {
 		c._endpoints = found
@@ -1276,7 +1277,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	var timeoutDuration []time.Duration
 
 	if timeoutSeconds > 0 {
-		timeoutDuration = append(timeoutDuration, time.Duration(timeoutSeconds) * time.Second)
+		timeoutDuration = append(timeoutDuration, time.Duration(timeoutSeconds)*time.Second)
 	}
 
 	customAttr := map[string]string{}
@@ -1292,17 +1293,17 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	} else {
 		for _, v := range instanceList {
 			c._endpoints = append(c._endpoints, &serviceEndpoint{
-				SdType:  "api",
-				Host: v.InstanceIP,
-				Port: v.InstancePort,
-				InstanceId: v.InstanceId,
-				ServiceId: v.ServiceId,
-				Version: v.InstanceVersion,
+				SdType:      "api",
+				Host:        v.InstanceIP,
+				Port:        v.InstancePort,
+				InstanceId:  v.InstanceId,
+				ServiceId:   v.ServiceId,
+				Version:     v.InstanceVersion,
 				CacheExpire: cacheExpires,
 			})
 		}
 
-		_cache.AddServiceEndpoints(serviceName + "." + namespaceName, c._endpoints)
+		_cache.AddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
 
 		return nil
 	}
@@ -1329,7 +1330,7 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 	var timeoutDuration []time.Duration
 
 	if timeoutSeconds > 0 {
-		timeoutDuration = append(timeoutDuration, time.Duration(timeoutSeconds) * time.Second)
+		timeoutDuration = append(timeoutDuration, time.Duration(timeoutSeconds)*time.Second)
 	}
 
 	customAttr := map[string]string{}
@@ -1345,12 +1346,12 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 	} else {
 		for _, v := range instanceList {
 			unhealthyList = append(unhealthyList, &serviceEndpoint{
-				SdType:  "api",
-				Host: v.InstanceIP,
-				Port: v.InstancePort,
-				InstanceId: v.InstanceId,
-				ServiceId: v.ServiceId,
-				Version: v.InstanceVersion,
+				SdType:      "api",
+				Host:        v.InstanceIP,
+				Port:        v.InstancePort,
+				InstanceId:  v.InstanceId,
+				ServiceId:   v.ServiceId,
+				Version:     v.InstanceVersion,
 				CacheExpire: time.Time{},
 			})
 		}
@@ -1365,7 +1366,7 @@ func (c *Client) updateHealth(p *serviceEndpoint, healthy bool) error {
 		var timeoutDuration []time.Duration
 
 		if c._config.Target.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(c._config.Target.SdTimeout) * time.Second)
+			timeoutDuration = append(timeoutDuration, time.Duration(c._config.Target.SdTimeout)*time.Second)
 		}
 
 		return registry.UpdateHealthStatus(c._sd, p.InstanceId, p.ServiceId, healthy)
@@ -1382,21 +1383,21 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		var timeoutDuration []time.Duration
 
 		if c._config.Target.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(c._config.Target.SdTimeout) * time.Second)
+			timeoutDuration = append(timeoutDuration, time.Duration(c._config.Target.SdTimeout)*time.Second)
 		}
 
 		if operationId, err := registry.DeregisterInstance(c._sd, p.InstanceId, p.ServiceId, timeoutDuration...); err != nil {
 			c._z.Errorf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: " + err.Error())
-			return fmt.Errorf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "'Fail: %s", err.Error())
+			return fmt.Errorf("De-Register Instance '"+p.Host+":"+util.UintToStr(p.Port)+"-"+p.InstanceId+"'Fail: %s", err.Error())
 		} else {
 			tryCount := 0
 
-			time.Sleep(250*time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 
 			for {
 				if status, e := registry.GetOperationStatus(c._sd, operationId, timeoutDuration...); e != nil {
 					c._z.Errorf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: " + e.Error())
-					return fmt.Errorf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "'Fail: %s", e.Error())
+					return fmt.Errorf("De-Register Instance '"+p.Host+":"+util.UintToStr(p.Port)+"-"+p.InstanceId+"'Fail: %s", e.Error())
 				} else {
 					if status == sdoperationstatus.Success {
 						c._z.Printf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' OK")
@@ -1405,7 +1406,7 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 						if tryCount < 20 {
 							tryCount++
 							c._z.Printf("... Checking De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Completion Status, Attempt " + strconv.Itoa(tryCount) + " (100ms)")
-							time.Sleep(250*time.Millisecond)
+							time.Sleep(250 * time.Millisecond)
 						} else {
 							c._z.Errorf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: Operation Timeout After 5 Seconds")
 							return fmt.Errorf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "'Fail When Operation Timed Out After 5 Seconds")
@@ -1429,21 +1430,21 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 			c._z.Printf("... Creating Circuit Breaker for: " + method)
 
 			z := &data.ZapLog{
-				DisableLogger: false,
+				DisableLogger:   false,
 				OutputToConsole: false,
-				AppName: c.AppName,
+				AppName:         c.AppName,
 			}
 
 			_ = z.Init()
 
 			var e error
 			if cb, e = plugins.NewHystrixGoPlugin(method,
-											   int(c._config.Grpc.CircuitBreakerTimeout),
-											   int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
-											   int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
-											   int(c._config.Grpc.CircuitBreakerSleepWindow),
-											   int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
-											   z); e != nil {
+				int(c._config.Grpc.CircuitBreakerTimeout),
+				int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
+				int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
+				int(c._config.Grpc.CircuitBreakerSleepWindow),
+				int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
+				z); e != nil {
 				c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
 				c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
 
@@ -1458,23 +1459,23 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 		}
 
 		_, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-								c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
+			c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
 
-								err = invoker(ctx, method, req, reply, cc, opts...)
+			err = invoker(ctx, method, req, reply, cc, opts...)
 
-								if err != nil {
-									c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
-								} else {
-									c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
-								}
-								return nil, err
+			if err != nil {
+				c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+			} else {
+				c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
+			}
+			return nil, err
 
-							}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
-								c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
-								c._z.Warnf("... Error = " + errIn.Error())
+		}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
+			c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
+			c._z.Warnf("... Error = " + errIn.Error())
 
-								return nil, errIn
-							}, nil)
+			return nil, errIn
+		}, nil)
 
 		return gerr
 	} else {
@@ -1492,9 +1493,9 @@ func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.Str
 			c._z.Printf("... Creating Circuit Breaker for: " + method)
 
 			z := &data.ZapLog{
-				DisableLogger: false,
+				DisableLogger:   false,
 				OutputToConsole: false,
-				AppName: c.AppName,
+				AppName:         c.AppName,
 			}
 
 			_ = z.Init()
@@ -1574,9 +1575,9 @@ func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req 
 		var seg *xray.XSegment
 
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcClient-UnaryRPC-" + method, &xray.XRayParentSegment{
+			seg = xray.NewSegment("GrpcClient-UnaryRPC-"+method, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
-				TraceID: parentTraceID,
+				TraceID:   parentTraceID,
 			})
 		} else {
 			seg = xray.NewSegment("GrpcClient-UnaryRPC-" + method)
@@ -1633,9 +1634,9 @@ func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamD
 		var seg *xray.XSegment
 
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcClient-" + streamType + "-" + method, &xray.XRayParentSegment{
+			seg = xray.NewSegment("GrpcClient-"+streamType+"-"+method, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
-				TraceID: parentTraceID,
+				TraceID:   parentTraceID,
 			})
 		} else {
 			seg = xray.NewSegment("GrpcClient-" + streamType + "-" + method)
@@ -1684,8 +1685,8 @@ func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamD
 //		},
 //	}
 type WebServerConfig struct {
-	AppName string
-	ConfigFileName string
+	AppName          string
+	ConfigFileName   string
 	CustomConfigPath string
 
 	// define web server router info
@@ -1735,7 +1736,7 @@ func (c *Client) startWebServer() error {
 			},
 		},
 	}
- 	*/
+	*/
 	server.Routes = c.WebServerConfig.WebServerRoutes
 
 	// set web server local address before serve action

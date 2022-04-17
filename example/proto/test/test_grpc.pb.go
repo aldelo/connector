@@ -11,6 +11,7 @@ import (
 
 // This is a compile-time assertion to ensure that this generated file
 // is compatible with the grpc package it is being compiled against.
+// Requires gRPC-Go v1.32.0 or later.
 const _ = grpc.SupportPackageIsVersion7
 
 // AnswerServiceClient is the client API for AnswerService service.
@@ -62,7 +63,7 @@ type UnsafeAnswerServiceServer interface {
 }
 
 func RegisterAnswerServiceServer(s grpc.ServiceRegistrar, srv AnswerServiceServer) {
-	s.RegisterService(&_AnswerService_serviceDesc, srv)
+	s.RegisterService(&AnswerService_ServiceDesc, srv)
 }
 
 func _AnswerService_Greeting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -83,7 +84,10 @@ func _AnswerService_Greeting_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
-var _AnswerService_serviceDesc = grpc.ServiceDesc{
+// AnswerService_ServiceDesc is the grpc.ServiceDesc for AnswerService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AnswerService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "test.AnswerService",
 	HandlerType: (*AnswerServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
@@ -112,7 +116,7 @@ func NewAnswerServerStreamServiceClient(cc grpc.ClientConnInterface) AnswerServe
 }
 
 func (c *answerServerStreamServiceClient) StreamGreeting(ctx context.Context, in *Question, opts ...grpc.CallOption) (AnswerServerStreamService_StreamGreetingClient, error) {
-	stream, err := c.cc.NewStream(ctx, &_AnswerServerStreamService_serviceDesc.Streams[0], "/test.AnswerServerStreamService/StreamGreeting", opts...)
+	stream, err := c.cc.NewStream(ctx, &AnswerServerStreamService_ServiceDesc.Streams[0], "/test.AnswerServerStreamService/StreamGreeting", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +173,7 @@ type UnsafeAnswerServerStreamServiceServer interface {
 }
 
 func RegisterAnswerServerStreamServiceServer(s grpc.ServiceRegistrar, srv AnswerServerStreamServiceServer) {
-	s.RegisterService(&_AnswerServerStreamService_serviceDesc, srv)
+	s.RegisterService(&AnswerServerStreamService_ServiceDesc, srv)
 }
 
 func _AnswerServerStreamService_StreamGreeting_Handler(srv interface{}, stream grpc.ServerStream) error {
@@ -193,7 +197,10 @@ func (x *answerServerStreamServiceStreamGreetingServer) Send(m *Answer) error {
 	return x.ServerStream.SendMsg(m)
 }
 
-var _AnswerServerStreamService_serviceDesc = grpc.ServiceDesc{
+// AnswerServerStreamService_ServiceDesc is the grpc.ServiceDesc for AnswerServerStreamService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AnswerServerStreamService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "test.AnswerServerStreamService",
 	HandlerType: (*AnswerServerStreamServiceServer)(nil),
 	Methods:     []grpc.MethodDesc{},
