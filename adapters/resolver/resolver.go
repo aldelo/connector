@@ -36,7 +36,7 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 		return fmt.Errorf("Endpoint Address is Required")
 	}
 
-	r :=  manual.NewBuilderWithScheme(schemeName)
+	r := manual.NewBuilderWithScheme(schemeName)
 
 	addrs := []resolver.Address{}
 
@@ -54,13 +54,13 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 		schemeMap = make(map[string]*manual.Resolver)
 	}
 
-	schemeMap[strings.ToLower(schemeName + serviceName)] = r
+	schemeMap[strings.ToLower(schemeName+serviceName)] = r
 
 	var builder resolver.Builder
 	builder = r
 
 	resolver.Register(builder)
-	//resolver.SetDefaultScheme(schemeName)
+	//resolver.SetDefaultScheme(r.Scheme())
 
 	return nil
 }
@@ -82,7 +82,7 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		return fmt.Errorf("ServiceName is Required")
 	}
 
-	if r := schemeMap[strings.ToLower(schemeName + serviceName)]; r != nil {
+	if r := schemeMap[strings.ToLower(schemeName+serviceName)]; r != nil {
 		addrs := []resolver.Address{}
 
 		for _, v := range endpointAddrs {

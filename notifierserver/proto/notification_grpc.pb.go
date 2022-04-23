@@ -11,6 +11,7 @@ import (
 
 // This is a compile-time assertion to ensure that this generated file
 // is compatible with the grpc package it is being compiled against.
+// Requires gRPC-Go v1.32.0 or later.
 const _ = grpc.SupportPackageIsVersion7
 
 // NotifierServiceClient is the client API for NotifierService service.
@@ -31,7 +32,7 @@ func NewNotifierServiceClient(cc grpc.ClientConnInterface) NotifierServiceClient
 }
 
 func (c *notifierServiceClient) Subscribe(ctx context.Context, in *NotificationSubscriber, opts ...grpc.CallOption) (NotifierService_SubscribeClient, error) {
-	stream, err := c.cc.NewStream(ctx, &_NotifierService_serviceDesc.Streams[0], "/notifierserver.NotifierService/Subscribe", opts...)
+	stream, err := c.cc.NewStream(ctx, &NotifierService_ServiceDesc.Streams[0], "/notifierserver.NotifierService/Subscribe", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +114,7 @@ type UnsafeNotifierServiceServer interface {
 }
 
 func RegisterNotifierServiceServer(s grpc.ServiceRegistrar, srv NotifierServiceServer) {
-	s.RegisterService(&_NotifierService_serviceDesc, srv)
+	s.RegisterService(&NotifierService_ServiceDesc, srv)
 }
 
 func _NotifierService_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) error {
@@ -173,7 +174,10 @@ func _NotifierService_Broadcast_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
-var _NotifierService_serviceDesc = grpc.ServiceDesc{
+// NotifierService_ServiceDesc is the grpc.ServiceDesc for NotifierService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var NotifierService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "notifierserver.NotifierService",
 	HandlerType: (*NotifierServiceServer)(nil),
 	Methods: []grpc.MethodDesc{

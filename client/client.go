@@ -355,6 +355,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		opts = append(opts, grpc.WithStatsHandler(c.StatsHandler))
 	}
 
+	// verbose dial error
+	opts = append(opts, grpc.FailOnNonTempDialError(true))
+
 	//
 	// complete
 	//
@@ -487,7 +490,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	// if rest target ca cert files defined, load self-signed ca certs so that this service may use those host resources
 	if util.LenTrim(c._config.Target.RestTargetCACertFiles) > 0 {
 		if err := rest.AppendServerCAPemFiles(strings.Split(c._config.Target.RestTargetCACertFiles, ",")...); err != nil {
-			log.Println("!!! Load Rest Target Self-Signed CA Cert Files '" + c._config.Target.RestTargetCACertFiles + "' Failed: " + err.Error() + " !!!")
+			c._z.Errorf("!!! Load Rest Target Self-Signed CA Cert Files '" + c._config.Target.RestTargetCACertFiles + "' Failed: " + err.Error() + " !!!")
 		}
 	}
 
@@ -542,8 +545,10 @@ func (c *Client) Dial(ctx context.Context) error {
 	if c._config.Target.ServiceDiscoveryType != "direct" {
 		var err error
 
+		// very important: client load balancer scheme name must be alpha and lower cased
+		//                 if scheme name is not valid, error will occur: transport error, tcp port unknown
 		schemeName, _ := util.ExtractAlpha(c._config.AppName)
-		schemeName = "clb" + schemeName
+		schemeName = strings.ToLower("clientlb" + schemeName)
 
 		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(schemeName, fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
 

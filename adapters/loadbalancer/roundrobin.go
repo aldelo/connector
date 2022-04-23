@@ -32,7 +32,9 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required")
 	}
 
-	_ = res.NewManualResolver(schemeName, serviceName, endpointAddrs)
+	if err = res.NewManualResolver(schemeName, serviceName, endpointAddrs); err != nil {
+		return "", "", fmt.Errorf("Setup CLB New Resolver Failed: %s", err.Error())
+	}
 
 	// note: load balancer round robin is per call, rather than per connection
 	// this means, load balancer will connect to all discovered ip and perform per call actions in round robin fashion across all channels
