@@ -263,6 +263,10 @@ func (n *NotifierClient) Dial() error {
 
 // Close will disconnect the notifier client from the notifier server
 func (n *NotifierClient) Close() {
+	if n == nil {
+		return
+	}
+
 	if n._notificationServicesStarted {
 		//n._stopNotificationServices <-true
 		n._notificationServicesStarted = false

@@ -845,13 +845,17 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 			// dial notifier client to notifier server endpoint and begin service operations
 			if err = c._notifierClient.Dial(); err != nil {
-				c._z.Errorf("!!! Notifier Client Service Dial Failed: " + err.Error() + " !!!")
-				c._notifierClient.Close() // close to clean up
+				if c._notifierClient != nil && c._z != nil {
+					c._z.Errorf("!!! Notifier Client Service Dial Failed: " + err.Error() + " !!!")
+					c._notifierClient.Close() // close to clean up
+				}
 				return err
 			} else {
 				if err = c._notifierClient.Subscribe(c._notifierClient.ConfiguredSNSDiscoveryTopicArn()); err != nil {
-					c._z.Errorf("!!! Notifier Client Service Subscribe Failed: " + err.Error() + " !!!")
-					c._notifierClient.Close() // close to clean up
+					if c._notifierClient != nil && c._z != nil {
+						c._z.Errorf("!!! Notifier Client Service Subscribe Failed: " + err.Error() + " !!!")
+						c._notifierClient.Close() // close to clean up
+					}
 					return err
 				} else {
 					// subscribe successful, notifier client alert services started
