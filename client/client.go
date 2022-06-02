@@ -818,23 +818,29 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 				c._notifierClient.ServiceAlertStoppedHandler = func(reason string) {
 					if strings.Contains(strings.ToLower(reason), "transport is closing") {
-						c._z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+						if c._notifierClient != nil && c._z != nil {
+							c._z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
 
-						c._notifierClient.PurgeEndpointCache()
-						time.Sleep(5 * time.Second)
+							c._notifierClient.PurgeEndpointCache()
+							time.Sleep(5 * time.Second)
 
-						for {
-							if e := c.DoNotifierAlertService(); e != nil {
-								c._z.Errorf("... Reconnect Notifier Server Failed: " + e.Error() + " (Will Retry in 5 Seconds)")
-								time.Sleep(5 * time.Second)
-							} else {
-								return
+							for {
+								if e := c.DoNotifierAlertService(); e != nil {
+									c._z.Errorf("... Reconnect Notifier Server Failed: " + e.Error() + " (Will Retry in 5 Seconds)")
+									time.Sleep(5 * time.Second)
+								} else {
+									return
+								}
 							}
 						}
-					} else {
+					} else if c._z != nil {
 						c._z.Printf("--- Notifier Client Service Disconnected Normally: " + reason + " ---")
 					}
 				}
+			}
+
+			if c._notifierClient == nil || c._z == nil {
+				return nil
 			}
 
 			// dial notifier client to notifier server endpoint and begin service operations

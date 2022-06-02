@@ -33,9 +33,9 @@ import (
 //
 // `{"msg_type":"host-discovery", "action":"online | offline", "host":"123.123.123.123:9999"}`
 type HostDiscoveryNotification struct {
-	MsgType string		`json:"msg_type"`
-	Action string		`json:"action"`
-	Host string			`json:"host"`
+	MsgType string `json:"msg_type"`
+	Action  string `json:"action"`
+	Host    string `json:"host"`
 }
 
 func (d *HostDiscoveryNotification) Marshal() (string, error) {
@@ -63,27 +63,27 @@ func (d *HostDiscoveryNotification) Unmarshal(jsonData string) error {
 }
 
 type NotifierClient struct {
-	AppName string
-	ConfigFileName string
+	AppName          string
+	ConfigFileName   string
 	CustomConfigPath string
 
-	BeforeClientDialHandler func(*Client)
-	AfterClientDialHandler func(*Client)
+	BeforeClientDialHandler  func(*Client)
+	AfterClientDialHandler   func(*Client)
 	BeforeClientCloseHandler func(*Client)
-	AfterClientCloseHandler func(*Client)
+	AfterClientCloseHandler  func(*Client)
 
-	UnaryClientInterceptorHandlers []grpc.UnaryClientInterceptor
+	UnaryClientInterceptorHandlers  []grpc.UnaryClientInterceptor
 	StreamClientInterceptorHandlers []grpc.StreamClientInterceptor
 
 	ServiceAlertStartedHandler func()
 	ServiceAlertSkippedHandler func(reason string)
 	ServiceAlertStoppedHandler func(reason string)
-	ServiceHostOnlineHandler func(host string, port uint)
-	ServiceHostOfflineHandler func(host string, port uint)
+	ServiceHostOnlineHandler   func(host string, port uint)
+	ServiceHostOfflineHandler  func(host string, port uint)
 
-	_grpcClient *Client
-	_subscriberID string
-	_subscriberTopicArn string
+	_grpcClient                  *Client
+	_subscriberID                string
+	_subscriberTopicArn          string
 	_notificationServicesStarted bool
 
 	//_stopNotificationServices chan bool
@@ -93,8 +93,8 @@ type NotifierClient struct {
 func NewNotifierClient(appName string, configFileName string, customConfigPath string) *NotifierClient {
 	// set param info into notifier client struct object
 	cli := &NotifierClient{
-		AppName: appName,
-		ConfigFileName: configFileName,
+		AppName:          appName,
+		ConfigFileName:   configFileName,
 		CustomConfigPath: customConfigPath,
 	}
 
@@ -138,7 +138,7 @@ func NewNotifierClient(appName string, configFileName string, customConfigPath s
 	cli.ServiceAlertStartedHandler = func() {
 		log.Println("+++ Service Discovery Alert Notification Started +++")
 	}
-	
+
 	cli.ServiceAlertSkippedHandler = func(reason string) {
 		log.Println("^^^ Service Discovery Alert Notification Skipped: " + reason + " ^^^")
 	}
@@ -200,7 +200,7 @@ func (n *NotifierClient) NotifierClientAlertServicesStarted() bool {
 // PurgeEndpointCache removes current client connection's service name ip port from cache,
 // if current service name ip port not found, entire cache will be purged
 func (n *NotifierClient) PurgeEndpointCache() {
-	serviceName := strings.ToLower(n._grpcClient._config.Target.ServiceName+"."+n._grpcClient._config.Target.NamespaceName)
+	serviceName := strings.ToLower(n._grpcClient._config.Target.ServiceName + "." + n._grpcClient._config.Target.NamespaceName)
 	buf := strings.Split(n._grpcClient._remoteAddress, ":")
 	ip := ""
 	port := uint(0)
@@ -362,19 +362,19 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 				return err
 
 			/*
-			case <-n._stopNotificationServices:
-				if n.ServiceAlertStoppedHandler != nil {
-					n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
-				}
+				case <-n._stopNotificationServices:
+					if n.ServiceAlertStoppedHandler != nil {
+						n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
+					}
 
-				n._notificationServicesStarted = false
+					n._notificationServicesStarted = false
 
-				n._grpcClient.ZLog().Printf("### Notifier Client Received Stop Notification Services Signal ###")
+					n._grpcClient.ZLog().Printf("### Notifier Client Received Stop Notification Services Signal ###")
 
-				recvMap = nil
-				err = fmt.Errorf("Notifier Client Received Stop Notification Signal")
-				return err
-			 */
+					recvMap = nil
+					err = fmt.Errorf("Notifier Client Received Stop Notification Signal")
+					return err
+			*/
 
 			default:
 				// process notification receive event
@@ -609,7 +609,7 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 	defer cancel()
 
 	if _, err = nc.Unsubscribe(ctx, &notifierpb.NotificationSubscriber{
-		Id: n._subscriberID,
+		Id:    n._subscriberID,
 		Topic: n._subscriberTopicArn,
 	}); err != nil {
 		n._grpcClient.ZLog().Errorf("!!! Notifier Client Unsubscribe Client ID '" + n._subscriberID + "' From TopicArn '" + n._subscriberTopicArn + "' Failed: " + err.Error() + " !!!")
