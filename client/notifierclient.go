@@ -51,6 +51,10 @@ func (d *HostDiscoveryNotification) Marshal() (string, error) {
 }
 
 func (d *HostDiscoveryNotification) Unmarshal(jsonData string) error {
+	if d == nil {
+		return nil
+	}
+
 	if util.LenTrim(jsonData) == 0 {
 		return fmt.Errorf("Unmarshal Requires Json Data")
 	} else {
@@ -161,6 +165,10 @@ func NewNotifierClient(appName string, configFileName string, customConfigPath s
 
 // ConfiguredForNotifierClientDial checks if the notifier client is configured for options, where Dial can be attempted to invoke
 func (n *NotifierClient) ConfiguredForNotifierClientDial() bool {
+	if n == nil {
+		return false
+	}
+
 	if n._grpcClient == nil {
 		return false
 	}
@@ -185,6 +193,10 @@ func (n *NotifierClient) ConfiguredForNotifierClientDial() bool {
 
 // ConfiguredSNSDiscoveryTopicArn gets the topicArn defined for the notifier client service discovery endpoints
 func (n *NotifierClient) ConfiguredSNSDiscoveryTopicArn() string {
+	if n == nil {
+		return ""
+	}
+
 	if n._grpcClient != nil {
 		return n._grpcClient.ConfiguredSNSDiscoveryTopicArn()
 	} else {
@@ -194,12 +206,20 @@ func (n *NotifierClient) ConfiguredSNSDiscoveryTopicArn() string {
 
 // NotifierClientAlertServicesStarted indicates notifier client services started via Subscribe() action
 func (n *NotifierClient) NotifierClientAlertServicesStarted() bool {
+	if n == nil {
+		return false
+	}
+
 	return n._notificationServicesStarted
 }
 
 // PurgeEndpointCache removes current client connection's service name ip port from cache,
 // if current service name ip port not found, entire cache will be purged
 func (n *NotifierClient) PurgeEndpointCache() {
+	if n == nil {
+		return
+	}
+
 	serviceName := strings.ToLower(n._grpcClient._config.Target.ServiceName + "." + n._grpcClient._config.Target.NamespaceName)
 	buf := strings.Split(n._grpcClient._remoteAddress, ":")
 	ip := ""
@@ -220,6 +240,10 @@ func (n *NotifierClient) PurgeEndpointCache() {
 
 // Dial will connect the notifier client to the notifier server
 func (n *NotifierClient) Dial() error {
+	if n == nil {
+		return fmt.Errorf("NotifierClient Object Nil")
+	}
+
 	if n._grpcClient == nil {
 		return fmt.Errorf("Notifier's gRPC Client is Not Initialized, Obtain via NewNotifierClient Factory Func First")
 	}
@@ -285,6 +309,10 @@ func (n *NotifierClient) Close() {
 // when service discovery host info is received, the appropriate ServiceHostOnlineHandler or ServiceHostOfflineHandler is triggered;
 // calling the Close() or Unsubscribe() or receiving error conditions from notifier server will sever the long running service discovery process.
 func (n *NotifierClient) Subscribe(topicArn string) (err error) {
+	if n == nil {
+		return fmt.Errorf("NotifierClient Object Nil")
+	}
+
 	if n._grpcClient == nil {
 		n._notificationServicesStarted = false
 		n._subscriberID = ""
@@ -571,6 +599,10 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 // Unsubscribe will stop notification alert services and disconnect from subscription on notifier server
 func (n *NotifierClient) Unsubscribe() (err error) {
+	if n == nil {
+		return fmt.Errorf("NotifierClient Object Nil")
+	}
+
 	if n._grpcClient == nil {
 		err = fmt.Errorf("Notifier Client is Not Initialized, Obtain via NewNotifierClient Factory Func First")
 		return err
