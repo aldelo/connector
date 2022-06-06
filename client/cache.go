@@ -27,7 +27,8 @@ import (
 type Cache struct {
 	ServiceEndpoints map[string][]*serviceEndpoint
 
-	_mu sync.Mutex
+	DisableLogging bool
+	_mu            sync.Mutex
 }
 
 // AddServiceEndpoints will append slice of service endpoints associated with the given serviceName within map
@@ -52,10 +53,14 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	serviceName = strings.ToLower(serviceName)
 
 	if list, ok := c.ServiceEndpoints[serviceName]; !ok {
-		log.Println("Adding New Service Endpoints for " + serviceName)
+		if !c.DisableLogging {
+			log.Println("Adding New Service Endpoints for " + serviceName)
+		}
 		c.ServiceEndpoints[serviceName] = eps
 	} else {
-		log.Println("Appending New Service Endpoints for " + serviceName)
+		if !c.DisableLogging {
+			log.Println("Appending New Service Endpoints for " + serviceName)
+		}
 		set := make(map[string]*serviceEndpoint)
 
 		for _, v := range list {
@@ -94,7 +99,9 @@ func (c *Cache) PurgeServiceEndpoints(serviceName string) {
 	defer c._mu.Unlock()
 
 	serviceName = strings.ToLower(serviceName)
-	log.Println("Cached Service Endpoints Purged for " + serviceName)
+	if !c.DisableLogging {
+		log.Println("Cached Service Endpoints Purged for " + serviceName)
+	}
 
 	delete(c.ServiceEndpoints, serviceName)
 }
@@ -119,13 +126,17 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 	defer c._mu.Unlock()
 
 	serviceName = strings.ToLower(serviceName)
-	log.Println("Cached Service Endpoint Purging " + host + ":" + util.UintToStr(port) + " From " + serviceName + "...")
+	if !c.DisableLogging {
+		log.Println("Cached Service Endpoint Purging " + host + ":" + util.UintToStr(port) + " From " + serviceName + "...")
+	}
 
 	eps, ok := c.ServiceEndpoints[serviceName]
 
 	if !ok {
 		// no service endpoints found for service name
-		log.Println("Cached Service Endpoint Purging OK: No Endpoints Found for " + serviceName)
+		if !c.DisableLogging {
+			log.Println("Cached Service Endpoint Purging OK: No Endpoints Found for " + serviceName)
+		}
 	} else {
 		removeIndex := -1
 
@@ -148,10 +159,14 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 				}
 			}
 
-			log.Println("Cached Service Endpoint Purging OK: Endpoint '" + host + ":" + util.UintToStr(port) + "' Removed From " + serviceName)
+			if !c.DisableLogging {
+				log.Println("Cached Service Endpoint Purging OK: Endpoint '" + host + ":" + util.UintToStr(port) + "' Removed From " + serviceName)
+			}
 
 		} else {
-			log.Println("Cached Service Endpoint Purging OK: No Endpoint Found '" + host + ":" + util.UintToStr(port) + "' In " + serviceName)
+			if !c.DisableLogging {
+				log.Println("Cached Service Endpoint Purging OK: No Endpoint Found '" + host + ":" + util.UintToStr(port) + "' In " + serviceName)
+			}
 		}
 	}
 }
@@ -182,12 +197,16 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	eps, ok := c.ServiceEndpoints[serviceName]
 
 	if !ok {
-		log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + "None Found")
+		if !c.DisableLogging {
+			log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + "None Found")
+		}
 		return []*serviceEndpoint{}
 	}
 
-	if len(eps) > 0{
-		log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + util.Itoa(len(eps)) + " Found")
+	if len(eps) > 0 {
+		if !c.DisableLogging {
+			log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + util.Itoa(len(eps)) + " Found")
+		}
 		expiredList := []int{}
 
 		if !ignExp {
@@ -197,14 +216,18 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 					if util.LenTrim(version) > 0 {
 						// has version, check to match version
 						if strings.ToLower(v.Version) != strings.ToLower(version) {
-							log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
+							if !c.DisableLogging {
+								log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
+							}
 							continue
 						}
 					}
 
 					liveEndpoints = append(liveEndpoints, v)
 				} else {
-					log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
+					if !c.DisableLogging {
+						log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
+					}
 					expiredList = append(expiredList, i)
 				}
 			}
@@ -231,12 +254,11 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 			c.ServiceEndpoints[serviceName] = newEps
 		}
 
-		log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': " + util.Itoa(len(liveEndpoints)) + " Returned")
+		if !c.DisableLogging {
+			log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': " + util.Itoa(len(liveEndpoints)) + " Returned")
+		}
 		return
 	} else {
 		return []*serviceEndpoint{}
 	}
 }
-
-
-

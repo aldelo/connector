@@ -200,6 +200,10 @@ func (c *Client) readConfig() error {
 		return fmt.Errorf("Init ZapLog Failed: %s", e.Error())
 	}
 
+	if _cache != nil {
+		_cache.DisableLogging = !c._config.Target.ZapLogEnabled
+	}
+
 	return nil
 }
 

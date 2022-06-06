@@ -94,7 +94,15 @@ type NotifierClient struct {
 }
 
 // NewNotifierClient creates a new prepared notifier client for use in service discovery notification
-func NewNotifierClient(appName string, configFileName string, customConfigPath string) *NotifierClient {
+func NewNotifierClient(appName string, configFileName string, customConfigPath string, enableLogging ...bool) *NotifierClient {
+	var logging bool
+
+	if len(enableLogging) > 0 {
+		logging = enableLogging[0]
+	} else {
+		logging = false
+	}
+
 	// set param info into notifier client struct object
 	cli := &NotifierClient{
 		AppName:          appName,
@@ -110,53 +118,75 @@ func NewNotifierClient(appName string, configFileName string, customConfigPath s
 
 	// default before and after handlers
 	cli._grpcClient.BeforeClientDial = func(cli *Client) {
-		log.Println("Before Notifier Client Dial to Notifier Server...")
+		if logging {
+			log.Println("Before Notifier Client Dial to Notifier Server...")
+		}
 	}
 
 	cli._grpcClient.AfterClientDial = func(cli *Client) {
-		log.Println("... After Notifier Client Dialed to Notifier Server")
+		if logging {
+			log.Println("... After Notifier Client Dialed to Notifier Server")
+		}
 	}
 
 	cli._grpcClient.BeforeClientClose = func(cli *Client) {
-		log.Println("Before Notifier Client Disconnects from Notifier Server...")
+		if logging {
+			log.Println("Before Notifier Client Disconnects from Notifier Server...")
+		}
 	}
 
 	cli._grpcClient.AfterClientClose = func(cli *Client) {
-		log.Println("... After Notifier Client Disconnected from Notifier Server")
+		if logging {
+			log.Println("... After Notifier Client Disconnected from Notifier Server")
+		}
 	}
 
 	cli._grpcClient.UnaryClientInterceptors = []grpc.UnaryClientInterceptor{
 		func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-			log.Println(">>> Unary Client Interceptor Invoked for Method " + method)
+			if logging {
+				log.Println(">>> Unary Client Interceptor Invoked for Method " + method)
+			}
 			return invoker(ctx, method, req, reply, cc, opts...)
 		},
 	}
 
 	cli._grpcClient.StreamClientInterceptors = []grpc.StreamClientInterceptor{
 		func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-			log.Println(">>> Stream Client Interceptor Invoked for Method " + method)
+			if logging {
+				log.Println(">>> Stream Client Interceptor Invoked for Method " + method)
+			}
 			return streamer(ctx, desc, cc, method, opts...)
 		},
 	}
 
 	cli.ServiceAlertStartedHandler = func() {
-		log.Println("+++ Service Discovery Alert Notification Started +++")
+		if logging {
+			log.Println("+++ Service Discovery Alert Notification Started +++")
+		}
 	}
 
 	cli.ServiceAlertSkippedHandler = func(reason string) {
-		log.Println("^^^ Service Discovery Alert Notification Skipped: " + reason + " ^^^")
+		if logging {
+			log.Println("^^^ Service Discovery Alert Notification Skipped: " + reason + " ^^^")
+		}
 	}
 
 	cli.ServiceAlertStoppedHandler = func(reason string) {
-		log.Println("--- Service Discovery Alert Notification Stopped: " + reason + " ---")
+		if logging {
+			log.Println("--- Service Discovery Alert Notification Stopped: " + reason + " ---")
+		}
 	}
 
 	cli.ServiceHostOnlineHandler = func(host string, port uint) {
-		log.Println("+++ Service Discovery Host Online Notification: " + fmt.Sprintf("%s:%d", host, port) + " +++")
+		if logging {
+			log.Println("+++ Service Discovery Host Online Notification: " + fmt.Sprintf("%s:%d", host, port) + " +++")
+		}
 	}
 
 	cli.ServiceHostOfflineHandler = func(host string, port uint) {
-		log.Println("--- Service Discovery Host Offline Notification: " + fmt.Sprintf("%s:%d", host, port) + " ---")
+		if logging {
+			log.Println("--- Service Discovery Host Offline Notification: " + fmt.Sprintf("%s:%d", host, port) + " ---")
+		}
 	}
 
 	// return the factory built cli
