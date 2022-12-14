@@ -39,6 +39,7 @@ import (
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"github.com/aldelo/connector/adapters/tracer"
+	"github.com/aldelo/connector/service/grpc_recovery"
 	ws "github.com/aldelo/connector/webserver"
 	sns2 "github.com/aws/aws-sdk-go/service/sns"
 	"google.golang.org/grpc"
@@ -326,6 +327,8 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			s.UnaryServerInterceptors = append(s.UnaryServerInterceptors, tracer.TracerUnaryServerInterceptor)
 		}
 
+		s.UnaryServerInterceptors = append(s.UnaryServerInterceptors, grpc_recovery.UnaryServerInterceptor())
+
 		count := len(s.UnaryServerInterceptors)
 
 		if count == 1 {
@@ -338,6 +341,8 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		if xray.XRayServiceOn() {
 			s.StreamServerInterceptors = append(s.StreamServerInterceptors, tracer.TracerStreamServerInterceptor)
 		}
+
+		s.StreamServerInterceptors = append(s.StreamServerInterceptors, grpc_recovery.StreamServerInterceptor())
 
 		count = len(s.StreamServerInterceptors)
 
