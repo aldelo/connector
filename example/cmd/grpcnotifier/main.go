@@ -1,7 +1,7 @@
 package main
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,11 +27,11 @@ var ns *service.Service
 
 func main() {
 	svc := &systemd.ServiceProgram{
-		ServiceName: "NotifierService",
-		DisplayName: "Notifier Service",
-		Description: "Provides Http to gRPC Notification Services",
+		ServiceName:         "NotifierService",
+		DisplayName:         "Notifier Service",
+		Description:         "Provides Http to gRPC Notification Services",
 		StartServiceHandler: startServiceHandler,
-		StopServiceHandler: stopServiceHandler,
+		StopServiceHandler:  stopServiceHandler,
 	}
 
 	svc.Launch()

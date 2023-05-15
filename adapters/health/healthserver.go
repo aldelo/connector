@@ -1,7 +1,7 @@
 package health
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,14 +25,14 @@ import (
 )
 
 type HealthServer struct {
-	DefaultHealthCheck func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	DefaultHealthCheck  func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 	HealthCheckHandlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 }
 
 func NewHealthServer(defaultCheck func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus,
-					 serviceChecks map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus) *HealthServer {
+	serviceChecks map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus) *HealthServer {
 	return &HealthServer{
-		DefaultHealthCheck: defaultCheck,
+		DefaultHealthCheck:  defaultCheck,
 		HealthCheckHandlers: serviceChecks,
 	}
 }
@@ -79,6 +79,3 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, server grpc_health_v1.Health_WatchServer) error {
 	return fmt.Errorf("Health Server Watch Not Supported, Use Check Instead")
 }
-
-
-

@@ -26,7 +26,7 @@ import (
 )
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,48 +61,48 @@ import (
 */
 
 type confirmation struct {
-	Type string 			`json:"Type"`
-	MessageId string		`json:"MessageId"`
-	Token string			`json:"Token"`
-	TopicArn string			`json:"TopicArn"`
-	Message string			`json:"Message"`
-	SubscribeURL string		`json:"SubscribeURL"`
-	Timestamp string		`json:"Timestamp"`
-	SignatureVersion string	`json:"SignatureVersion"`
-	Signature string		`json:"Signature"`
-	SigningCertURL string	`json:"SigningCertURL"`
+	Type             string `json:"Type"`
+	MessageId        string `json:"MessageId"`
+	Token            string `json:"Token"`
+	TopicArn         string `json:"TopicArn"`
+	Message          string `json:"Message"`
+	SubscribeURL     string `json:"SubscribeURL"`
+	Timestamp        string `json:"Timestamp"`
+	SignatureVersion string `json:"SignatureVersion"`
+	Signature        string `json:"Signature"`
+	SigningCertURL   string `json:"SigningCertURL"`
 }
 
 type notification struct {
-	Type string 			`json:"Type"`
-	MessageId string		`json:"MessageId"`
-	TopicArn string			`json:"TopicArn"`
-	Subject string			`json:"Subject"`
-	Message string			`json:"Message"`
-	Timestamp string		`json:"Timestamp"`
-	SignatureVersion string	`json:"SignatureVersion"`
-	Signature string		`json:"Signature"`
-	SigningCertURL string	`json:"SigningCertURL"`
-	UnsubscribeURL string	`json:"UnsubscribeURL"`
+	Type             string `json:"Type"`
+	MessageId        string `json:"MessageId"`
+	TopicArn         string `json:"TopicArn"`
+	Subject          string `json:"Subject"`
+	Message          string `json:"Message"`
+	Timestamp        string `json:"Timestamp"`
+	SignatureVersion string `json:"SignatureVersion"`
+	Signature        string `json:"Signature"`
+	SigningCertURL   string `json:"SigningCertURL"`
+	UnsubscribeURL   string `json:"UnsubscribeURL"`
 }
 
 type healthreport struct {
-	NamespaceId string		`json:"NamespaceId"`
-	ServiceId string		`json:"ServiceId"`
-	InstanceId string		`json:"InstanceId"`
-	AwsRegion string		`json:"AWSRegion"`
-	ServiceInfo string		`json:"ServiceInfo"`
-	HostInfo string			`json:"HostInfo"`
-	HashKeyName string		`json:"HashKeyName"`
-	HashSignature string	`json:"HashSignature"`
+	NamespaceId   string `json:"NamespaceId"`
+	ServiceId     string `json:"ServiceId"`
+	InstanceId    string `json:"InstanceId"`
+	AwsRegion     string `json:"AWSRegion"`
+	ServiceInfo   string `json:"ServiceInfo"`
+	HostInfo      string `json:"HostInfo"`
+	HashKeyName   string `json:"HashKeyName"`
+	HashSignature string `json:"HashSignature"`
 }
 
 // NewNotifierGateway constructs a new web server object for use as the notifier gateway host
 func NewNotifierGateway(appName string, configFileNameWebServer string, configFileNameGateway string, customConfigPath string) (*webserver.WebServer, error) {
 	// read gateway config data
 	cfg := &config.Config{
-		AppName: appName,
-		ConfigFileName: configFileNameGateway,
+		AppName:          appName,
+		ConfigFileName:   configFileNameGateway,
 		CustomConfigPath: customConfigPath,
 	}
 
@@ -131,31 +131,31 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 		"base": {
 			Routes: []*ginw.Route{
 				{
-					RelativePath: "/snsrouter/:serverKey",
-					Method: ginhttpmethod.POST,
-					Binding: ginbindtype.UNKNOWN,
+					RelativePath:    "/snsrouter/:serverKey",
+					Method:          ginhttpmethod.POST,
+					Binding:         ginbindtype.UNKNOWN,
 					BindingInputPtr: nil,
-					Handler: snsrouter,
+					Handler:         snsrouter,
 				},
 				{
-					RelativePath: "/callerid",
-					Method: ginhttpmethod.GET,
+					RelativePath:    "/callerid",
+					Method:          ginhttpmethod.GET,
 					BindingInputPtr: nil,
-					Handler: callerid,
+					Handler:         callerid,
 				},
 				{
-					RelativePath: "/reporthealth",
-					Method: ginhttpmethod.POST,
-					Binding: ginbindtype.BindJson,
+					RelativePath:    "/reporthealth",
+					Method:          ginhttpmethod.POST,
+					Binding:         ginbindtype.BindJson,
 					BindingInputPtr: &healthreport{},
-					Handler: healthreporter,
+					Handler:         healthreporter,
 				},
 				{
-					RelativePath: "/reporthealth/:instanceid",
-					Method: ginhttpmethod.DELETE,
-					Binding: ginbindtype.UNKNOWN,
+					RelativePath:    "/reporthealth/:instanceid",
+					Method:          ginhttpmethod.DELETE,
+					Binding:         ginbindtype.UNKNOWN,
 					BindingInputPtr: nil,
-					Handler: healthreporterdelete,
+					Handler:         healthreporterdelete,
 				},
 			},
 			CorsMiddleware: &cors.Config{},
@@ -231,7 +231,7 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 
 	if hashSecret, hsFound := model.HashKeys[data.HashKeyName]; !hsFound || util.LenTrim(hashSecret) == 0 {
 		log.Println("!!! Inbound Health Report Hash Key Name '" + data.HashKeyName + "' From " + c.ClientIP() + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
-		c.String(401, "Inbound Health Report Hash Key Name '" + data.HashKeyName + "' Not Valid")
+		c.String(401, "Inbound Health Report Hash Key Name '"+data.HashKeyName+"' Not Valid")
 		return
 	} else {
 		buf := data.NamespaceId + data.ServiceId + data.InstanceId + util.FormatDate(time.Now().UTC())
@@ -331,7 +331,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 
 	if hashSecret, hsFound := model.HashKeys[hashKeyName]; !hsFound || util.LenTrim(hashSecret) == 0 {
 		log.Println("!!! Delete Health Report Service Record Request's Hash Key Name '" + hashKeyName + "' From " + c.ClientIP() + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
-		c.String(401, "Delete Health Report Service Record Request's Hash Key Name '" + hashKeyName + "' Not Valid")
+		c.String(401, "Delete Health Report Service Record Request's Hash Key Name '"+hashKeyName+"' Not Valid")
 		return
 	} else {
 		buf := instanceId + util.FormatDate(time.Now().UTC())
@@ -501,7 +501,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 			log.Println("/snsrouter 'subscriptionconfirmation' serverKey From Invoker = " + serverKey)
 
 			// wait 250ms for notifier server to update ddb with server endpoint info
-			time.Sleep(250*time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 
 			serverEndpointUrl := ""
 
@@ -528,7 +528,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 					serverEndpointUrl = serverUrl
 					break
 				} else {
-					time.Sleep(250*time.Millisecond)
+					time.Sleep(250 * time.Millisecond)
 				}
 			}
 
@@ -547,7 +547,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				c.String(status, "Subscription Confirm Callback Status Code: %d", status)
 
 				if seg != nil && seg.Ready() {
-					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Not Status 200: [" + util.Itoa(status) + "] Body: %s", body))
+					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Not Status 200: ["+util.Itoa(status)+"] Body: %s", body))
 				}
 			} else {
 				// confirm success, with sns endpoint
@@ -736,7 +736,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 
 				if statusCode, _, err := rest.POST(serverUrl, []*rest.HeaderKeyValue{
 					{
-						Key: "Content-Type",
+						Key:   "Content-Type",
 						Value: "application/json",
 					},
 				}, notifyJson); err != nil {
@@ -861,7 +861,7 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 			default:
 				log.Println(">>> Stale Health Report Record Remover - Processing Invoked <<<")
 				removeInactiveInstancesFromServiceDiscovery()
-				time.Sleep(time.Duration(freq)*time.Second)
+				time.Sleep(time.Duration(freq) * time.Second)
 			}
 		}
 	}()
@@ -872,7 +872,8 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 // then remove from dynamodb table upon de-register success,
 //
 // (this function is to be run from goroutine in for loop so it continuously checks for removal needs,
-//  suggest 60 second wait before re-invoke this function from for loop)
+//
+//	suggest 60 second wait before re-invoke this function from for loop)
 func removeInactiveInstancesFromServiceDiscovery() {
 	if items, e := model.ListInactiveInstancesFromDataStore(); e != nil {
 		// error encountered
@@ -999,10 +1000,10 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 
 	log.Println("Service Discovery De-Register Instance '" + instanceId + "' Begin...")
 
-	timeoutDuration := time.Duration(model.ServiceDiscoveryTimeoutSeconds)*time.Second
+	timeoutDuration := time.Duration(model.ServiceDiscoveryTimeoutSeconds) * time.Second
 
 	if timeoutDuration < 5*time.Second {
-		timeoutDuration = 5*time.Second
+		timeoutDuration = 5 * time.Second
 	}
 
 	if operationId, err := registry.DeregisterInstance(sd, instanceId, serviceId, timeoutDuration); err != nil {
@@ -1011,7 +1012,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 	} else {
 		tryCount := 0
 
-		time.Sleep(250*time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 
 		for {
 			if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration); e != nil {
@@ -1026,7 +1027,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 					if tryCount < 20 {
 						tryCount++
 						log.Println("... Checking De-Register Instance '" + instanceId + "' Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
-						time.Sleep(250*time.Millisecond)
+						time.Sleep(250 * time.Millisecond)
 					} else {
 						log.Println("... De-Register Instance '" + instanceId + "' Failed: Operation Timeout After 5 Seconds")
 						return fmt.Errorf("Service Discovery De-register Instance '" + instanceId + "' Fail When Operation Timed Out After 5 Seconds")
@@ -1036,14 +1037,3 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 		}
 	}
 }
-
-
-
-
-
-
-
-
-
-
-

@@ -1,7 +1,7 @@
 package notifierserver
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -71,21 +71,22 @@ import (
 var notifierServer *impl.NotifierImpl
 
 type snsNotification struct {
-	Type string					`json:"Type"`
-	MessageId string			`json:"MessageId"`
-	TopicArn string				`json:"TopicArn"`
-	Subject string				`json:"Subject"`
-	Message string				`json:"Message"`
-	Timestamp string			`json:"Timestamp"`
-	SignatureVersion string		`json:"SignatureVersion"`
-	Signature string			`json:"Signature"`
-	SigningCertURL string		`json:"SigningCertURL"`
-	UnsubscribeURL string		`json:"UnsubscribeURL"`
+	Type             string `json:"Type"`
+	MessageId        string `json:"MessageId"`
+	TopicArn         string `json:"TopicArn"`
+	Subject          string `json:"Subject"`
+	Message          string `json:"Message"`
+	Timestamp        string `json:"Timestamp"`
+	SignatureVersion string `json:"SignatureVersion"`
+	Signature        string `json:"Signature"`
+	SigningCertURL   string `json:"SigningCertURL"`
+	UnsubscribeURL   string `json:"UnsubscribeURL"`
 }
 
 // NewNotifierServer info,
 // NOTE: notifier server grpc config should not favor public ip when deploy to aws, otherwise EC2 security groups cannot be used for inbound security permissions,
-//		 if notifier server is discovered via public ip, then inbound security group must be setup to indicate inbound ec2 ip address rather than its security groups
+//
+//	if notifier server is discovered via public ip, then inbound security group must be setup to indicate inbound ec2 ip address rather than its security groups
 func NewNotifierServer(appName string, configFileNameGrpcServer string, configFileNameWebServer string, configFileNameNotifier string, customConfigPath string) (*service.Service, error) {
 	notifierServer = new(impl.NotifierImpl)
 
@@ -110,29 +111,29 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 	}
 
 	svr := service.NewService(appName, configFileNameGrpcServer, customConfigPath, func(grpcServer *grpc.Server) {
-			pb.RegisterNotifierServiceServer(grpcServer, notifierServer)
-		})
+		pb.RegisterNotifierServiceServer(grpcServer, notifierServer)
+	})
 
 	svr.WebServerConfig = &service.WebServerConfig{
-		AppName: appName,
-		ConfigFileName: configFileNameWebServer,
+		AppName:          appName,
+		ConfigFileName:   configFileNameWebServer,
 		CustomConfigPath: "",
 		WebServerRoutes: map[string]*ginw.RouteDefinition{
 			"base": {
 				Routes: []*ginw.Route{
 					{
-						RelativePath: "/snsrelay",
-						Method: ginhttpmethod.POST,
-						Binding: ginbindtype.BindJson,
+						RelativePath:    "/snsrelay",
+						Method:          ginhttpmethod.POST,
+						Binding:         ginbindtype.BindJson,
 						BindingInputPtr: &snsNotification{},
-						Handler: snsrelay,
+						Handler:         snsrelay,
 					},
 					{
-						RelativePath: "/snsupdate/:topicArn",
-						Method: ginhttpmethod.POST,
-						Binding: ginbindtype.UNKNOWN,
+						RelativePath:    "/snsupdate/:topicArn",
+						Method:          ginhttpmethod.POST,
+						Binding:         ginbindtype.UNKNOWN,
 						BindingInputPtr: nil,
-						Handler: snsupdate,
+						Handler:         snsupdate,
 					},
 				},
 				CorsMiddleware: &cors.Config{},
@@ -181,9 +182,9 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 			log.Println("~~~ Notifier Server Relaying SNS Message to TopicArn: " + n.TopicArn + " ~~~")
 
 			if _, err := notifierServer.Broadcast(ctx, &pb.NotificationData{
-				Id: n.MessageId,
-				Topic: n.TopicArn,
-				Message: n.Message,
+				Id:        n.MessageId,
+				Topic:     n.TopicArn,
+				Message:   n.Message,
 				Timestamp: n.Timestamp,
 			}); err != nil {
 				// broadcast error encountered

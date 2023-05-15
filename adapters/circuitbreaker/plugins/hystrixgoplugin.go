@@ -1,7 +1,7 @@
 package plugins
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,20 +35,20 @@ type HystrixGoPlugin struct {
 // this plugin implements the CircuitBreakerIFace interface
 //
 // Config Properties:
-//		1) commandName = (required) name of the circuit breaker command
-//		1) Timeout = (optional) how long to wait for command to complete, in milliseconds, default = 1000
-//		2) MaxConcurrentRequests = (optional) how many commands of the same type can run at the same time, default = 10
-//		3) RequestVolumeThreshold = (optional) minimum number of requests needed before a circuit can be tripped due to health, default = 20
-//		4) SleepWindow = (optional) how long to wait after a circuit opens before testing for recovery, in milliseconds, default = 5000
-//		5) ErrorPercentThreshold = (optional) causes circuits to open once the rolling measure of errors exceeds this percent of requests, default = 50
-//		6) Logger = (optional) indicates the logger that will be used in the Hystrix package, nil = logs nothing
+//  1. commandName = (required) name of the circuit breaker command
+//  1. Timeout = (optional) how long to wait for command to complete, in milliseconds, default = 1000
+//  2. MaxConcurrentRequests = (optional) how many commands of the same type can run at the same time, default = 10
+//  3. RequestVolumeThreshold = (optional) minimum number of requests needed before a circuit can be tripped due to health, default = 20
+//  4. SleepWindow = (optional) how long to wait after a circuit opens before testing for recovery, in milliseconds, default = 5000
+//  5. ErrorPercentThreshold = (optional) causes circuits to open once the rolling measure of errors exceeds this percent of requests, default = 50
+//  6. Logger = (optional) indicates the logger that will be used in the Hystrix package, nil = logs nothing
 func NewHystrixGoPlugin(commandName string,
-						timeout int,
-						maxConcurrentRequests int,
-						requestVolumeThreshold int,
-						sleepWindow int,
-						errorPercentThreshold int,
-						logger *data.ZapLog) (*HystrixGoPlugin, error) {
+	timeout int,
+	maxConcurrentRequests int,
+	requestVolumeThreshold int,
+	sleepWindow int,
+	errorPercentThreshold int,
+	logger *data.ZapLog) (*HystrixGoPlugin, error) {
 	// validate required
 	if util.LenTrim(commandName) == 0 {
 		return nil, fmt.Errorf("HystrixGo Circuit Breaker Command Name is Required")
@@ -57,14 +57,14 @@ func NewHystrixGoPlugin(commandName string,
 	// create plugin
 	p := &HystrixGoPlugin{
 		HystrixGo: &hystrixgo.CircuitBreaker{
-			CommandName: commandName,
-			TimeOut: timeout,
-			MaxConcurrentRequests: maxConcurrentRequests,
+			CommandName:            commandName,
+			TimeOut:                timeout,
+			MaxConcurrentRequests:  maxConcurrentRequests,
 			RequestVolumeThreshold: requestVolumeThreshold,
-			SleepWindow: sleepWindow,
-			ErrorPercentThreshold: errorPercentThreshold,
-			Logger: logger,
-			DisableCircuitBreaker: false,
+			SleepWindow:            sleepWindow,
+			ErrorPercentThreshold:  errorPercentThreshold,
+			Logger:                 logger,
+			DisableCircuitBreaker:  false,
 		},
 	}
 
@@ -83,9 +83,9 @@ func NewHystrixGoPlugin(commandName string,
 // fallbackFn = function to be executed if runFn fails
 // dataIn = input parameter value for runFn and fallbackFn
 func (p *HystrixGoPlugin) Exec(async bool,
-							   runFn func(dataIn interface{}, ctx ...context.Context) (dataOut interface{}, err error),
-							   fallbackFn func(dataIn interface{}, errIn error, ctx ...context.Context) (dataOut interface{}, err error),
-							   dataIn interface{}) (interface{}, error) {
+	runFn func(dataIn interface{}, ctx ...context.Context) (dataOut interface{}, err error),
+	fallbackFn func(dataIn interface{}, errIn error, ctx ...context.Context) (dataOut interface{}, err error),
+	dataIn interface{}) (interface{}, error) {
 	if p.HystrixGo != nil {
 		if async {
 			return p.HystrixGo.Go(runFn, fallbackFn, dataIn)
@@ -103,10 +103,10 @@ func (p *HystrixGoPlugin) Exec(async bool,
 // fallbackFn = function to be executed if runFn fails
 // dataIn = input parameter value for runFn and fallbackFn
 func (p *HystrixGoPlugin) ExecWithContext(async bool,
-										  ctx context.Context,
-										  runFn func(dataIn interface{}, ctx ...context.Context) (dataOut interface{}, err error),
-										  fallbackFn func(dataIn interface{}, errIn error, ctx ...context.Context) (dataOut interface{}, err error),
-										  dataIn interface{}) (interface{}, error) {
+	ctx context.Context,
+	runFn func(dataIn interface{}, ctx ...context.Context) (dataOut interface{}, err error),
+	fallbackFn func(dataIn interface{}, errIn error, ctx ...context.Context) (dataOut interface{}, err error),
+	dataIn interface{}) (interface{}, error) {
 	if p.HystrixGo != nil {
 		if async {
 			return p.HystrixGo.GoC(ctx, runFn, fallbackFn, dataIn)
@@ -126,18 +126,18 @@ func (p *HystrixGoPlugin) Reset() {
 }
 
 // Update will update circuit breaker internal config
-//		1) Timeout = (optional) how long to wait for command to complete, in milliseconds, default = 1000
-//		2) MaxConcurrentRequests = (optional) how many commands of the same type can run at the same time, default = 10
-//		3) RequestVolumeThreshold = (optional) minimum number of requests needed before a circuit can be tripped due to health, default = 20
-//		4) SleepWindow = (optional) how long to wait after a circuit opens before testing for recovery, in milliseconds, default = 5000
-//		5) ErrorPercentThreshold = (optional) causes circuits to open once the rolling measure of errors exceeds this percent of requests, default = 50
-//		6) Logger = (optional) indicates the logger that will be used in the Hystrix package, nil = logs nothing
+//  1. Timeout = (optional) how long to wait for command to complete, in milliseconds, default = 1000
+//  2. MaxConcurrentRequests = (optional) how many commands of the same type can run at the same time, default = 10
+//  3. RequestVolumeThreshold = (optional) minimum number of requests needed before a circuit can be tripped due to health, default = 20
+//  4. SleepWindow = (optional) how long to wait after a circuit opens before testing for recovery, in milliseconds, default = 5000
+//  5. ErrorPercentThreshold = (optional) causes circuits to open once the rolling measure of errors exceeds this percent of requests, default = 50
+//  6. Logger = (optional) indicates the logger that will be used in the Hystrix package, nil = logs nothing
 func (p *HystrixGoPlugin) Update(timeout int,
-								 maxConcurrentRequests int,
-								 requestVolumeThreshold int,
-								 sleepWindow int,
-								 errorPercentThreshold int,
-								 logger *data.ZapLog) error {
+	maxConcurrentRequests int,
+	requestVolumeThreshold int,
+	sleepWindow int,
+	errorPercentThreshold int,
+	logger *data.ZapLog) error {
 	if p.HystrixGo != nil {
 		p.HystrixGo.TimeOut = timeout
 		p.HystrixGo.MaxConcurrentRequests = maxConcurrentRequests
@@ -162,5 +162,3 @@ func (p *HystrixGoPlugin) Disable(b bool) {
 		p.HystrixGo.DisableCircuitBreaker = b
 	}
 }
-
-

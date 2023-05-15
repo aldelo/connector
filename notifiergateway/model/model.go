@@ -1,7 +1,7 @@
 package model
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,24 +35,24 @@ var HealthReportRecordStaleMinutes uint
 var HashKeys map[string]string
 
 type serverRoute struct {
-	PK string				`json:"pk" dynamodbav:"PK"`
-	SK string				`json:"sk" dynamodbav:"SK"`
-	ServerKey string		`json:"serverkey" dynamodbav:"ServerKey"`
-	HostInfo string			`json:"hostinfo" dynamodbav:"HostInfo"`
-	LastTimestamp int64		`json:"lasttimestamp" dynamodbav:"LastTimestamp"`
+	PK            string `json:"pk" dynamodbav:"PK"`
+	SK            string `json:"sk" dynamodbav:"SK"`
+	ServerKey     string `json:"serverkey" dynamodbav:"ServerKey"`
+	HostInfo      string `json:"hostinfo" dynamodbav:"HostInfo"`
+	LastTimestamp int64  `json:"lasttimestamp" dynamodbav:"LastTimestamp"`
 }
 
 type healthStatus struct {
-	PK string				`json:"pk" dynamodbav:"PK"`
-	SK string				`json:"sk" dynamodbav:"SK"`
-	NamespaceId string		`json:"namespaceid" dynamodbav:"NamespaceId"`
-	ServiceId string		`json:"serviceid" dynamodbav:"ServiceId"`
-	InstanceId string		`json:"instanceid" dynamodbav:"InstanceId"`
-	AwsRegion string		`json:"awsregion" dynamodbav:"AWSRegion"`
-	ServiceInfo string		`json:"serviceinfo" dynamodbav:"ServiceInfo"`
-	HostInfo string			`json:"hostinfo" dynamodbav:"HostInfo"`
-	LastTimestamp int64		`json:"lasttimestamp" dynamodbav:"LastTimestamp"`
-	LastUpdatedUTC string	`json:"lastupdatedutc" dynamodbav:"LastUpdatedUTC"`
+	PK             string `json:"pk" dynamodbav:"PK"`
+	SK             string `json:"sk" dynamodbav:"SK"`
+	NamespaceId    string `json:"namespaceid" dynamodbav:"NamespaceId"`
+	ServiceId      string `json:"serviceid" dynamodbav:"ServiceId"`
+	InstanceId     string `json:"instanceid" dynamodbav:"InstanceId"`
+	AwsRegion      string `json:"awsregion" dynamodbav:"AWSRegion"`
+	ServiceInfo    string `json:"serviceinfo" dynamodbav:"ServiceInfo"`
+	HostInfo       string `json:"hostinfo" dynamodbav:"HostInfo"`
+	LastTimestamp  int64  `json:"lasttimestamp" dynamodbav:"LastTimestamp"`
+	LastUpdatedUTC string `json:"lastupdatedutc" dynamodbav:"LastUpdatedUTC"`
 }
 
 var _ddbStore *dynamodb.DynamoDB
@@ -66,12 +66,12 @@ func ConnectDataStore(cfg *config.Config) error {
 	}
 
 	_ddbStore = &dynamodb.DynamoDB{
-		AwsRegion: awsregion.GetAwsRegion(cfg.NotifierGatewayData.DynamoDBAwsRegion),
-		SkipDax: !cfg.NotifierGatewayData.DynamoDBUseDax,
+		AwsRegion:   awsregion.GetAwsRegion(cfg.NotifierGatewayData.DynamoDBAwsRegion),
+		SkipDax:     !cfg.NotifierGatewayData.DynamoDBUseDax,
 		DaxEndpoint: cfg.NotifierGatewayData.DynamoDBDaxUrl,
-		TableName: cfg.NotifierGatewayData.DynamoDBTable,
-		PKName: "PK",
-		SKName: "SK",
+		TableName:   cfg.NotifierGatewayData.DynamoDBTable,
+		PKName:      "PK",
+		SKName:      "SK",
 	}
 
 	if err := _ddbStore.Connect(); err != nil {
@@ -193,15 +193,15 @@ func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instance
 	timeNowUTC := time.Now().UTC()
 
 	statusInfo := &healthStatus{
-		PK: pk,
-		SK: sk,
-		NamespaceId: namespaceId,
-		ServiceId: serviceId,
-		InstanceId: instanceId,
-		AwsRegion: awsRegion,
-		ServiceInfo: serviceInfo,
-		HostInfo: hostInfo,
-		LastTimestamp: timeNowUTC.Unix(),
+		PK:             pk,
+		SK:             sk,
+		NamespaceId:    namespaceId,
+		ServiceId:      serviceId,
+		InstanceId:     instanceId,
+		AwsRegion:      awsRegion,
+		ServiceInfo:    serviceInfo,
+		HostInfo:       hostInfo,
+		LastTimestamp:  timeNowUTC.Unix(),
 		LastUpdatedUTC: util.FormatDateTime(timeNowUTC),
 	}
 
@@ -255,20 +255,20 @@ func ListInactiveInstancesFromDataStore() (inactiveInstances []*healthStatus, er
 		staleMinutes = 15
 	}
 
-	ts := util.Int64ToString(time.Now().UTC().Add(time.Duration(staleMinutes)*time.Minute*-1).Unix())
+	ts := util.Int64ToString(time.Now().UTC().Add(time.Duration(staleMinutes) * time.Minute * -1).Unix())
 
 	if itemsList, e := _ddbStore.QueryPagedItemsWithRetry(_ddbActionRetries, &[]*healthStatus{}, &[]*healthStatus{},
-														  _ddbStore.TimeOutDuration(_ddbTimeoutSeconds),
-														  "LSI-LastTimestamp",
-														  "PK=:pk AND LastTimestamp<:lasttimestamp",
-														  map[string]*ddb.AttributeValue{
-																":pk": {
-																	S: aws.String(pk),
-																},
-																":lasttimestamp": {
-																	N: aws.String(ts),
-																},
-														  }, nil); e != nil {
+		_ddbStore.TimeOutDuration(_ddbTimeoutSeconds),
+		"LSI-LastTimestamp",
+		"PK=:pk AND LastTimestamp<:lasttimestamp",
+		map[string]*ddb.AttributeValue{
+			":pk": {
+				S: aws.String(pk),
+			},
+			":lasttimestamp": {
+				N: aws.String(ts),
+			},
+		}, nil); e != nil {
 		// error
 		return []*healthStatus{}, fmt.Errorf("List Inactive Instances From Data Store Failed: %s", e)
 	} else {

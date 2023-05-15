@@ -1,7 +1,7 @@
 package main
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,11 +39,11 @@ func main() {
 	// ServiceProgram wraps the service running feature provided by the Kardianos Service Package
 	// the actual gRPC server setup and startup code is executed within the ServiceHandler func
 	prog := &systemd.ServiceProgram{
-		ServiceName: "ExampleService",
-		DisplayName: "gRPC Example Service",
-		Description: "Demo of gRPC Example Service",
+		ServiceName:         "ExampleService",
+		DisplayName:         "gRPC Example Service",
+		Description:         "Demo of gRPC Example Service",
 		StartServiceHandler: startServiceHandler,
-		StopServiceHandler: stopServiceHandler,
+		StopServiceHandler:  stopServiceHandler,
 	}
 
 	// launch the service program,
@@ -133,8 +133,8 @@ func startServiceHandler(port int) {
 
 	// set http web server
 	grpcServer.WebServerConfig = &service.WebServerConfig{
-		AppName: grpcServer.AppName,
-		ConfigFileName: "",	// web server not used in example
+		AppName:        grpcServer.AppName,
+		ConfigFileName: "", // web server not used in example
 	}
 
 	//

@@ -1,7 +1,7 @@
 package impl
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,15 +17,15 @@ package impl
  */
 
 import (
+	"context"
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/xray"
 	testpb "github.com/aldelo/connector/example/proto/test"
-	"context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
 
-type TestServiceImpl struct{
+type TestServiceImpl struct {
 	testpb.UnimplementedAnswerServiceServer
 }
 

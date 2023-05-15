@@ -1,7 +1,7 @@
 package main
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,12 +29,12 @@ import (
 )
 
 type healthTest struct {
-	PK string				`json:"pk" dynamodbav:"PK"`
-	SK string				`json:"sk" dynamodbav:"SK"`
-	NamespaceId string		`json:"namespaceid" dynamodbav:"NamespaceId"`
-	ServiceId string		`json:"serviceid" dynamodbav:"ServiceId"`
-	InstanceId string		`json:"instanceid" dynamodbav:"InstanceId"`
-	LastTimestamp int64		`json:"lasttimestamp" dynamodbav:"LastTimestamp"`
+	PK            string `json:"pk" dynamodbav:"PK"`
+	SK            string `json:"sk" dynamodbav:"SK"`
+	NamespaceId   string `json:"namespaceid" dynamodbav:"NamespaceId"`
+	ServiceId     string `json:"serviceid" dynamodbav:"ServiceId"`
+	InstanceId    string `json:"instanceid" dynamodbav:"InstanceId"`
+	LastTimestamp int64  `json:"lasttimestamp" dynamodbav:"LastTimestamp"`
 }
 
 // example gRPC client using connector client
@@ -139,11 +139,11 @@ func DialService1() (cli *client.Client, err error) {
 	cli = client.NewClient("ExampleClient", "service-1", "./endpoint")
 
 	/*
-	cli.WebServerConfig = &client.WebServerConfig{
-		AppName: cli.AppName,
-		ConfigFileName: "webserver",
-		CustomConfigPath: "",
-	}
+		cli.WebServerConfig = &client.WebServerConfig{
+			AppName: cli.AppName,
+			ConfigFileName: "webserver",
+			CustomConfigPath: "",
+		}
 	*/
 
 	cli.WaitForServerReady = true

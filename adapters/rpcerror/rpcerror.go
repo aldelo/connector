@@ -1,7 +1,7 @@
 package rpcerror
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,24 +24,24 @@ import (
 )
 
 type RpcErrorDetails struct {
-	RequestInfo *epb.RequestInfo
+	RequestInfo      *epb.RequestInfo
 	LocalizedMessage *epb.LocalizedMessage
-	ResourceInfo *epb.ResourceInfo
-	RetryInfo *epb.RetryInfo
+	ResourceInfo     *epb.ResourceInfo
+	RetryInfo        *epb.RetryInfo
 
 	DebugInfo *epb.DebugInfo
 	ErrorInfo *epb.ErrorInfo
 
-	PreconditionFailure *epb.PreconditionFailure
+	PreconditionFailure           *epb.PreconditionFailure
 	PreconditionFailure_Violation *epb.PreconditionFailure_Violation
 
-	BadRequest *epb.BadRequest
+	BadRequest                *epb.BadRequest
 	BadRequest_FieldViolation *epb.BadRequest_FieldViolation
 
-	QuotaFailure *epb.QuotaFailure
+	QuotaFailure           *epb.QuotaFailure
 	QuotaFailure_Violation *epb.QuotaFailure_Violation
 
-	Help *epb.Help
+	Help      *epb.Help
 	Help_Link *epb.Help_Link
 }
 
@@ -169,4 +169,3 @@ func ConvertToRpcError(err error) (*status.Status, RpcErrorDetails) {
 
 	return s, details
 }
-

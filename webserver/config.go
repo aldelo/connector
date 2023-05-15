@@ -1,7 +1,7 @@
 package webserver
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,119 +23,119 @@ import (
 )
 
 type config struct {
-	AppName string								`mapstructure:"-"`
-	ConfigFileName string						`mapstructure:"-"`
-	CustomConfigPath string						`mapstructure:"-"`
+	AppName          string `mapstructure:"-"`
+	ConfigFileName   string `mapstructure:"-"`
+	CustomConfigPath string `mapstructure:"-"`
 
-	_v *data.ViperConf							`mapstructure:"-"`
+	_v *data.ViperConf `mapstructure:"-"`
 
-	WebServer webServerData						`mapstructure:"web_server"`
-	Recovery recoveryData						`mapstructure:"recovery"`
-	Logging loggingData							`mapstructure:"logging"`
-	Session sessionData							`mapstructure:"session"`
-	Csrf csrfData								`mapstructure:"csrf"`
-	JwtAuth jwtAuthData							`mapstructure:"jwt_auth"`
-	HtmlTemplates htmlTemplatesData				`mapstructure:"html_templates"`
-	Routes []routeDefinition					`mapstructure:"routes"`
+	WebServer     webServerData     `mapstructure:"web_server"`
+	Recovery      recoveryData      `mapstructure:"recovery"`
+	Logging       loggingData       `mapstructure:"logging"`
+	Session       sessionData       `mapstructure:"session"`
+	Csrf          csrfData          `mapstructure:"csrf"`
+	JwtAuth       jwtAuthData       `mapstructure:"jwt_auth"`
+	HtmlTemplates htmlTemplatesData `mapstructure:"html_templates"`
+	Routes        []routeDefinition `mapstructure:"routes"`
 }
 
 type webServerData struct {
-	Name string									`mapstructure:"ws_name"`
-	Debug bool									`mapstructure:"ws_debug"`
-	Port uint									`mapstructure:"ws_port"`
-	ServerPem string							`mapstructure:"ws_server_pem"`
-	ServerKey string							`mapstructure:"ws_server_key"`
-	GoogleRecaptchaSecret string				`mapstructure:"google_recaptcha_secret"`
-	TraceUseXRay bool							`mapstructure:"ws_trace_use_xray"`
-	LoggingUseSQS bool							`mapstructure:"ws_logging_use_sqs"`
-	HostUseRoute53 bool							`mapstructure:"ws_host_use_route53"`
-	Route53HostedZoneID string					`mapstructure:"ws_route53_hosted_zone_id"`
-	Route53DomainSuffix string					`mapstructure:"ws_route53_domain_suffix"`
-	Route53TTL uint								`mapstructure:"ws_route53_ttl"`
-	RestTargetCACertFiles string				`mapstructure:"rest_target_ca_cert_files"`
+	Name                  string `mapstructure:"ws_name"`
+	Debug                 bool   `mapstructure:"ws_debug"`
+	Port                  uint   `mapstructure:"ws_port"`
+	ServerPem             string `mapstructure:"ws_server_pem"`
+	ServerKey             string `mapstructure:"ws_server_key"`
+	GoogleRecaptchaSecret string `mapstructure:"google_recaptcha_secret"`
+	TraceUseXRay          bool   `mapstructure:"ws_trace_use_xray"`
+	LoggingUseSQS         bool   `mapstructure:"ws_logging_use_sqs"`
+	HostUseRoute53        bool   `mapstructure:"ws_host_use_route53"`
+	Route53HostedZoneID   string `mapstructure:"ws_route53_hosted_zone_id"`
+	Route53DomainSuffix   string `mapstructure:"ws_route53_domain_suffix"`
+	Route53TTL            uint   `mapstructure:"ws_route53_ttl"`
+	RestTargetCACertFiles string `mapstructure:"rest_target_ca_cert_files"`
 }
 
 type recoveryData struct {
-	CustomRecovery bool							`mapstructure:"custom_recovery"`
+	CustomRecovery bool `mapstructure:"custom_recovery"`
 }
 
 type loggingData struct {
-	CustomLogging bool							`mapstructure:"custom_logging"`
-	CustomLoggingToConsole bool					`mapstructure:"custom_logging_to_console"`
-	SQSLoggerQueueNamePrefix string				`mapstructure:"sqs_logger_queue_name_prefix"`
-	SQSLoggerMessageRetentionSeconds uint		`mapstructure:"sqs_logger_message_retention_seconds"`
-	SQSLoggerQueueURL string					`mapstructure:"sqs_logger_queue_url"`
-	SQSLoggerQueueARN string					`mapstructure:"sqs_logger_queue_arn"`
+	CustomLogging                    bool   `mapstructure:"custom_logging"`
+	CustomLoggingToConsole           bool   `mapstructure:"custom_logging_to_console"`
+	SQSLoggerQueueNamePrefix         string `mapstructure:"sqs_logger_queue_name_prefix"`
+	SQSLoggerMessageRetentionSeconds uint   `mapstructure:"sqs_logger_message_retention_seconds"`
+	SQSLoggerQueueURL                string `mapstructure:"sqs_logger_queue_url"`
+	SQSLoggerQueueARN                string `mapstructure:"sqs_logger_queue_arn"`
 }
 
 type sessionData struct {
-	SessionSecret string						`mapstructure:"session_secret"`
-	SessionNames []string						`mapstructure:"session_names"`
-	RedisHost string							`mapstructure:"redis_host"`
-	RedisMaxIdleConnections uint				`mapstructure:"redis_max_idle_connections"`
+	SessionSecret           string   `mapstructure:"session_secret"`
+	SessionNames            []string `mapstructure:"session_names"`
+	RedisHost               string   `mapstructure:"redis_host"`
+	RedisMaxIdleConnections uint     `mapstructure:"redis_max_idle_connections"`
 }
 
 type csrfData struct {
-	CsrfSecret string							`mapstructure:"csrf_secret"`
+	CsrfSecret string `mapstructure:"csrf_secret"`
 }
 
 type jwtAuthData struct {
-	Realm string								`mapstructure:"jwt_realm"`
-	IdentityKey string							`mapstructure:"jwt_identity_key"`
-	SignSecret string							`mapstructure:"jwt_sign_secret"`
-	SignAlgorithm string						`mapstructure:"jwt_sign_algorithm"`
-	PrivateKey string							`mapstructure:"jwt_private_key"`
-	PublicKey string							`mapstructure:"jwt_public_key"`
-	LoginDataBinding string						`mapstructure:"jwt_login_data_binding"`
-	TokenValidMinutes uint						`mapstructure:"jwt_token_valid_minutes"`
-	RefreshValidMinutes uint					`mapstructure:"jwt_refresh_valid_minutes"`
-	SendCookie bool								`mapstructure:"jwt_send_cookie"`
-	SecureCookie bool							`mapstructure:"jwt_secure_cookie"`
-	CookieHttpOnly bool							`mapstructure:"jwt_cookie_http_only"`
-	CookieMaxAgeDays uint						`mapstructure:"jwt_cookie_max_age_days"`
-	CookieDomain string							`mapstructure:"jwt_cookie_domain"`
-	CookieName string							`mapstructure:"jwt_cookie_name"`
-	CookieSameSite string						`mapstructure:"jwt_cookie_same_site"`
-	LoginRoutePath string						`mapstructure:"jwt_login_route_path"`
-	LogoutRoutePath string						`mapstructure:"jwt_logout_route_path"`
-	RefreshTokenRoutePath string				`mapstructure:"jwt_refresh_token_route_path"`
-	TokenLookup string							`mapstructure:"jwt_token_lookup"`
-	TokenHeadName string						`mapstructure:"jwt_token_head_name"`
-	DisableAbort bool							`mapstructure:"jwt_disable_abort"`
-	SendAuthorization bool						`mapstructure:"jwt_send_authorization"`
+	Realm                 string `mapstructure:"jwt_realm"`
+	IdentityKey           string `mapstructure:"jwt_identity_key"`
+	SignSecret            string `mapstructure:"jwt_sign_secret"`
+	SignAlgorithm         string `mapstructure:"jwt_sign_algorithm"`
+	PrivateKey            string `mapstructure:"jwt_private_key"`
+	PublicKey             string `mapstructure:"jwt_public_key"`
+	LoginDataBinding      string `mapstructure:"jwt_login_data_binding"`
+	TokenValidMinutes     uint   `mapstructure:"jwt_token_valid_minutes"`
+	RefreshValidMinutes   uint   `mapstructure:"jwt_refresh_valid_minutes"`
+	SendCookie            bool   `mapstructure:"jwt_send_cookie"`
+	SecureCookie          bool   `mapstructure:"jwt_secure_cookie"`
+	CookieHttpOnly        bool   `mapstructure:"jwt_cookie_http_only"`
+	CookieMaxAgeDays      uint   `mapstructure:"jwt_cookie_max_age_days"`
+	CookieDomain          string `mapstructure:"jwt_cookie_domain"`
+	CookieName            string `mapstructure:"jwt_cookie_name"`
+	CookieSameSite        string `mapstructure:"jwt_cookie_same_site"`
+	LoginRoutePath        string `mapstructure:"jwt_login_route_path"`
+	LogoutRoutePath       string `mapstructure:"jwt_logout_route_path"`
+	RefreshTokenRoutePath string `mapstructure:"jwt_refresh_token_route_path"`
+	TokenLookup           string `mapstructure:"jwt_token_lookup"`
+	TokenHeadName         string `mapstructure:"jwt_token_head_name"`
+	DisableAbort          bool   `mapstructure:"jwt_disable_abort"`
+	SendAuthorization     bool   `mapstructure:"jwt_send_authorization"`
 }
 
 type templateDefinition struct {
-	LayoutPath string							`mapstructure:"layout_path"`
-	PagePath string								`mapstructure:"page_path"`
+	LayoutPath string `mapstructure:"layout_path"`
+	PagePath   string `mapstructure:"page_path"`
 }
 
 type htmlTemplatesData struct {
-	TemplateBaseDir string						`mapstructure:"template_base_dir"`
-	TemplateDefinitions []templateDefinition	`mapstructure:"template_definitions"`
+	TemplateBaseDir     string               `mapstructure:"template_base_dir"`
+	TemplateDefinitions []templateDefinition `mapstructure:"template_definitions"`
 }
 
 type routeDefinition struct {
-	RouteGroupName string						`mapstructure:"route_group_name"`
-	JwtAuthSecured bool							`mapstructure:"jwt_auth_secured"`
-	MaxConcurrentRequestLimit uint				`mapstructure:"max_concurrent_request_limit"`
-	PerClientIpQps uint							`mapstructure:"per_client_ip_qps"`
-	PerClientIpBurst uint						`mapstructure:"per_client_ip_burst"`
-	PerClientIpTtlMinutes uint					`mapstructure:"per_client_ip_ttl_minutes"`
-	GzipCompressionType string					`mapstructure:"gzip_compression_type"`
-	GzipExcludeExtensions []string				`mapstructure:"gzip_exclude_extensions"`
-	GzipExcludePaths []string					`mapstructure:"gzip_exclude_paths"`
-	GzipExcludePathsRegex []string				`mapstructure:"gzip_exclude_paths_regex"`
-	CorsAllowAllOrigins bool					`mapstructure:"cors_allow_all_origins"`
-	CorsAllowOrigins []string					`mapstructure:"cors_allow_origins"`
-	CorsAllowMethods []string					`mapstructure:"cors_allow_methods"`
-	CorsAllowHeaders []string					`mapstructure:"cors_allow_headers"`
-	CorsAllowCredentials bool					`mapstructure:"cors_allow_credentials"`
-	CorsAllowWildCard bool						`mapstructure:"cors_allow_wild_card"`
-	CorsAllowBrowserExtensions bool				`mapstructure:"cors_allow_browser_extensions"`
-	CorsAllowWebSockets bool					`mapstructure:"cors_allow_web_sockets"`
-	CorsAllowFiles bool							`mapstructure:"cors_allow_files"`
-	CorsMaxAgeMinutes uint						`mapstructure:"cors_max_age_minutes"`
+	RouteGroupName             string   `mapstructure:"route_group_name"`
+	JwtAuthSecured             bool     `mapstructure:"jwt_auth_secured"`
+	MaxConcurrentRequestLimit  uint     `mapstructure:"max_concurrent_request_limit"`
+	PerClientIpQps             uint     `mapstructure:"per_client_ip_qps"`
+	PerClientIpBurst           uint     `mapstructure:"per_client_ip_burst"`
+	PerClientIpTtlMinutes      uint     `mapstructure:"per_client_ip_ttl_minutes"`
+	GzipCompressionType        string   `mapstructure:"gzip_compression_type"`
+	GzipExcludeExtensions      []string `mapstructure:"gzip_exclude_extensions"`
+	GzipExcludePaths           []string `mapstructure:"gzip_exclude_paths"`
+	GzipExcludePathsRegex      []string `mapstructure:"gzip_exclude_paths_regex"`
+	CorsAllowAllOrigins        bool     `mapstructure:"cors_allow_all_origins"`
+	CorsAllowOrigins           []string `mapstructure:"cors_allow_origins"`
+	CorsAllowMethods           []string `mapstructure:"cors_allow_methods"`
+	CorsAllowHeaders           []string `mapstructure:"cors_allow_headers"`
+	CorsAllowCredentials       bool     `mapstructure:"cors_allow_credentials"`
+	CorsAllowWildCard          bool     `mapstructure:"cors_allow_wild_card"`
+	CorsAllowBrowserExtensions bool     `mapstructure:"cors_allow_browser_extensions"`
+	CorsAllowWebSockets        bool     `mapstructure:"cors_allow_web_sockets"`
+	CorsAllowFiles             bool     `mapstructure:"cors_allow_files"`
+	CorsMaxAgeMinutes          uint     `mapstructure:"cors_max_age_minutes"`
 }
 
 func (c *config) SetWebServerName(s string) {
@@ -391,7 +391,7 @@ func (c *config) SetJwtSecureCookie(b bool) {
 }
 
 func (c *config) SetJwtCookieHttpOnly(b bool) {
-	if c._v !=  nil {
+	if c._v != nil {
 		c._v.Set("jwt_auth.jwt_cookie_http_only", b)
 		c.JwtAuth.CookieHttpOnly = b
 	}
@@ -516,89 +516,89 @@ func (c *config) Read() error {
 	}
 
 	c._v = &data.ViperConf{
-		AppName: c.AppName,
-		ConfigName: c.ConfigFileName,
+		AppName:          c.AppName,
+		ConfigName:       c.ConfigFileName,
 		CustomConfigPath: c.CustomConfigPath,
 
-		UseYAML: true,
+		UseYAML:            true,
 		UseAutomaticEnvVar: false,
 	}
 
-	c._v.Default("web_server.ws_name", "webserver").Default(					// required, web server descriptive name
-	"web_server.ws_debug", false).Default(									// optional, true or false, indicates if web server running in debug mode, default = false
-	"web_server.ws_port", 8080).Default(										// required, web server tcp port, default = 8080
-	"web_server.ws_server_pem", "").Default(									// optional, web server tls server certificate pem file path, default = blank
-	"web_server.ws_server_key", "").Default(									// optional, web server tls server certificate key file path, default = blank
-	"web_server.google_recaptcha_secret", "").Default(						// optional, google recaptcha v2 secret assigned by google services
-	"web_server.ws_trace_use_xray", false).Default(							// optional, enable xray tracing, default false
-	"web_server.ws_logging_use_sqs", false).Default(							// optional, enable cloud logging, default false
-	"web_server.ws_host_use_route53", false).Default(							// optional, enable route53 dns for host url, where host ip auto maintained by route53 api integration (if host using tls, use dns instead of ip for webhook callback)
-	"web_server.ws_route53_hosted_zone_id", "").Default(						// optional, if using route53 for host url, configure route53 hosted zone id (pre-created in aws route53)
-	"web_server.ws_route53_domain_suffix", "").Default(						// optional, if using route53 for host url, configure route53 domain suffix such as example.com (must match domain pre-configured in aws route53)
-	"web_server.ws_route53_ttl", 60).Default(									// optional, if using route53 for host url, configure route53 ttl seconds, default = 60
-	"web_server.rest_target_ca_cert_files", "")								// optional, self-signed ca certs file path, separated by comma if multiple ca pems,
-																						// 			 used by rest get/post/put/delete against target server hosts that use self-signed certs for tls,
-																						//			 to avoid bad certificate error during tls handshake
+	c._v.Default("web_server.ws_name", "webserver").Default( // required, web server descriptive name
+		"web_server.ws_debug", false).Default( // optional, true or false, indicates if web server running in debug mode, default = false
+		"web_server.ws_port", 8080).Default( // required, web server tcp port, default = 8080
+		"web_server.ws_server_pem", "").Default( // optional, web server tls server certificate pem file path, default = blank
+		"web_server.ws_server_key", "").Default( // optional, web server tls server certificate key file path, default = blank
+		"web_server.google_recaptcha_secret", "").Default( // optional, google recaptcha v2 secret assigned by google services
+		"web_server.ws_trace_use_xray", false).Default( // optional, enable xray tracing, default false
+		"web_server.ws_logging_use_sqs", false).Default( // optional, enable cloud logging, default false
+		"web_server.ws_host_use_route53", false).Default( // optional, enable route53 dns for host url, where host ip auto maintained by route53 api integration (if host using tls, use dns instead of ip for webhook callback)
+		"web_server.ws_route53_hosted_zone_id", "").Default( // optional, if using route53 for host url, configure route53 hosted zone id (pre-created in aws route53)
+		"web_server.ws_route53_domain_suffix", "").Default( // optional, if using route53 for host url, configure route53 domain suffix such as example.com (must match domain pre-configured in aws route53)
+		"web_server.ws_route53_ttl", 60).Default( // optional, if using route53 for host url, configure route53 ttl seconds, default = 60
+		"web_server.rest_target_ca_cert_files", "") // optional, self-signed ca certs file path, separated by comma if multiple ca pems,
+	// 			 used by rest get/post/put/delete against target server hosts that use self-signed certs for tls,
+	//			 to avoid bad certificate error during tls handshake
 
-	c._v.Default("recovery.custom_recovery", false)							// optional, true or false, indicates if web server uses custom recovery logic, default = false
+	c._v.Default("recovery.custom_recovery", false) // optional, true or false, indicates if web server uses custom recovery logic, default = false
 
-	c._v.Default("logging.custom_logging", false).Default(					// optional, true or false, indicates if web server uses custom logging logic, default = false
-	"logging.custom_logging_to_console", false).Default(						// optional, true or false, indicates if custom logging is used, if the logging is to console rather than disk, default = false
-	"logging.sqs_logger_queue_name_prefix", "").Default(						// sqs queue name prefix used for service logging data queuing, if name is not provided, default = service-logger-data-
-	"logging.sqs_logger_message_retention_seconds", 14400).Default(			// sqs service logger queue's messages retention seconds, default = 14,400 seconds (4 Hours)
-	"logging.sqs_logger_queue_url", "").Default(								// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service logger data queue used by this service (auto set by service upon creation)
-	"logging.sqs_logger_queue_arn", "")										// sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service logger data queue used by this service (auto set by service upon creation)
+	c._v.Default("logging.custom_logging", false).Default( // optional, true or false, indicates if web server uses custom logging logic, default = false
+		"logging.custom_logging_to_console", false).Default( // optional, true or false, indicates if custom logging is used, if the logging is to console rather than disk, default = false
+		"logging.sqs_logger_queue_name_prefix", "").Default( // sqs queue name prefix used for service logging data queuing, if name is not provided, default = service-logger-data-
+		"logging.sqs_logger_message_retention_seconds", 14400).Default( // sqs service logger queue's messages retention seconds, default = 14,400 seconds (4 Hours)
+		"logging.sqs_logger_queue_url", "").Default( // sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service logger data queue used by this service (auto set by service upon creation)
+		"logging.sqs_logger_queue_arn", "") // sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service logger data queue used by this service (auto set by service upon creation)
 
-	c._v.Default("session.session_secret", "").Default(						// optional, session management secret key, default = blank (blank = session not used)
-	"session.session_names", []string{}).Default(									// optional, list of session names, default = blank list
-	"session.redis_host", "").Default(										// optional, redis host and port used for session, default = blank
-	"session.redis_max_idle_connections", 10)									// optional, session redis host max idle connections, default = 10
+	c._v.Default("session.session_secret", "").Default( // optional, session management secret key, default = blank (blank = session not used)
+		"session.session_names", []string{}).Default( // optional, list of session names, default = blank list
+		"session.redis_host", "").Default( // optional, redis host and port used for session, default = blank
+		"session.redis_max_idle_connections", 10) // optional, session redis host max idle connections, default = 10
 
-	c._v.Default("csrf.csrf_secret", "")										// optional, csrf secret key, default = blank (blank = csrf not used)
+	c._v.Default("csrf.csrf_secret", "") // optional, csrf secret key, default = blank (blank = csrf not used)
 
-	c._v.Default("jwt_auth.jwt_realm", "").Default(							// optional, jwt auth realm name, default = blank (blank = jwt auth not used)
-	"jwt_auth.jwt_identity_key", "id").Default(								// optional, jwt auth identity key name, default = id
-	"jwt_auth.jwt_sign_secret", "").Default(									// optional, jwt auth signing key secret, default = blank
-	"jwt_auth.jwt_sign_algorithm", "H256").Default(							// optional, jwt auth signing algorithm, values: (HS256, HS384, HS512, RS256, RS384 or RS512) default = H256
-	"jwt_auth.jwt_private_key", "").Default(									// optional, jwt auth aes private key file path, default = blank
-	"jwt_auth.jwt_public_key", "").Default(									// optional, jwt auth aes public key file path, default = blank
-	"jwt_auth.jwt_login_data_binding", "json").Default(						// optional, jwt auth login authentication data binding type, values: (json, xml, yaml, proto, header, query, uri, unknown) default = json
-	"jwt_auth.jwt_token_valid_minutes", 15).Default(							// optional, jwt auth token valid minutes, default = 15
-	"jwt_auth.jwt_refresh_valid_minutes", 1440).Default(						// optional, jwt auth token refresh valid minutes, default = 1440 (24 hours)
-	"jwt_auth.jwt_send_cookie", false).Default(								// optional, jwt auth send cookie, default = false
-	"jwt_auth.jwt_secure_cookie", true).Default(								// optional, jwt auth use secured cookie, default = true
-	"jwt_auth.jwt_cookie_http_only", true).Default( 							// optional, jwt auth cookie server side http only, prevents edit at client, default = true
-	"jwt_auth.jwt_cookie_max_age_days", 14).Default(							// optional, jwt auth cookie maximum age in days, default = 14 days
-	"jwt_auth.jwt_cookie_domain", "").Default(								// optional, jwt auth cookie domain name, default = blank
-	"jwt_auth.jwt_cookie_name", "").Default(									// optional, jwt auth cookie name, default = blank
-	"jwt_auth.jwt_cookie_same_site", "default").Default(						// optional, jwt auth cookie same site type, values: (default, lax, strict, none) default = default
-	"jwt_auth.jwt_login_route_path", "/login").Default(						// optional, jwt auth login route path, default = /login
-	"jwt_auth.jwt_logout_route_path", "/logout").Default(						// optional, jwt auth logout route path, default = /logout
-	"jwt_auth.jwt_refresh_token_route_path", "/refreshtoken").Default(		// optional, jwt auth refresh token route path, default = /refreshtoken
-	"jwt_auth.jwt_token_lookup", "header:Authorization")						// optional, token lookup is a string in the form of <source>:<name> that is used to extract token from the request,
-																						//    - default = "header:Authorization",
-																						//    - other values:
-																						//         - "header:<name>", "query:<name>", "cookie:<name>", "param:<name>"
-																						//    - other examples:
-																						//         - "header: Authorization, query: token, cookie: jwt"
-																						//         - "query:token"
-																						//         - "cookie:token
-	c._v.Default("jwt_auth.jwt_token_head_name", "Bearer").Default(			// optional, token head name is a string in the header, default = Bearer
-	"jwt_auth.jwt_disable_abort", false).Default(								// optional, true or false, disables abort() of context, default = false
-	"jwt_auth.jwt_send_authorization", false)									// optional, true or false, allow return authorization header for every request, default = false
+	c._v.Default("jwt_auth.jwt_realm", "").Default( // optional, jwt auth realm name, default = blank (blank = jwt auth not used)
+		"jwt_auth.jwt_identity_key", "id").Default( // optional, jwt auth identity key name, default = id
+		"jwt_auth.jwt_sign_secret", "").Default( // optional, jwt auth signing key secret, default = blank
+		"jwt_auth.jwt_sign_algorithm", "H256").Default( // optional, jwt auth signing algorithm, values: (HS256, HS384, HS512, RS256, RS384 or RS512) default = H256
+		"jwt_auth.jwt_private_key", "").Default( // optional, jwt auth aes private key file path, default = blank
+		"jwt_auth.jwt_public_key", "").Default( // optional, jwt auth aes public key file path, default = blank
+		"jwt_auth.jwt_login_data_binding", "json").Default( // optional, jwt auth login authentication data binding type, values: (json, xml, yaml, proto, header, query, uri, unknown) default = json
+		"jwt_auth.jwt_token_valid_minutes", 15).Default( // optional, jwt auth token valid minutes, default = 15
+		"jwt_auth.jwt_refresh_valid_minutes", 1440).Default( // optional, jwt auth token refresh valid minutes, default = 1440 (24 hours)
+		"jwt_auth.jwt_send_cookie", false).Default( // optional, jwt auth send cookie, default = false
+		"jwt_auth.jwt_secure_cookie", true).Default( // optional, jwt auth use secured cookie, default = true
+		"jwt_auth.jwt_cookie_http_only", true).Default( // optional, jwt auth cookie server side http only, prevents edit at client, default = true
+		"jwt_auth.jwt_cookie_max_age_days", 14).Default( // optional, jwt auth cookie maximum age in days, default = 14 days
+		"jwt_auth.jwt_cookie_domain", "").Default( // optional, jwt auth cookie domain name, default = blank
+		"jwt_auth.jwt_cookie_name", "").Default( // optional, jwt auth cookie name, default = blank
+		"jwt_auth.jwt_cookie_same_site", "default").Default( // optional, jwt auth cookie same site type, values: (default, lax, strict, none) default = default
+		"jwt_auth.jwt_login_route_path", "/login").Default( // optional, jwt auth login route path, default = /login
+		"jwt_auth.jwt_logout_route_path", "/logout").Default( // optional, jwt auth logout route path, default = /logout
+		"jwt_auth.jwt_refresh_token_route_path", "/refreshtoken").Default( // optional, jwt auth refresh token route path, default = /refreshtoken
+		"jwt_auth.jwt_token_lookup", "header:Authorization") // optional, token lookup is a string in the form of <source>:<name> that is used to extract token from the request,
+	//    - default = "header:Authorization",
+	//    - other values:
+	//         - "header:<name>", "query:<name>", "cookie:<name>", "param:<name>"
+	//    - other examples:
+	//         - "header: Authorization, query: token, cookie: jwt"
+	//         - "query:token"
+	//         - "cookie:token
+	c._v.Default("jwt_auth.jwt_token_head_name", "Bearer").Default( // optional, token head name is a string in the header, default = Bearer
+		"jwt_auth.jwt_disable_abort", false).Default( // optional, true or false, disables abort() of context, default = false
+		"jwt_auth.jwt_send_authorization", false) // optional, true or false, allow return authorization header for every request, default = false
 
-	c._v.Default("html_templates.template_base_dir", "").Default(				// optional, html templates base directory, default = blank
-	"html_templates.template_definitions", []templateDefinition{})					// optional, html templates definitions list, default = empty list
+	c._v.Default("html_templates.template_base_dir", "").Default( // optional, html templates base directory, default = blank
+		"html_templates.template_definitions", []templateDefinition{}) // optional, html templates definitions list, default = empty list
 
-	c._v.Default("routes", []routeDefinition{})										// optional, web server routes level middleware configurations, default = empty list
-																						// - route_group_name: base = web server root folder; other values = web server route group name
-																						// - max_concurrent_request_limit: max hit rate limit, 0 = turn off
-																						// - per_client_ip_qps: per client ip qps rate limit, 0 = turn off
-																						// - gzip_compression_type: gzip compression services, values: (default, best-speed, best-compression) blank = turn off
-																						// - cors_allow_all_origins: cors protection services, true = turn off
-																						// - cors_allow_origins: list of cors origins allowed
-																						// - cors_allow_methods: list of cors methods allowed
-																						// - cors_allow_headers: list of cors headers allowed
+	c._v.Default("routes", []routeDefinition{}) // optional, web server routes level middleware configurations, default = empty list
+	// - route_group_name: base = web server root folder; other values = web server route group name
+	// - max_concurrent_request_limit: max hit rate limit, 0 = turn off
+	// - per_client_ip_qps: per client ip qps rate limit, 0 = turn off
+	// - gzip_compression_type: gzip compression services, values: (default, best-speed, best-compression) blank = turn off
+	// - cors_allow_all_origins: cors protection services, true = turn off
+	// - cors_allow_origins: list of cors origins allowed
+	// - cors_allow_methods: list of cors methods allowed
+	// - cors_allow_headers: list of cors headers allowed
 
 	if ok, err := c._v.Init(); err != nil {
 		return err

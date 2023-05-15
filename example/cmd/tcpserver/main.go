@@ -1,7 +1,7 @@
 package main
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,9 +38,9 @@ func main() {
 		ClientReceiveHandler: func(clientIP string, data []byte, writeToClientFunc func(writeData []byte, clientIP string) error) {
 			log.Println("ClientReceiveHandler: ", clientIP, string(data))
 
-			time.Sleep(5*time.Second)
+			time.Sleep(5 * time.Second)
 
-			if e := writeToClientFunc([]byte("TCP ACK Data Received: " + string(data)), clientIP); e != nil {
+			if e := writeToClientFunc([]byte("TCP ACK Data Received: "+string(data)), clientIP); e != nil {
 				log.Println("TCP Server Send Data to ClientIP Failed: ", clientIP, e)
 			} else {
 				log.Println("TCP Server Send Data to ClientIP OK: ", clientIP)
@@ -49,10 +49,10 @@ func main() {
 		ClientErrorHandler: func(clientIP string, err error) {
 			log.Println("ClientErrorHandler: ", clientIP, err)
 		},
-		ReadBufferSize: 1024,
+		ReadBufferSize:        1024,
 		ListenerYieldDuration: 25 * time.Millisecond,
-		ReaderYieldDuration: 25 * time.Millisecond,
-		ReadDeadlineDuration: 0, //1000 * time.Millisecond,
+		ReaderYieldDuration:   25 * time.Millisecond,
+		ReadDeadlineDuration:  0, //1000 * time.Millisecond,
 		WriteDeadLineDuration: 1000 * time.Millisecond,
 	}
 

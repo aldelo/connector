@@ -1,7 +1,7 @@
 package service
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -87,13 +87,15 @@ type healthreport struct {
 // RegisterServiceHandlers = (required) func to register grpc service handlers
 //
 // When calling RPC services, To pass in parent xray segment id and trace id, set the metadata keys with:
-//		x-amzn-seg-id = parent xray segment id, assign value to this key via metadata.MD
-//		x-amzn-tr-id = parent xray trace id, assign value to this key via metadata.MD
+//
+//	x-amzn-seg-id = parent xray segment id, assign value to this key via metadata.MD
+//	x-amzn-tr-id = parent xray trace id, assign value to this key via metadata.MD
 //
 // How to set metadata at client side?
-//		ctx := context.Background()
-//		md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
-//		ctx = metadata.NewOutgoingContext(ctx, md)
+//
+//	ctx := context.Background()
+//	md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
+//	ctx = metadata.NewOutgoingContext(ctx, md)
 type Service struct {
 	// service properties
 	AppName          string
@@ -1691,19 +1693,19 @@ func (s *Service) LocalAddress() string {
 
 // note: WebServerLocalAddress = read only getter
 //
-// note: WebServerRoutes = map[string]*ginw.RouteDefinition{
-//		"base": {
-//			Routes: []*ginw.Route{
-//				{
-//					Method: ginhttpmethod.GET,
-//					RelativePath: "/",
-//					Handler: func(c *gin.Context, bindingInputPtr interface{}) {
-//						c.String(200, "Connector Service Http Host Up")
+//	note: WebServerRoutes = map[string]*ginw.RouteDefinition{
+//			"base": {
+//				Routes: []*ginw.Route{
+//					{
+//						Method: ginhttpmethod.GET,
+//						RelativePath: "/",
+//						Handler: func(c *gin.Context, bindingInputPtr interface{}) {
+//							c.String(200, "Connector Service Http Host Up")
+//						},
 //					},
 //				},
 //			},
-//		},
-//	}
+//		}
 type WebServerConfig struct {
 	AppName          string
 	ConfigFileName   string

@@ -1,7 +1,7 @@
 package circuitbreaker
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,9 +28,9 @@ type CircuitBreakerIFace interface {
 	// fallbackFn = function to be executed if runFn fails
 	// dataIn = input parameter value for runFn and fallbackFn
 	Exec(async bool,
-		 runFn func(dataIn interface{}, ctx ...context.Context) (dataOut interface{}, err error),
-	     fallbackFn func(dataIn interface{}, errIn error, ctx ...context.Context) (dataOut interface{}, err error),
-	     dataIn interface{}) (interface{}, error)
+		runFn func(dataIn interface{}, ctx ...context.Context) (dataOut interface{}, err error),
+		fallbackFn func(dataIn interface{}, errIn error, ctx ...context.Context) (dataOut interface{}, err error),
+		dataIn interface{}) (interface{}, error)
 
 	// ExecWithContext offers both async and sync execution of circuit breaker action with context
 	//
@@ -38,10 +38,10 @@ type CircuitBreakerIFace interface {
 	// fallbackFn = function to be executed if runFn fails
 	// dataIn = input parameter value for runFn and fallbackFn
 	ExecWithContext(async bool,
-		            ctx context.Context,
-					runFn func(dataIn interface{}, ctx ...context.Context) (dataOut interface{}, err error),
-					fallbackFn func(dataIn interface{}, errIn error, ctx ...context.Context) (dataOut interface{}, err error),
-					dataIn interface{}) (interface{}, error)
+		ctx context.Context,
+		runFn func(dataIn interface{}, ctx ...context.Context) (dataOut interface{}, err error),
+		fallbackFn func(dataIn interface{}, errIn error, ctx ...context.Context) (dataOut interface{}, err error),
+		dataIn interface{}) (interface{}, error)
 
 	// Reset will cause circuit breaker to reset all circuits from memory
 	Reset()
@@ -54,11 +54,11 @@ type CircuitBreakerIFace interface {
 	//		5) ErrorPercentThreshold = (optional) causes circuits to open once the rolling measure of errors exceeds this percent of requests, default = 50
 	//		6) Logger = (optional) indicates the logger that will be used in the package, nil = logs nothing
 	Update(timeout int,
-		   maxConcurrentRequests int,
-		   requestVolumeThreshold int,
-		   sleepWindow int,
-		   errorPercentThreshold int,
-		   logger *data.ZapLog) error
+		maxConcurrentRequests int,
+		requestVolumeThreshold int,
+		sleepWindow int,
+		errorPercentThreshold int,
+		logger *data.ZapLog) error
 
 	// Disable will disable circuit breaker services
 	// true = disable; false = re-engage circuit breaker service

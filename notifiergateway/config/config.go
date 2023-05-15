@@ -1,7 +1,7 @@
 package config
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,32 +23,32 @@ import (
 )
 
 type Config struct {
-	AppName string								`mapstructure:"-"`
-	ConfigFileName string						`mapstructure:"-"`
-	CustomConfigPath string						`mapstructure:"-"`
+	AppName          string `mapstructure:"-"`
+	ConfigFileName   string `mapstructure:"-"`
+	CustomConfigPath string `mapstructure:"-"`
 
-	_v *data.ViperConf							`mapstructure:"-"`
+	_v *data.ViperConf `mapstructure:"-"`
 
-	NotifierGatewayData *notifierGatewayData	`mapstructure:"notifier_gateway"`
+	NotifierGatewayData *notifierGatewayData `mapstructure:"notifier_gateway"`
 }
 
 type notifierGatewayData struct {
-	DynamoDBAwsRegion string					`mapstructure:"dynamodb_aws_region"`
-	DynamoDBUseDax bool							`mapstructure:"dynamodb_use_dax"`
-	DynamoDBDaxUrl string						`mapstructure:"dynamodb_dax_url"`
-	DynamoDBTable string						`mapstructure:"dynamodb_table"`
-	DynamoDBTimeoutSeconds uint					`mapstructure:"dynamodb_timeout_seconds"`
-	DynamoDBActionRetries uint					`mapstructure:"dynamodb_action_retries"`
-	GatewayKey string							`mapstructure:"gateway_key"`
-	ServiceDiscoveryTimeoutSeconds uint			`mapstructure:"service_discovery_timeout_seconds"`
-	HealthReportCleanUpFrequencySeconds uint	`mapstructure:"health_report_cleanup_frequency_seconds"`
-	HealthReportRecordStaleMinutes uint			`mapstructure:"health_report_record_stale_minutes"`
-	HashKeys []hashKeyData						`mapstructure:"hash_keys"`
+	DynamoDBAwsRegion                   string        `mapstructure:"dynamodb_aws_region"`
+	DynamoDBUseDax                      bool          `mapstructure:"dynamodb_use_dax"`
+	DynamoDBDaxUrl                      string        `mapstructure:"dynamodb_dax_url"`
+	DynamoDBTable                       string        `mapstructure:"dynamodb_table"`
+	DynamoDBTimeoutSeconds              uint          `mapstructure:"dynamodb_timeout_seconds"`
+	DynamoDBActionRetries               uint          `mapstructure:"dynamodb_action_retries"`
+	GatewayKey                          string        `mapstructure:"gateway_key"`
+	ServiceDiscoveryTimeoutSeconds      uint          `mapstructure:"service_discovery_timeout_seconds"`
+	HealthReportCleanUpFrequencySeconds uint          `mapstructure:"health_report_cleanup_frequency_seconds"`
+	HealthReportRecordStaleMinutes      uint          `mapstructure:"health_report_record_stale_minutes"`
+	HashKeys                            []hashKeyData `mapstructure:"hash_keys"`
 }
 
 type hashKeyData struct {
-	HashKeyName string							`mapstructure:"hash_key_name"`
-	HashKeySecret string						`mapstructure:"hash_key_secret"`
+	HashKeyName   string `mapstructure:"hash_key_name"`
+	HashKeySecret string `mapstructure:"hash_key_secret"`
 }
 
 func (c *Config) SetDynamoDBAwsRegion(s string) {
@@ -142,22 +142,22 @@ func (c *Config) Read() error {
 	}
 
 	c._v = &data.ViperConf{
-		AppName: c.AppName,
-		ConfigName: c.ConfigFileName,
+		AppName:          c.AppName,
+		ConfigName:       c.ConfigFileName,
 		CustomConfigPath: c.CustomConfigPath,
 
-		UseYAML: true,
+		UseYAML:            true,
 		UseAutomaticEnvVar: false,
 	}
 
-	c._v.Default("notifier_gateway.dynamodb_aws_region", "").Default(		// required, valid aws region such as us-east-1
-		"notifier_gateway.dynamodb_use_dax", false).Default(				// optional, true = uses dax
-		"notifier_gateway.dynamodb_dax_url", "").Default(					// conditional, required if use dax = true
-		"notifier_gateway.dynamodb_table", "").Default(					// required, dynamodb table name
-		"notifier_gateway.dynamodb_timeout_seconds", 5).Default(			// optional, dynamodb action timeout seconds
-		"notifier_gateway.dynamodb_action_retries", 3).Default(			// optional, dynamodb actions retry count
-		"notifier_gateway.gateway_key", "").Default(						// optional, gateway key is used to validate inbound request when such request is to be validated
-		"notifier_gateway.service_discovery_timeout_seconds", 5)			// optional, service discovery actions timeout seconds, defaults to 5 seconds
+	c._v.Default("notifier_gateway.dynamodb_aws_region", "").Default( // required, valid aws region such as us-east-1
+		"notifier_gateway.dynamodb_use_dax", false).Default( // optional, true = uses dax
+		"notifier_gateway.dynamodb_dax_url", "").Default( // conditional, required if use dax = true
+		"notifier_gateway.dynamodb_table", "").Default( // required, dynamodb table name
+		"notifier_gateway.dynamodb_timeout_seconds", 5).Default( // optional, dynamodb action timeout seconds
+		"notifier_gateway.dynamodb_action_retries", 3).Default( // optional, dynamodb actions retry count
+		"notifier_gateway.gateway_key", "").Default( // optional, gateway key is used to validate inbound request when such request is to be validated
+		"notifier_gateway.service_discovery_timeout_seconds", 5) // optional, service discovery actions timeout seconds, defaults to 5 seconds
 
 	// optional, health report service record clean up frequency seconds, default is 120, minmimum is 30, maximum is 3600 (1 hour), 0 = 120
 	c._v.Default("notifier_gateway.health_report_cleanup_frequency_seconds", 120)

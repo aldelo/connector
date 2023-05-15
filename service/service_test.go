@@ -1,7 +1,7 @@
 package service
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -78,7 +78,6 @@ func TestService_Serve(t *testing.T) {
 		func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
 			log.Println("In - Unary Server Interceptor: " + info.FullMethod)
 
-
 			return handler(ctx, req)
 		},
 	}
@@ -104,7 +103,7 @@ func TestService_Serve(t *testing.T) {
 
 func TestConfig(t *testing.T) {
 	cfg := &config{
-		AppName: "test-connector-service",
+		AppName:        "test-connector-service",
 		ConfigFileName: "newtest",
 	}
 
@@ -121,7 +120,7 @@ func TestConfig(t *testing.T) {
 
 func TestCloudMap(t *testing.T) {
 	cfg := &config{
-		AppName: "test-connector-service",
+		AppName:        "test-connector-service",
 		ConfigFileName: "service",
 	}
 
@@ -139,7 +138,7 @@ func TestCloudMap(t *testing.T) {
 	uuid := util.NewUUID()
 	log.Println("UUID = " + uuid)
 
-	opID, e := sd.RegisterInstance(cfg.Service.Id, "test-" + uuid, uuid, map[string]string{
+	opID, e := sd.RegisterInstance(cfg.Service.Id, "test-"+uuid, uuid, map[string]string{
 		"AWS_INSTANCE_IPV4": "192.168.1.13",
 		"AWS_INSTANCE_PORT": "9999",
 	})
@@ -147,7 +146,7 @@ func TestCloudMap(t *testing.T) {
 	if e != nil {
 		log.Fatal(e)
 	} else {
-		time.Sleep(3*time.Second)
+		time.Sleep(3 * time.Second)
 	}
 
 	op, e2 := sd.GetOperation(opID)
@@ -176,7 +175,6 @@ func TestCloudMap(t *testing.T) {
 		log.Println("IP Found = " + *ip + ":" + *port)
 	}
 
-
 }
 
 func TestDNSLookup(t *testing.T) {
@@ -197,7 +195,7 @@ func TestGinServer(t *testing.T) {
 	g := ginw.NewServer("Example", 8080, true, false, nil)
 
 	g.SessionMiddleware = &ginw.SessionConfig{
-		SecretKey: "Secret",
+		SecretKey:    "Secret",
 		SessionNames: []string{"MySession"},
 	}
 
@@ -206,33 +204,33 @@ func TestGinServer(t *testing.T) {
 	}
 
 	/*
-	g.Routes = map[string]*ginw.RouteDefinition{
-		"base": {
-			{
-				Routes: []*ginw.Route{
-					{
-						RelativePath: "/hello",
-						Method: ginhttpmethod.GET,
-						Binding: ginbindtype.UNKNOWN,
-						Handler: func(c *gin.Context, bindingInput interface{}) {
-							c.String(200, "What's up")
+		g.Routes = map[string]*ginw.RouteDefinition{
+			"base": {
+				{
+					Routes: []*ginw.Route{
+						{
+							RelativePath: "/hello",
+							Method: ginhttpmethod.GET,
+							Binding: ginbindtype.UNKNOWN,
+							Handler: func(c *gin.Context, bindingInput interface{}) {
+								c.String(200, "What's up")
+							},
 						},
 					},
-				},
-				MaxLimitMiddleware: util.IntPtr(10),
-				PerClientQpsMiddleware: &ginw.PerClientQps{
-					Qps: 100,
-					Burst: 100,
-					TTL: time.Hour,
-				},
-				GZipMiddleware: &ginw.GZipConfig{
-					Compression: gingzipcompression.BestCompression,
+					MaxLimitMiddleware: util.IntPtr(10),
+					PerClientQpsMiddleware: &ginw.PerClientQps{
+						Qps: 100,
+						Burst: 100,
+						TTL: time.Hour,
+					},
+					GZipMiddleware: &ginw.GZipConfig{
+						Compression: gingzipcompression.BestCompression,
+					},
 				},
 			},
-		},
-	}
+		}
 
-	 */
+	*/
 
 	if err := g.RunServer(); err != nil {
 		log.Println("Error: " + err.Error())
@@ -243,12 +241,12 @@ func TestGinServer(t *testing.T) {
 	}
 }
 
-type Dummy struct{
+type Dummy struct {
 	FirstName string
-	LastName string
+	LastName  string
 }
 
-func TestSliceDeleteFunc(t *testing.T){
+func TestSliceDeleteFunc(t *testing.T) {
 	slice := []*Dummy{
 		{FirstName: "John", LastName: "Smith"},
 		{FirstName: "Mike", LastName: "Smith"},
@@ -259,7 +257,7 @@ func TestSliceDeleteFunc(t *testing.T){
 
 	newSlice := resultSlice.([]*Dummy)
 
-	for _, v := range newSlice{
+	for _, v := range newSlice {
 		t.Log(v)
 	}
 }

@@ -1,7 +1,7 @@
 package main
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,11 +27,11 @@ var ng *webserver.WebServer
 
 func main() {
 	svc := &systemd.ServiceProgram{
-		ServiceName: "NotifierGateway",
-		DisplayName: "Notifier Gateway",
-		Description: "Provides Http(s) Endpoint for SNS Notification Callbacks",
+		ServiceName:         "NotifierGateway",
+		DisplayName:         "Notifier Gateway",
+		Description:         "Provides Http(s) Endpoint for SNS Notification Callbacks",
 		StartServiceHandler: startServiceHandler,
-		StopServiceHandler: nil,
+		StopServiceHandler:  nil,
 	}
 
 	svc.Launch()
@@ -54,5 +54,5 @@ func startServiceHandler(port int) {
 	}
 
 	log.Println(">>> Stopping Health Clean Up Service <<<")
-	stopHealthCleanUp <-true
+	stopHealthCleanUp <- true
 }

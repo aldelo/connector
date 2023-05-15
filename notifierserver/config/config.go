@@ -1,7 +1,7 @@
 package config
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,35 +24,35 @@ import (
 )
 
 type Config struct {
-	AppName string								`mapstructure:"-"`
-	ConfigFileName string						`mapstructure:"-"`
-	CustomConfigPath string						`mapstructure:"-"`
+	AppName          string `mapstructure:"-"`
+	ConfigFileName   string `mapstructure:"-"`
+	CustomConfigPath string `mapstructure:"-"`
 
-	_v *data.ViperConf							`mapstructure:"-"`
+	_v *data.ViperConf `mapstructure:"-"`
 
-	NotifierServerData *notifierServerData		`mapstructure:"notifier_server"`
-	SubscriptionsData []*subscriptionsData 		`mapstructure:"subscriptions"`
+	NotifierServerData *notifierServerData  `mapstructure:"notifier_server"`
+	SubscriptionsData  []*subscriptionsData `mapstructure:"subscriptions"`
 }
 
 type notifierServerData struct {
-	GatewayUrl string							`mapstructure:"gateway_url"`
-	ServerKey string							`mapstructure:"server_key"`
-	DynamoDBAwsRegion string					`mapstructure:"dynamodb_aws_region"`
-	DynamoDBUseDax bool							`mapstructure:"dynamodb_use_dax"`
-	DynamoDBDaxUrl string						`mapstructure:"dynamodb_dax_url"`
-	DynamoDBTable string						`mapstructure:"dynamodb_table"`
-	DynamoDBTimeoutSeconds uint					`mapstructure:"dynamodb_timeout_seconds"`
-	DynamoDBActionRetries uint					`mapstructure:"dynamodb_action_retries"`
-	SnsAwsRegion string							`mapstructure:"sns_aws_region"`
+	GatewayUrl             string `mapstructure:"gateway_url"`
+	ServerKey              string `mapstructure:"server_key"`
+	DynamoDBAwsRegion      string `mapstructure:"dynamodb_aws_region"`
+	DynamoDBUseDax         bool   `mapstructure:"dynamodb_use_dax"`
+	DynamoDBDaxUrl         string `mapstructure:"dynamodb_dax_url"`
+	DynamoDBTable          string `mapstructure:"dynamodb_table"`
+	DynamoDBTimeoutSeconds uint   `mapstructure:"dynamodb_timeout_seconds"`
+	DynamoDBActionRetries  uint   `mapstructure:"dynamodb_action_retries"`
+	SnsAwsRegion           string `mapstructure:"sns_aws_region"`
 }
 
 type subscriptionsData struct {
-	TopicArn string								`mapstructure:"topic_arn"`
-	SubscriptionArn string						`mapstructure:"subscription_arn"`
+	TopicArn        string `mapstructure:"topic_arn"`
+	SubscriptionArn string `mapstructure:"subscription_arn"`
 }
 
 func (c *Config) GetSubscriptionArn(topicArn string) string {
-	for _, v := range c.SubscriptionsData{
+	for _, v := range c.SubscriptionsData {
 		if strings.ToLower(v.TopicArn) == strings.ToLower(topicArn) {
 			// match
 			return v.SubscriptionArn
@@ -71,7 +71,7 @@ func (c *Config) SetSubscriptionData(topicArn string, subscriptionArn string) {
 
 		found := false
 
-		for _, p := range c.SubscriptionsData{
+		for _, p := range c.SubscriptionsData {
 			if strings.ToLower(p.TopicArn) == strings.ToLower(topicArn) {
 				// match
 				p.SubscriptionArn = subscriptionArn
@@ -82,7 +82,7 @@ func (c *Config) SetSubscriptionData(topicArn string, subscriptionArn string) {
 
 		if !found {
 			c.SubscriptionsData = append(c.SubscriptionsData, &subscriptionsData{
-				TopicArn: topicArn,
+				TopicArn:        topicArn,
 				SubscriptionArn: subscriptionArn,
 			})
 		}
@@ -103,7 +103,7 @@ func (c *Config) RemoveSubscriptionData(topicArn string) {
 			var temp []*subscriptionsData
 			splitIndex := -1
 
-			for i, p := range c.SubscriptionsData{
+			for i, p := range c.SubscriptionsData {
 				if strings.ToLower(p.TopicArn) == strings.ToLower(topicArn) {
 					// match
 					splitIndex = i
@@ -204,25 +204,25 @@ func (c *Config) Read() error {
 	}
 
 	c._v = &data.ViperConf{
-		AppName: c.AppName,
-		ConfigName: c.ConfigFileName,
+		AppName:          c.AppName,
+		ConfigName:       c.ConfigFileName,
 		CustomConfigPath: c.CustomConfigPath,
 
-		UseYAML: true,
+		UseYAML:            true,
 		UseAutomaticEnvVar: false,
 	}
 
-	c._v.Default("notifier_server.gateway_url", "").Default(			// required, notifier gateway url to be called back by sns, must begin with http or https
-	"notifier_server.server_key", "").Default(						// auto-created, notifier server key auto created upon launch
-	"notifier_server.dynamodb_aws_region", "").Default(				// required, valid aws region such as us-east-1
-	"notifier_server.dynamodb_use_dax", false).Default(				// optional, true = uses dax
-	"notifier_server.dynamodb_dax_url", "").Default(					// conditional, required if use dax = true
-	"notifier_server.dynamodb_table", "").Default(					// required, dynamodb table name
-	"notifier_server.dynamodb_timeout_seconds", 5).Default(			// optional, dynamodb action timeout seconds
-	"notifier_server.dynamodb_action_retries", 3).Default(			// optional, dynamodb action retries count
-	"notifier_server.sns_aws_region", "")								// required, valid aws region such as us-east-1
+	c._v.Default("notifier_server.gateway_url", "").Default( // required, notifier gateway url to be called back by sns, must begin with http or https
+		"notifier_server.server_key", "").Default( // auto-created, notifier server key auto created upon launch
+		"notifier_server.dynamodb_aws_region", "").Default( // required, valid aws region such as us-east-1
+		"notifier_server.dynamodb_use_dax", false).Default( // optional, true = uses dax
+		"notifier_server.dynamodb_dax_url", "").Default( // conditional, required if use dax = true
+		"notifier_server.dynamodb_table", "").Default( // required, dynamodb table name
+		"notifier_server.dynamodb_timeout_seconds", 5).Default( // optional, dynamodb action timeout seconds
+		"notifier_server.dynamodb_action_retries", 3).Default( // optional, dynamodb action retries count
+		"notifier_server.sns_aws_region", "") // required, valid aws region such as us-east-1
 
-	c._v.Default("subscriptions", []*subscriptionsData{}) 					// required, slice of subscriptions (topic_arn, subscription_arn)
+	c._v.Default("subscriptions", []*subscriptionsData{}) // required, slice of subscriptions (topic_arn, subscription_arn)
 
 	if ok, err := c._v.Init(); err != nil {
 		return err

@@ -1,7 +1,7 @@
 package main
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ func main() {
 
 	// test tcp client
 	tcpClient := &tcp.TCPClient{
-		ServerIP: "192.168.1.36",
+		ServerIP:   "192.168.1.36",
 		ServerPort: 8080,
 		ReceiveHandler: func(data []byte) {
 			// log.Print("Client ReceiveHandler: ", string(data))
@@ -53,9 +53,9 @@ func main() {
 				os.Exit(0)
 			}
 		},
-		ReadBufferSize: 1024,
-		ReaderYieldDuration: 25 * time.Millisecond,
-		ReadDeadLineDuration: 1000 * time.Millisecond,
+		ReadBufferSize:        1024,
+		ReaderYieldDuration:   25 * time.Millisecond,
+		ReadDeadLineDuration:  1000 * time.Millisecond,
 		WriteDeadLineDuration: 1000 * time.Millisecond,
 	}
 
@@ -70,35 +70,35 @@ func main() {
 			log.Println("Start Reader Error: ", err)
 		} else {
 			/*
-			stopLoop := make(chan bool)
+				stopLoop := make(chan bool)
 
-			go func() {
-				for {
-					select {
-					case <-stopLoop:
-						log.Println("--- LOOP STOPPED ---")
-						tcpClient.StopReader()
-						log.Println("TCP Client Disconnected")
-						return
-					default:
-						if e := tcpClient.Write([]byte("This is a Test " + time.Now().String())); e != nil {
-							log.Println("Write To TCP Server Failed: ", e)
-						} else {
-							log.Println("Wrote to TCP Server OK")
+				go func() {
+					for {
+						select {
+						case <-stopLoop:
+							log.Println("--- LOOP STOPPED ---")
+							tcpClient.StopReader()
+							log.Println("TCP Client Disconnected")
+							return
+						default:
+							if e := tcpClient.Write([]byte("This is a Test " + time.Now().String())); e != nil {
+								log.Println("Write To TCP Server Failed: ", e)
+							} else {
+								log.Println("Wrote to TCP Server OK")
+							}
 						}
+
+						time.Sleep(1000 * time.Millisecond)
 					}
+				}()
 
-					time.Sleep(1000 * time.Millisecond)
-				}
-			}()
+				log.Println("TCP Client Dial OK")
+				log.Println("Press Any Key To Disconnect Client...")
 
-			log.Println("TCP Client Dial OK")
-			log.Println("Press Any Key To Disconnect Client...")
+				_, _ = fmt.Scanln()
 
-			_, _ = fmt.Scanln()
-
-			//stopLoop <- true
-			tcpClient.StopReader()
+				//stopLoop <- true
+				tcpClient.StopReader()
 			*/
 
 			for {

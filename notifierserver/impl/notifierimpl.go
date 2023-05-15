@@ -1,7 +1,7 @@
 package impl
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,15 +37,15 @@ import (
 // define clientEndpoint and clientEndpointMap
 // ---------------------------------------------------------------------------------------------------------------------
 type clientEndpoint struct {
-	ClientId string							// required, typically custom created guid or other unique id value, used during unsubscribe
-	TopicArn string							// required
-	DataToSend chan *pb.NotificationData	// this field will be initialized by clientEndpointMap.Add (No need to init outside)
-	ClientContext context.Context			// this field should be setup by code outside of clientEndpointMap
+	ClientId      string                    // required, typically custom created guid or other unique id value, used during unsubscribe
+	TopicArn      string                    // required
+	DataToSend    chan *pb.NotificationData // this field will be initialized by clientEndpointMap.Add (No need to init outside)
+	ClientContext context.Context           // this field should be setup by code outside of clientEndpointMap
 }
 
 type clientEndpointMap struct {
 	Clients map[string][]*clientEndpoint
-	_mux sync.Mutex
+	_mux    sync.Mutex
 }
 
 func (m *clientEndpointMap) Add(ep *clientEndpoint) bool {
@@ -209,7 +209,7 @@ func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend 
 	}
 
 	if ep := m.GetByClientId(clientId); ep != nil {
-		ep.DataToSend <-dataToSend
+		ep.DataToSend <- dataToSend
 		return true
 	} else {
 		return false
@@ -240,7 +240,7 @@ func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend 
 		for _, ep := range epList {
 			if ep != nil {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - Before <-dataToSend Assign to ep.DataToSend")
-				ep.DataToSend <-dataToSend
+				ep.DataToSend <- dataToSend
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - After <-dataToSend Assign to ep.DataToSend")
 			} else {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - ep Nil")
@@ -303,13 +303,13 @@ func (m *clientEndpointMap) ClientsByTopicCount(topicArn string) int {
 type NotifierImpl struct {
 	pb.UnimplementedNotifierServiceServer
 
-	ConfigData *config.Config
+	ConfigData                *config.Config
 	WebServerLocalAddressFunc func() string
 
 	_clients *clientEndpointMap
 
 	_ddbStore *dynamodb.DynamoDB
-	_sns *sns.SNS
+	_sns      *sns.SNS
 
 	_mux sync.Mutex
 }
@@ -317,8 +317,8 @@ type NotifierImpl struct {
 // ReadConfig will read in config data
 func (n *NotifierImpl) ReadConfig(appName string, configFileName string, customConfigPath string) error {
 	n.ConfigData = &config.Config{
-		AppName: appName,
-		ConfigFileName: configFileName,
+		AppName:          appName,
+		ConfigFileName:   configFileName,
 		CustomConfigPath: customConfigPath,
 	}
 
@@ -384,11 +384,11 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 		topicArnToUnsubscribe = topicArnLimit[0]
 	}
 
-	timeout := 5*time.Second
+	timeout := 5 * time.Second
 
 	if util.LenTrim(topicArnToUnsubscribe) == 0 {
 		// unsubscribe all sns topics tracked in config
-		for _, v := range n.ConfigData.SubscriptionsData{
+		for _, v := range n.ConfigData.SubscriptionsData {
 			if util.LenTrim(v.SubscriptionArn) > 0 {
 				_ = notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout)
 			}
@@ -397,7 +397,7 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 		n.ConfigData.RemoveSubscriptionData("")
 	} else {
 		// unsubscribe specific sns topic
-		for _, v := range n.ConfigData.SubscriptionsData{
+		for _, v := range n.ConfigData.SubscriptionsData {
 			if util.LenTrim(v.SubscriptionArn) > 0 && strings.ToUpper(v.TopicArn) == strings.ToUpper(topicArnToUnsubscribe) {
 				_ = notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout)
 			}
@@ -450,7 +450,7 @@ func (n *NotifierImpl) subscribeToSNSTopic(s *pb.NotificationSubscriber) error {
 			snsp = snsprotocol.Http
 		}
 
-		timeout := time.Duration(5)*time.Second
+		timeout := time.Duration(5) * time.Second
 
 		if subsArn, err := notification.Subscribe(n._sns, s.Topic, snsp, fmt.Sprintf("%s/%s", n.ConfigData.NotifierServerData.GatewayUrl, n.ConfigData.NotifierServerData.ServerKey), timeout); err != nil {
 			// error
@@ -521,8 +521,8 @@ func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.N
 	log.Println("=== Notifier Server RPC Server TopicArn '" + s.Topic + "' To Client ID '" + s.Id + "' Stream Send Loop Begin ===")
 
 	ep := &clientEndpoint{
-		ClientId: s.Id,
-		TopicArn: s.Topic,
+		ClientId:      s.Id,
+		TopicArn:      s.Topic,
 		ClientContext: serverStream.Context(),
 	}
 
@@ -558,7 +558,7 @@ func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.N
 
 		default:
 			// continue looping
-			time.Sleep(100*time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
 
 		if endLoop {
@@ -615,7 +615,7 @@ func (n *NotifierImpl) Unsubscribe(c context.Context, s *pb.NotificationSubscrib
 			// no more active clients in topic
 			removeTopic := false
 
-			for _, v := range n.ConfigData.SubscriptionsData{
+			for _, v := range n.ConfigData.SubscriptionsData {
 				if v != nil && strings.ToLower(v.TopicArn) == strings.ToLower(s.Topic) && util.LenTrim(v.SubscriptionArn) > 0 {
 					if err := notification.Unsubscribe(n._sns, v.SubscriptionArn, 5*time.Second); err != nil {
 						log.Printf("!!! RPC Unsubscribe SNS Topic '%s' Failed: %s !!!\n", s.Topic, err)

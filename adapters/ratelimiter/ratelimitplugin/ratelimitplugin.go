@@ -1,7 +1,7 @@
 package ratelimitplugin
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,10 +31,10 @@ type RateLimitPlugin struct {
 // rateLimitPerSecond = number of actions per second allowed, 0 for no rate limit control
 // initializeWithoutSlack = true: no slack (disallow initial spike consideration)
 func NewRateLimitPlugin(rateLimitPerSecond int,
-						initializeWithoutSlack bool) *RateLimitPlugin {
+	initializeWithoutSlack bool) *RateLimitPlugin {
 	p := &RateLimitPlugin{
 		RateLimit: &ratelimit.RateLimiter{
-			RateLimitPerSecond: rateLimitPerSecond,
+			RateLimitPerSecond:     rateLimitPerSecond,
 			InitializeWithoutSlack: initializeWithoutSlack,
 		},
 	}
@@ -59,4 +59,3 @@ func (p *RateLimitPlugin) Take() time.Time {
 		return time.Time{}
 	}
 }
-

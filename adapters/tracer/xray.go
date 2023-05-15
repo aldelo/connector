@@ -1,7 +1,7 @@
 package tracer
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,13 +27,15 @@ import (
 // TracerUnaryServerInterceptor will perform xray tracing for each unary RPC call
 //
 // to pass in parent xray segment id and trace id, set the metadata keys with:
-//		x-amzn-seg-id = parent xray segment id, assign value to this key via metadata.MD
-//		x-amzn-tr-id = parent xray trace id, assign value to this key via metadata.MD
+//
+//	x-amzn-seg-id = parent xray segment id, assign value to this key via metadata.MD
+//	x-amzn-tr-id = parent xray trace id, assign value to this key via metadata.MD
 //
 // how to set metadata at client side?
-//		ctx := context.Background()
-//		md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
-//		ctx = metadata.NewOutgoingContext(ctx, md)
+//
+//	ctx := context.Background()
+//	md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
+//	ctx = metadata.NewOutgoingContext(ctx, md)
 func TracerUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
 	if xray.XRayServiceOn() {
 		parentSegID := ""
@@ -55,9 +57,9 @@ func TracerUnaryServerInterceptor(ctx context.Context, req interface{}, info *gr
 		var seg *xray.XSegment
 
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcService-UnaryRPC-" + info.FullMethod, &xray.XRayParentSegment{
+			seg = xray.NewSegment("GrpcService-UnaryRPC-"+info.FullMethod, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
-				TraceID: parentTraceID,
+				TraceID:   parentTraceID,
 			})
 		} else {
 			seg = xray.NewSegment("GrpcService-UnaryRPC-" + info.FullMethod)
@@ -89,13 +91,15 @@ func TracerUnaryServerInterceptor(ctx context.Context, req interface{}, info *gr
 // TracerStreamServerInterceptor will perform xray tracing for each stream RPC call
 //
 // to pass in parent xray segment id and trace id, set the metadata keys with:
-//		x-amzn-seg-id = parent xray segment id, assign value to this key via metadata.MD
-//		x-amzn-tr-id = parent xray trace id, assign value to this key via metadata.MD
+//
+//	x-amzn-seg-id = parent xray segment id, assign value to this key via metadata.MD
+//	x-amzn-tr-id = parent xray trace id, assign value to this key via metadata.MD
 //
 // how to set metadata at client side?
-//		ctx := context.Background()
-//		md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
-//		ctx = metadata.NewOutgoingContext(ctx, md)
+//
+//	ctx := context.Background()
+//	md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
+//	ctx = metadata.NewOutgoingContext(ctx, md)
 func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 	if xray.XRayServiceOn() {
 		parentSegID := ""
@@ -125,9 +129,9 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		var seg *xray.XSegment
 
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcService-" + streamType + "-" + info.FullMethod, &xray.XRayParentSegment{
+			seg = xray.NewSegment("GrpcService-"+streamType+"-"+info.FullMethod, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
-				TraceID: parentTraceID,
+				TraceID:   parentTraceID,
 			})
 		} else {
 			seg = xray.NewSegment("GrpcService-" + streamType + "-" + info.FullMethod)

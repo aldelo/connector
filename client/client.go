@@ -1,7 +1,7 @@
 package client
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -54,9 +54,7 @@ import (
 	"time"
 )
 
-//
 // client side cache
-//
 var _cache *Cache
 
 func init() {
@@ -71,14 +69,15 @@ func ClearEndpointCache() {
 // also provides optional gin based web server upon dial
 //
 // note:
-//		1) Using Compressor with RPC
-//			a) import "google.golang.org/grpc/encoding/gzip"
-//			b) in RPC Call, pass grpc.UseCompressor(gzip.Name)) in the third parameter
-//					example: RPCCall(ctx, &pb.Request{...}, grpc.UseCompressor(gzip.Name))
 //
-//		2) Notifier Client yaml
-//			a) xyz-notifier-client.yaml
-//					where xyz is the target gRPC service endpoint name
+//  1. Using Compressor with RPC
+//     a) import "google.golang.org/grpc/encoding/gzip"
+//     b) in RPC Call, pass grpc.UseCompressor(gzip.Name)) in the third parameter
+//     example: RPCCall(ctx, &pb.Request{...}, grpc.UseCompressor(gzip.Name))
+//
+//  2. Notifier Client yaml
+//     a) xyz-notifier-client.yaml
+//     where xyz is the target gRPC service endpoint name
 type Client struct {
 	// client properties
 	AppName          string
@@ -739,9 +738,10 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 // this service is to subscribe and receive callbacks from notifier server of service host online offline statuses
 //
 // Example:
-//		go func() {
-//					  svc1Cli.DoNotifierAlertService()
-//				  }()
+//
+//	go func() {
+//				  svc1Cli.DoNotifierAlertService()
+//			  }()
 func (c *Client) DoNotifierAlertService() (err error) {
 	// finally, run notifier client to subscribe for notification callbacks
 	// the notifier client uses the same client config yaml, but a copy of it to keep the scope separated
@@ -1690,19 +1690,19 @@ func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamD
 // WebServerConfig info,
 // note: WebServerLocalAddress = read only getter
 //
-// note: WebServerRoutes = map[string]*ginw.RouteDefinition{
-//		"base": {
-//			Routes: []*ginw.Route{
-//				{
-//					Method: ginhttpmethod.GET,
-//					RelativePath: "/",
-//					Handler: func(c *gin.Context, bindingInputPtr interface{}) {
-//						c.String(200, "Connector Client Http Host Up")
+//	note: WebServerRoutes = map[string]*ginw.RouteDefinition{
+//			"base": {
+//				Routes: []*ginw.Route{
+//					{
+//						Method: ginhttpmethod.GET,
+//						RelativePath: "/",
+//						Handler: func(c *gin.Context, bindingInputPtr interface{}) {
+//							c.String(200, "Connector Client Http Host Up")
+//						},
 //					},
 //				},
 //			},
-//		},
-//	}
+//		}
 type WebServerConfig struct {
 	AppName          string
 	ConfigFileName   string

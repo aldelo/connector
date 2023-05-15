@@ -1,7 +1,7 @@
 package webserver
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@ import (
 // contains fields to config custom handlers
 type WebServer struct {
 	// csrf handler definitions
-	CsrfErrorHandler func(c *gin.Context)
+	CsrfErrorHandler       func(c *gin.Context)
 	CsrfTokenGetterHandler func(c *gin.Context) string
 
 	// http error handler definitions
@@ -54,18 +54,18 @@ type WebServer struct {
 	LoginRequestDataPtr interface{}
 
 	AuthenticateHandler func(loginRequestDataPtr interface{}) (loggedInCredentialPtr interface{})
-	AddClaimsHandler func(loggedInCredentialPtr interface{}) (identityKeyValue string, claims map[string]interface{})
-	GetIdentityHandler func(claims map[string]interface{}) interface{}
-	AuthorizerHandler func(loggedInCredentialPtr interface{}, c *gin.Context) bool
+	AddClaimsHandler    func(loggedInCredentialPtr interface{}) (identityKeyValue string, claims map[string]interface{})
+	GetIdentityHandler  func(claims map[string]interface{}) interface{}
+	AuthorizerHandler   func(loggedInCredentialPtr interface{}, c *gin.Context) bool
 
-	LoginResponseHandler func(c *gin.Context, statusCode int, token string, expires time.Time)
-	LogoutResponseHandler func(c *gin.Context, statusCode int)
+	LoginResponseHandler        func(c *gin.Context, statusCode int, token string, expires time.Time)
+	LogoutResponseHandler       func(c *gin.Context, statusCode int)
 	RefreshTokenResponseHandler func(c *gin.Context, statusCode int, token string, expires time.Time)
 
-	UnauthorizedHandler func(c *gin.Context, code int, message string)
-	NoRouteHandler func(claims map[string]interface{}, c *gin.Context)
+	UnauthorizedHandler      func(c *gin.Context, code int, message string)
+	NoRouteHandler           func(claims map[string]interface{}, c *gin.Context)
 	MiddlewareErrorEvaluator func(e error, c *gin.Context) string
-	TimeHandler func() time.Time
+	TimeHandler              func() time.Time
 
 	// route definitions
 	Routes map[string]*ginw.RouteDefinition
@@ -80,9 +80,9 @@ type WebServer struct {
 
 	// dns info used
 	_dnsHostZoneId string
-	_dnsIp string
-	_dnsUrl string
-	_dnsTtl uint
+	_dnsIp         string
+	_dnsUrl        string
+	_dnsTtl        uint
 }
 
 // NewWebServer creates a prepared web server for further setup and use
@@ -106,7 +106,7 @@ func NewWebServer(appName string, configFileName string, customConfigPath string
 		}
 
 		return &WebServer{
-			_config: c,
+			_config:       c,
 			_ginwebserver: ginw.NewServer(c.WebServer.Name, c.WebServer.Port, !c.WebServer.Debug, c.Recovery.CustomRecovery, ge, gz),
 		}
 	}
@@ -262,8 +262,8 @@ func (w *WebServer) Serve() error {
 // readConfig will read in config data
 func readConfig(appName string, configFileName string, customConfigPath string) (c *config, err error) {
 	c = &config{
-		AppName: appName,
-		ConfigFileName: configFileName,
+		AppName:          appName,
+		ConfigFileName:   configFileName,
 		CustomConfigPath: customConfigPath,
 	}
 
@@ -380,47 +380,47 @@ func (w *WebServer) setupWebServer() error {
 		}
 
 		if !w._ginwebserver.NewAuthMiddleware(w._config.JwtAuth.Realm, w._config.JwtAuth.IdentityKey, w._config.JwtAuth.SignSecret, bindType,
-			  							     func(j *ginw.GinJwt) {
-										  		// perform jwt auth setup
-			  							     	j.PrivateKeyFile = w._config.JwtAuth.PrivateKey
-			  							     	j.PublicKeyFile = w._config.JwtAuth.PublicKey
-			  							     	j.SigningAlgorithm = signAlg
-			  							     	j.TokenValidDuration = time.Duration(w._config.JwtAuth.TokenValidMinutes) * time.Minute
-			  							     	j.TokenMaxRefreshDuration = time.Duration(w._config.JwtAuth.RefreshValidMinutes) * time.Minute
-			  							     	j.LoginRoutePath = w._config.JwtAuth.LoginRoutePath
-			  							     	j.LogoutRoutePath = w._config.JwtAuth.LogoutRoutePath
-			  							     	j.RefreshTokenRoutePath = w._config.JwtAuth.RefreshTokenRoutePath
-			  							     	j.TokenLookup = w._config.JwtAuth.TokenLookup
-											 	j.TokenHeadName = w._config.JwtAuth.TokenHeadName
-											 	j.DisableAbort = w._config.JwtAuth.DisableAbort
-											 	j.SendAuthorization = w._config.JwtAuth.SendAuthorization
+			func(j *ginw.GinJwt) {
+				// perform jwt auth setup
+				j.PrivateKeyFile = w._config.JwtAuth.PrivateKey
+				j.PublicKeyFile = w._config.JwtAuth.PublicKey
+				j.SigningAlgorithm = signAlg
+				j.TokenValidDuration = time.Duration(w._config.JwtAuth.TokenValidMinutes) * time.Minute
+				j.TokenMaxRefreshDuration = time.Duration(w._config.JwtAuth.RefreshValidMinutes) * time.Minute
+				j.LoginRoutePath = w._config.JwtAuth.LoginRoutePath
+				j.LogoutRoutePath = w._config.JwtAuth.LogoutRoutePath
+				j.RefreshTokenRoutePath = w._config.JwtAuth.RefreshTokenRoutePath
+				j.TokenLookup = w._config.JwtAuth.TokenLookup
+				j.TokenHeadName = w._config.JwtAuth.TokenHeadName
+				j.DisableAbort = w._config.JwtAuth.DisableAbort
+				j.SendAuthorization = w._config.JwtAuth.SendAuthorization
 
-			  							     	j.LoginRequestDataPtr = w.LoginRequestDataPtr
+				j.LoginRequestDataPtr = w.LoginRequestDataPtr
 
-			  							     	if w._config.JwtAuth.SendCookie {
-			  							     		j.SendCookie = w._config.JwtAuth.SendCookie
-													j.SecureCookie = &w._config.JwtAuth.SecureCookie
-													j.CookieHTTPOnly = &w._config.JwtAuth.CookieHttpOnly
-			  							     		j.CookieSameSite = &sameSite
-													j.CookieDomain = w._config.JwtAuth.CookieDomain
-			  							     		j.CookieName = w._config.JwtAuth.CookieName
-			  							     		j.CookieMaxAge = time.Duration(w._config.JwtAuth.CookieMaxAgeDays) * 24 * time.Hour
-												}
+				if w._config.JwtAuth.SendCookie {
+					j.SendCookie = w._config.JwtAuth.SendCookie
+					j.SecureCookie = &w._config.JwtAuth.SecureCookie
+					j.CookieHTTPOnly = &w._config.JwtAuth.CookieHttpOnly
+					j.CookieSameSite = &sameSite
+					j.CookieDomain = w._config.JwtAuth.CookieDomain
+					j.CookieName = w._config.JwtAuth.CookieName
+					j.CookieMaxAge = time.Duration(w._config.JwtAuth.CookieMaxAgeDays) * 24 * time.Hour
+				}
 
-												j.AuthenticateHandler = w.AuthenticateHandler
-												j.AddClaimsHandler = w.AddClaimsHandler
-											 	j.GetIdentityHandler = w.GetIdentityHandler
-											 	j.AuthorizerHandler = w.AuthorizerHandler
+				j.AuthenticateHandler = w.AuthenticateHandler
+				j.AddClaimsHandler = w.AddClaimsHandler
+				j.GetIdentityHandler = w.GetIdentityHandler
+				j.AuthorizerHandler = w.AuthorizerHandler
 
-											    j.LoginResponseHandler = w.LoginResponseHandler
-											    j.LogoutResponseHandler = w.LogoutResponseHandler
-											    j.RefreshTokenResponseHandler = w.RefreshTokenResponseHandler
+				j.LoginResponseHandler = w.LoginResponseHandler
+				j.LogoutResponseHandler = w.LogoutResponseHandler
+				j.RefreshTokenResponseHandler = w.RefreshTokenResponseHandler
 
-											 	j.UnauthorizedHandler = w.UnauthorizedHandler
-											 	j.NoRouteHandler = w.NoRouteHandler
-											 	j.MiddlewareErrorEvaluator = w.MiddlewareErrorEvaluator
-											 	j.TimeHandler = w.TimeHandler
-										     }) {
+				j.UnauthorizedHandler = w.UnauthorizedHandler
+				j.NoRouteHandler = w.NoRouteHandler
+				j.MiddlewareErrorEvaluator = w.MiddlewareErrorEvaluator
+				j.TimeHandler = w.TimeHandler
+			}) {
 			// setup jwt auth middleware failed
 			return fmt.Errorf("Setup Web Server Failed: %s", "Jwt Auth Middleware Failed to Config")
 		}
@@ -429,9 +429,9 @@ func (w *WebServer) setupWebServer() error {
 	// set session
 	if util.LenTrim(w._config.Session.SessionSecret) > 0 {
 		w._ginwebserver.SessionMiddleware = &ginw.SessionConfig{
-			SecretKey: w._config.Session.SessionSecret,
-			SessionNames: w._config.Session.SessionNames,
-			RedisHostAndPort: w._config.Session.RedisHost,
+			SecretKey:               w._config.Session.SessionSecret,
+			SessionNames:            w._config.Session.SessionNames,
+			RedisHostAndPort:        w._config.Session.RedisHost,
 			RedisMaxIdleConnections: int(w._config.Session.RedisMaxIdleConnections),
 		}
 	}
@@ -462,14 +462,14 @@ func (w *WebServer) setupWebServer() error {
 			for _, v := range w._config.HtmlTemplates.TemplateDefinitions {
 				tmpl = append(tmpl, ginw.TemplateDefinition{
 					LayoutPath: v.LayoutPath,
-					PagePath: v.PagePath,
+					PagePath:   v.PagePath,
 				})
 			}
 		}
 
 		w._ginwebserver.HtmlTemplateRenderer = &ginw.GinTemplate{
 			TemplateBaseDir: w._config.HtmlTemplates.TemplateBaseDir,
-			Templates: tmpl,
+			Templates:       tmpl,
 		}
 	}
 
@@ -479,7 +479,7 @@ func (w *WebServer) setupWebServer() error {
 	}
 
 	// set web server routes
-	if w.Routes	!= nil && len(w.Routes) > 0 {
+	if w.Routes != nil && len(w.Routes) > 0 {
 		// merge yaml configured routes definition (middleware setup)
 		// into appropriate base or route groups
 		if len(w._config.Routes) > 0 {
@@ -491,16 +491,16 @@ func (w *WebServer) setupWebServer() error {
 
 					if !d.CorsAllowAllOrigins {
 						rd.CorsMiddleware = &cors.Config{
-							AllowAllOrigins: d.CorsAllowAllOrigins,
-							AllowOrigins: d.CorsAllowOrigins,
-							AllowMethods: d.CorsAllowMethods,
-							AllowHeaders: d.CorsAllowHeaders,
-							AllowCredentials: d.CorsAllowCredentials,
-							MaxAge: time.Duration(d.CorsMaxAgeMinutes) * time.Minute,
-							AllowWildcard: d.CorsAllowWildCard,
+							AllowAllOrigins:        d.CorsAllowAllOrigins,
+							AllowOrigins:           d.CorsAllowOrigins,
+							AllowMethods:           d.CorsAllowMethods,
+							AllowHeaders:           d.CorsAllowHeaders,
+							AllowCredentials:       d.CorsAllowCredentials,
+							MaxAge:                 time.Duration(d.CorsMaxAgeMinutes) * time.Minute,
+							AllowWildcard:          d.CorsAllowWildCard,
 							AllowBrowserExtensions: d.CorsAllowBrowserExtensions,
-							AllowWebSockets: d.CorsAllowWebSockets,
-							AllowFiles: d.CorsAllowFiles,
+							AllowWebSockets:        d.CorsAllowWebSockets,
+							AllowFiles:             d.CorsAllowFiles,
 						}
 					}
 
@@ -517,18 +517,18 @@ func (w *WebServer) setupWebServer() error {
 
 					if gz.Valid() && gz != gingzipcompression.UNKNOWN {
 						rd.GZipMiddleware = &ginw.GZipConfig{
-							Compression: gz,
+							Compression:        gz,
 							ExcludedExtensions: d.GzipExcludeExtensions,
-							ExcludedPaths: d.GzipExcludePaths,
+							ExcludedPaths:      d.GzipExcludePaths,
 							ExcludedPathsRegex: d.GzipExcludePathsRegex,
 						}
 					}
 
 					if d.PerClientIpQps > 0 {
 						rd.PerClientQpsMiddleware = &ginw.PerClientQps{
-							Qps: int(d.PerClientIpQps),
+							Qps:   int(d.PerClientIpQps),
 							Burst: int(d.PerClientIpBurst),
-							TTL: time.Duration(d.PerClientIpTtlMinutes) * time.Minute,
+							TTL:   time.Duration(d.PerClientIpTtlMinutes) * time.Minute,
 						}
 					}
 
@@ -546,10 +546,3 @@ func (w *WebServer) setupWebServer() error {
 	// success
 	return nil
 }
-
-
-
-
-
-
-

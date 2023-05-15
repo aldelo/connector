@@ -1,7 +1,7 @@
 package queue
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ import (
 // NewQueueAdapter creates a new sqs queue service provider, and auto connect for use
 func NewQueueAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2.HttpClientSettings) (*sqs.SQS, error) {
 	q := &sqs.SQS{
-		AwsRegion: awsRegion,
+		AwsRegion:   awsRegion,
 		HttpOptions: httpOptions,
 	}
 
@@ -103,7 +103,7 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 
 		if queueUrl, err = q.CreateQueue(queueName, map[sqscreatequeueattribute.SQSCreateQueueAttribute]string{
 			sqscreatequeueattribute.MessageRetentionPeriod: util.UintToStr(messageRetentionSeconds),
-		},timeoutDuration...); err != nil {
+		}, timeoutDuration...); err != nil {
 			// create queue failed
 			return "", "", fmt.Errorf("CreateQueue Failed: %s", err.Error())
 		} else {
@@ -165,7 +165,7 @@ func ReceiveMessages(q *sqs.SQS, queueUrl string, messageAttributeFilters []stri
 	}
 
 	if list, err := q.ReceiveMessage(queueUrl, 10, messageAttributeFilters,
-		 			nil, 0, 0, "", timeoutDuration...); err != nil {
+		nil, 0, 0, "", timeoutDuration...); err != nil {
 		// error
 		return []*sqs.SQSReceivedMessage{}, fmt.Errorf("ReceiveMessage Failed: " + err.Error())
 	} else {
@@ -200,6 +200,3 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 		}
 	}
 }
-
-
-

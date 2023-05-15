@@ -1,7 +1,7 @@
 package registry
 
 /*
- * Copyright 2020-2021 Aldelo, LP
+ * Copyright 2020-2023 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,12 +27,12 @@ import (
 type InstanceInfo struct {
 	ServiceId string
 
-	ServiceName string
+	ServiceName   string
 	NamespaceName string
 
-	InstanceId string
-	InstanceIP string
-	InstancePort uint
+	InstanceId      string
+	InstanceIP      string
+	InstancePort    uint
 	InstanceVersion string
 	InstanceHealthy bool
 }
@@ -46,12 +46,12 @@ type InstanceInfo struct {
 // description = (optional) public dns namespace description
 // timeOutDuration = (optional) maximum time before timeout via context
 func CreateService(sd *cloudmap.CloudMap,
-				   name string,
-				   namespaceId string,
-				   dnsConf *cloudmap.DnsConf,
-				   healthCheckConf *cloudmap.HealthCheckConf,
-				   description string,
-				   timeoutDuration ...time.Duration) (serviceId string, err error) {
+	name string,
+	namespaceId string,
+	dnsConf *cloudmap.DnsConf,
+	healthCheckConf *cloudmap.HealthCheckConf,
+	description string,
+	timeoutDuration ...time.Duration) (serviceId string, err error) {
 	if sd == nil {
 		return "", fmt.Errorf("SD Client is Required")
 	}
@@ -82,13 +82,13 @@ func CreateService(sd *cloudmap.CloudMap,
 // healthy = (reequired) indicates the initial instance state as healthy or unhealthy when registered to cloudmap
 // version = (optional) such as v1.0.1, semver semantic, for internal use by services
 func RegisterInstance(sd *cloudmap.CloudMap,
-					  serviceId string,
-					  instancePrefix string,
-					  ip string,
-					  port uint,
-					  healthy bool,
-					  version string,
-					  timeoutDuration ...time.Duration) (instanceId string, operationId string, err error) {
+	serviceId string,
+	instancePrefix string,
+	ip string,
+	port uint,
+	healthy bool,
+	version string,
+	timeoutDuration ...time.Duration) (instanceId string, operationId string, err error) {
 	if sd == nil {
 		return "", "", fmt.Errorf("SD Client is Required")
 	}
@@ -116,11 +116,11 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 
 	// register instance to cloud map
 	if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, map[string]string{
-		"AWS_INSTANCE_IPV4": ip,
-		"AWS_INSTANCE_PORT": fmt.Sprintf("%d", port),
+		"AWS_INSTANCE_IPV4":      ip,
+		"AWS_INSTANCE_PORT":      fmt.Sprintf("%d", port),
 		"AWS_INIT_HEALTH_STATUS": health,
-		"INSTANCE_VERSION": version,
-		"SERVICE_ID": serviceId,
+		"INSTANCE_VERSION":       version,
+		"SERVICE_ID":             serviceId,
 	}, timeoutDuration...); err != nil {
 		return "", "", err
 	}
@@ -131,8 +131,8 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 
 // GetOperationStatus will check if a given operationId was successfully completed
 func GetOperationStatus(sd *cloudmap.CloudMap,
-						operationId string,
-				   		timeoutDuration ...time.Duration) (status sdoperationstatus.SdOperationStatus, err error) {
+	operationId string,
+	timeoutDuration ...time.Duration) (status sdoperationstatus.SdOperationStatus, err error) {
 	if sd == nil {
 		return sdoperationstatus.UNKNOWN, fmt.Errorf("SD Client is Required")
 	}
@@ -162,10 +162,10 @@ func GetOperationStatus(sd *cloudmap.CloudMap,
 
 // UpdateHealthStatus will update the specified instance healthy status (for instances with custom health check config enabled only)
 func UpdateHealthStatus(sd *cloudmap.CloudMap,
-						instanceId string,
-						serviceId string,
-						healthy bool,
-						timeoutDuration ...time.Duration) error {
+	instanceId string,
+	serviceId string,
+	healthy bool,
+	timeoutDuration ...time.Duration) error {
 	if sd == nil {
 		return fmt.Errorf("SD Client is Required")
 	}
@@ -183,12 +183,12 @@ func UpdateHealthStatus(sd *cloudmap.CloudMap,
 
 // DiscoverInstances will query cloudmap for instances matching given criteria
 func DiscoverInstances(sd *cloudmap.CloudMap,
-					   serviceName string,
-					   namespaceName string,
-					   healthy bool,
-					   customAttributes map[string]string,
-					   maxResults *int64,
-					   timeoutDuration ...time.Duration) (instanceList []*InstanceInfo, err error) {
+	serviceName string,
+	namespaceName string,
+	healthy bool,
+	customAttributes map[string]string,
+	maxResults *int64,
+	timeoutDuration ...time.Duration) (instanceList []*InstanceInfo, err error) {
 	if sd == nil {
 		return []*InstanceInfo{}, fmt.Errorf("SD Client is Required")
 	}
@@ -282,9 +282,9 @@ func DiscoverDnsIps(hostName string, srv bool) (ipList []string, err error) {
 // DeregisterInstance will remove the given instance from cloudmap and route 53
 // use the operationId with GetOperationStatus to check on progress
 func DeregisterInstance(sd *cloudmap.CloudMap,
-						instanceId string,
-						serviceId string,
-						timeoutDuration ...time.Duration) (operationId string, err error) {
+	instanceId string,
+	serviceId string,
+	timeoutDuration ...time.Duration) (operationId string, err error) {
 	if sd == nil {
 		return "", fmt.Errorf("SD Client is Required")
 	}
@@ -299,4 +299,3 @@ func DeregisterInstance(sd *cloudmap.CloudMap,
 
 	return sd.DeregisterInstance(instanceId, serviceId, timeoutDuration...)
 }
-
