@@ -551,7 +551,7 @@ func (c *Client) Dial(ctx context.Context) error {
 		// very important: client load balancer scheme name must be alpha and lower cased
 		//                 if scheme name is not valid, error will occur: transport error, tcp port unknown
 		schemeName, _ := util.ExtractAlpha(c._config.AppName)
-		schemeName = strings.ToLower("clientlb" + schemeName)
+		schemeName = strings.ToLower("clb" + schemeName)
 
 		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(schemeName, fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
 
