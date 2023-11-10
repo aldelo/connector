@@ -6,6 +6,7 @@ package grpc_recovery
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -28,6 +29,7 @@ func UnaryServerInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 		defer func() {
 			if r := recover(); r != nil || panicked {
 				fmt.Printf("%s\n", r)
+				fmt.Printf("stack: %s\n", debug.Stack())
 				fmt.Printf("\n\n\n Start Service Again\n")
 				err = recoverFrom(ctx, r, o.recoveryHandlerFunc)
 			}

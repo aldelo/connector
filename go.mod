@@ -3,13 +3,14 @@ module github.com/aldelo/connector
 go 1.20
 
 require (
-	github.com/aldelo/common v1.3.3
-	github.com/aws/aws-sdk-go v1.44.262
+	github.com/aldelo/common v1.3.4
+	github.com/aws/aws-sdk-go v1.47.8
+	github.com/aws/aws-xray-sdk-go v1.8.2
 	github.com/gin-contrib/cors v1.4.0
 	github.com/gin-gonic/gin v1.9.1
-	google.golang.org/genproto v0.0.0-20230306155012-7f2fa6fef1f4
-	google.golang.org/grpc v1.55.0
-	google.golang.org/protobuf v1.30.0
+	google.golang.org/genproto v0.0.0-20231106174013-bbf56f31fb17
+	google.golang.org/grpc v1.59.0
+	google.golang.org/protobuf v1.31.0
 )
 
 require (
@@ -20,7 +21,6 @@ require (
 	github.com/antlr/antlr4 v0.0.0-20200820155224-be881fa6b91d // indirect
 	github.com/appleboy/gin-jwt/v2 v2.9.1 // indirect
 	github.com/aws/aws-dax-go v1.2.12 // indirect
-	github.com/aws/aws-xray-sdk-go v1.8.1 // indirect
 	github.com/boj/redistore v0.0.0-20180917114910-cd5dcc76aeff // indirect
 	github.com/bytedance/sonic v1.9.1 // indirect
 	github.com/cactus/go-statsd-client/statsd v0.0.0-20200728222731-a2baea3bbfc6 // indirect
@@ -41,7 +41,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.4.3 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/gomodule/redigo v2.0.0+incompatible // indirect
-	github.com/google/uuid v1.3.0 // indirect
+	github.com/google/uuid v1.3.1 // indirect
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/gorilla/context v1.1.1 // indirect
 	github.com/gorilla/securecookie v1.1.1 // indirect
@@ -81,10 +81,10 @@ require (
 	go.uber.org/ratelimit v0.2.0 // indirect
 	go.uber.org/zap v1.24.0 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/crypto v0.9.0 // indirect
-	golang.org/x/net v0.10.0 // indirect
-	golang.org/x/sys v0.8.0 // indirect
-	golang.org/x/text v0.9.0 // indirect
+	golang.org/x/crypto v0.14.0 // indirect
+	golang.org/x/net v0.17.0 // indirect
+	golang.org/x/sys v0.13.0 // indirect
+	golang.org/x/text v0.13.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
