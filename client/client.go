@@ -36,6 +36,7 @@ import (
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	res "github.com/aldelo/connector/adapters/resolver"
+	"github.com/aldelo/connector/adapters/tracer"
 	ws "github.com/aldelo/connector/webserver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -323,7 +324,8 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	if xray.XRayServiceOn() {
 		c._z.Printf("Setup Unary XRay Tracer Interceptor")
-		c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryXRayTracerHandler)
+		//c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryXRayTracerHandler)
+		c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, tracer.TracerUnaryClientInterceptor(c._config.Target.AppName+"-Client"))
 	}
 
 	count := len(c.UnaryClientInterceptors)
@@ -551,7 +553,7 @@ func (c *Client) Dial(ctx context.Context) error {
 		// very important: client load balancer scheme name must be alpha and lower cased
 		//                 if scheme name is not valid, error will occur: transport error, tcp port unknown
 		schemeName, _ := util.ExtractAlpha(c._config.AppName)
-		schemeName = strings.ToLower("clientlb" + schemeName)
+		schemeName = strings.ToLower("clb" + schemeName)
 
 		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(schemeName, fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
 

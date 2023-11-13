@@ -326,7 +326,8 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 		// add unary server interceptors
 		if xray.XRayServiceOn() {
-			s.UnaryServerInterceptors = append(s.UnaryServerInterceptors, tracer.TracerUnaryServerInterceptor)
+			//s.UnaryServerInterceptors = append(s.UnaryServerInterceptors, tracer.TracerUnaryServerInterceptor)
+			s.UnaryServerInterceptors = append(s.UnaryServerInterceptors, tracer.TracerUnaryServerInterceptor(s._config.Service.Name+"-Server"))
 		}
 
 		s.UnaryServerInterceptors = append(s.UnaryServerInterceptors, grpc_recovery.UnaryServerInterceptor())
