@@ -484,7 +484,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 	} else {
 		// auto confirm
 		if url := confirm.SubscribeURL; util.LenTrim(url) > 0 {
-			log.Println("/snsrouter 'subscriptionconfirmation' SubscribeURL From SNS = " + url)
+			log.Println("/snsrouter 'subscriptionconfirmation' SubscribeURL From SNS = " + strings.ReplaceAll(strings.ReplaceAll(url, "\n", ""), "\r", ""))
 
 			// validate serverKey
 			if util.LenTrim(serverKey) <= 0 {
@@ -498,7 +498,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				return
 			}
 
-			log.Println("/snsrouter 'subscriptionconfirmation' serverKey From Invoker = " + serverKey)
+			log.Println("/snsrouter 'subscriptionconfirmation' serverKey From Invoker = " + strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""))
 
 			// wait 250ms for notifier server to update ddb with server endpoint info
 			time.Sleep(250 * time.Millisecond)
@@ -507,20 +507,20 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 
 			for i := 0; i < 3; i++ {
 				if serverUrl, err := model.GetServerRouteFromDataStore(serverKey); err != nil {
-					log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", serverKey, c.ClientIP(), err.Error())
+					log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), err.Error())
 					c.String(412, "Server Key Not Valid")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", serverKey, c.ClientIP(), err.Error()))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), err.Error()))
 					}
 
 					return
 				} else if util.LenTrim(serverUrl) == 0 && i == 2 {
-					log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", serverKey, c.ClientIP(), "ServerUrl Returned is Blank")
+					log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), "ServerUrl Returned is Blank")
 					c.String(412, "Server Key Not Exist")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", serverKey, c.ClientIP(), "ServerUrl Returned is Blank"))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), "ServerUrl Returned is Blank"))
 					}
 
 					return
@@ -532,7 +532,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				}
 			}
 
-			log.Println("/snsrouter 'subscriptionconfirmation' GET " + url + "...")
+			log.Println("/snsrouter 'subscriptionconfirmation' GET " + strings.ReplaceAll(strings.ReplaceAll(url, "\n", ""), "\r", "") + "...")
 
 			// perform confirmation action
 			if status, body, err := rest.GET(url, nil); err != nil {
