@@ -3,12 +3,12 @@ module github.com/aldelo/connector
 go 1.20
 
 require (
-	github.com/aldelo/common v1.3.6
-	github.com/aws/aws-sdk-go v1.47.9
-	github.com/aws/aws-xray-sdk-go v1.8.2
+	github.com/aldelo/common v1.3.7
+	github.com/aws/aws-sdk-go v1.48.0
+	github.com/aws/aws-xray-sdk-go v1.8.3
 	github.com/gin-contrib/cors v1.4.0
 	github.com/gin-gonic/gin v1.9.1
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20231030173426-d783a09b4405
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20231106174013-bbf56f31fb17
 	google.golang.org/grpc v1.59.0
 	google.golang.org/protobuf v1.31.0
 )
@@ -16,7 +16,7 @@ require (
 require (
 	github.com/DataDog/datadog-go v3.7.2+incompatible // indirect
 	github.com/afex/hystrix-go v0.0.0-20180502004556-fa1af6a1f4f5 // indirect
-	github.com/andybalholm/brotli v1.0.4 // indirect
+	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/antlr/antlr4 v0.0.0-20200820155224-be881fa6b91d // indirect
 	github.com/appleboy/gin-jwt/v2 v2.9.1 // indirect
 	github.com/aws/aws-dax-go v1.2.13 // indirect
@@ -51,7 +51,7 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/jtolds/gls v4.20.0+incompatible // indirect
 	github.com/kardianos/service v1.2.2 // indirect
-	github.com/klauspost/compress v1.17.0 // indirect
+	github.com/klauspost/compress v1.17.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.4 // indirect
 	github.com/leodido/go-urn v1.2.4 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
@@ -77,7 +77,7 @@ require (
 	github.com/ugorji/go/codec v1.2.11 // indirect
 	github.com/utrack/gin-csrf v0.0.0-20190424104817-40fb8d2c8fca // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
-	github.com/valyala/fasthttp v1.34.0 // indirect
+	github.com/valyala/fasthttp v1.50.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/ratelimit v0.3.0 // indirect
 	go.uber.org/zap v1.26.0 // indirect
