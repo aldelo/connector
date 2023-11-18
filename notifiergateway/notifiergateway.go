@@ -235,7 +235,7 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 	}
 
 	if hashSecret, hsFound := model.HashKeys[data.HashKeyName]; !hsFound || util.LenTrim(hashSecret) == 0 {
-		log.Println("!!! Inbound Health Report Hash Key Name '" + data.HashKeyName + "' From " + c.ClientIP() + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
+		log.Println("!!! Inbound Health Report Hash Key Name '" + data.HashKeyName + "' From " + escapeUserInput(c.ClientIP()) + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
 		c.String(401, "Inbound Health Report Hash Key Name '"+data.HashKeyName+"' Not Valid")
 		return
 	} else {
@@ -243,7 +243,7 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 		bufHash := crypto.Sha256(buf, hashSecret)
 
 		if bufHash != data.HashSignature {
-			log.Println("!!! Inbound Health Report Hash Signature From " + c.ClientIP() + " Not Valid: Hash Signature Mismatch !!!")
+			log.Println("!!! Inbound Health Report Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: Hash Signature Mismatch !!!")
 			log.Println("... Host = Sha256 Source: " + buf + ", Salt: " + hashSecret + ", Signature: " + bufHash)
 			log.Println("... Client = Sha256 Source: " + data.NamespaceId + data.ServiceId + data.InstanceId + " + Client Side Date, Salt: Client Side Hash Key Secret, Signature: " + data.HashSignature)
 			c.String(401, "Inbound Health Report Hash Signature Not Valid")
@@ -335,7 +335,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 	}
 
 	if hashSecret, hsFound := model.HashKeys[hashKeyName]; !hsFound || util.LenTrim(hashSecret) == 0 {
-		log.Println("!!! Delete Health Report Service Record Request's Hash Key Name '" + hashKeyName + "' From " + c.ClientIP() + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
+		log.Println("!!! Delete Health Report Service Record Request's Hash Key Name '" + hashKeyName + "' From " + escapeUserInput(c.ClientIP()) + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
 		c.String(401, "Delete Health Report Service Record Request's Hash Key Name '"+hashKeyName+"' Not Valid")
 		return
 	} else {
@@ -343,7 +343,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		bufHash := crypto.Sha256(buf, hashSecret)
 
 		if bufHash != hashKeySignature {
-			log.Println("!!! Delete Health Report Service Record Request's Hash Signature From " + c.ClientIP() + " Not Valid: Hash Signature Mismatch !!!")
+			log.Println("!!! Delete Health Report Service Record Request's Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: Hash Signature Mismatch !!!")
 			log.Println("... Host = Sha256 Source: " + buf + ", Salt: " + hashSecret + ", Signature: " + bufHash)
 			log.Println("... Client = Sha256 Source: " + instanceId + " + Client Side Date, Salt: Client Side Hash Key Secret, Signature: " + hashKeySignature)
 			c.String(401, "Delete Health Report Service Record Request's Hash Signature Not Valid")
