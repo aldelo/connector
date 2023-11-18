@@ -182,7 +182,7 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 	data, ok := bindingInputPtr.(*healthreport)
 
 	if !ok || data == nil {
-		log.Println("!!! Inbound Health Report Payload Missing or Malformed From " + c.ClientIP() + " !!!")
+		log.Println("!!! Inbound Health Report Payload Missing or Malformed From " + strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", "") + " !!!")
 		c.String(404, "Inbound Health Report Payload Missing or Malformed")
 		return
 	}
@@ -704,29 +704,29 @@ func snsnotification(c *gin.Context, serverKey string) {
 
 		// validate serverKey
 		if serverUrl, err := model.GetServerRouteFromDataStore(serverKey); err != nil {
-			log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", serverKey, c.ClientIP(), err.Error())
+			log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), err.Error())
 			c.String(412, "Server Key Not Valid")
 
 			if seg != nil && seg.Ready() {
-				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", serverKey, c.ClientIP(), err.Error()))
+				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), err.Error()))
 			}
 		} else if util.LenTrim(serverUrl) == 0 {
-			log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", serverKey, c.ClientIP(), "ServerUrl Returned is Blank")
+			log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), "ServerUrl Returned is Blank")
 			unsubscribeSNS(notify)
 			c.String(412, "Server Key Not Exist")
 
 			if seg != nil && seg.Ready() {
-				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", serverKey, c.ClientIP(), "ServerUrl Returned is Blank"))
+				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), "ServerUrl Returned is Blank"))
 			}
 		} else {
 			// perform sns notification routing task
 			// server url begins with http or https, then ip and port as the fully qualified url domain path (controller path not part of the url)
 			if notifyJson, err := util.MarshalJSONCompact(notify); err != nil {
-				log.Printf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", serverKey, serverUrl, err.Error())
+				log.Printf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, err.Error())
 				c.String(412, "Notification Marshal Failed")
 
 				if seg != nil && seg.Ready() {
-					_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", serverKey, serverUrl, err.Error()))
+					_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, err.Error()))
 				}
 			} else {
 				// relay sns notification to target notify server
@@ -741,15 +741,15 @@ func snsnotification(c *gin.Context, serverKey string) {
 					},
 				}, notifyJson); err != nil {
 					// error
-					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", serverKey, serverUrl, err.Error())
+					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, err.Error())
 					c.String(412, "Route Notification to Internal Host Failed")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", serverKey, serverUrl, err.Error()))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, err.Error()))
 					}
 				} else if statusCode != 200 {
 					// not status 200
-					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", serverKey, serverUrl, statusCode)
+					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, statusCode)
 					c.Status(statusCode)
 
 					if seg != nil && seg.Ready() {
@@ -757,7 +757,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 					}
 				} else {
 					// success, reply to sns success
-					log.Printf("Server Key %s at Host %s Route Notification Complete", serverKey, serverUrl)
+					log.Printf("Server Key %s at Host %s Route Notification Complete", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl)
 					c.Status(200)
 				}
 			}
