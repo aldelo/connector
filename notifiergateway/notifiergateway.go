@@ -166,6 +166,11 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	return gatewayServer, nil
 }
 
+// escapeUserInput replaces \n and \r with blank to mitigate log-injection vulnerability
+func escapeUserInput(data string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(data, "\n", ""), "\r", "")
+}
+
 // healthreporter handles client reporting to host health status of the client,
 // the intent is so that the constant client (grpc services) reporting enables the host to monitor health,
 // in the even health is lapsed, host can decide to mark client as unhealthy or deregister accordingly;
@@ -182,7 +187,7 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 	data, ok := bindingInputPtr.(*healthreport)
 
 	if !ok || data == nil {
-		log.Println("!!! Inbound Health Report Payload Missing or Malformed From " + strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", "") + " !!!")
+		log.Println("!!! Inbound Health Report Payload Missing or Malformed From " + escapeUserInput(c.ClientIP()) + " !!!")
 		c.String(404, "Inbound Health Report Payload Missing or Malformed")
 		return
 	}
@@ -299,7 +304,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	instanceId := c.Param("instanceid")
+	instanceId := escapeUserInput(c.Param("instanceid"))
 
 	if util.LenTrim(instanceId) == 0 {
 		log.Println("!!! Delete Health Report Service Record Failed: InstanceID Missing From Path !!!")
@@ -307,7 +312,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	hashKeyName := c.GetHeader("x-nts-gateway-hash-name")
+	hashKeyName := escapeUserInput(c.GetHeader("x-nts-gateway-hash-name"))
 
 	if util.LenTrim(hashKeyName) == 0 {
 		log.Println("!!! Delete Health Report Service Record Failed: Hash Key Name is Missing From Header 'x-nts-gateway-hash-name' !!!")
@@ -315,7 +320,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	hashKeySignature := c.GetHeader("x-nts-gateway-hash-signature")
+	hashKeySignature := escapeUserInput(c.GetHeader("x-nts-gateway-hash-signature"))
 
 	if util.LenTrim(hashKeySignature) == 0 {
 		log.Println("!!! Delete Health Report Service Record Failed: Hash Signature is Missing From Header 'x-nts-gateway-hash-signature' !!!")
@@ -424,7 +429,7 @@ func snsrouter(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	log.Println("/snsrouter Invoked: x-amz-sns-message-type = " + c.GetHeader("x-amz-sns-message-type") + ", serverKey = " + c.Param("serverKey"))
+	log.Println("/snsrouter Invoked: x-amz-sns-message-type = " + escapeUserInput(c.GetHeader("x-amz-sns-message-type")) + ", serverKey = " + escapeUserInput(c.Param("serverKey")))
 
 	// handle confirmation or notification according to header
 	switch strings.ToUpper(c.GetHeader("x-amz-sns-message-type")) {
@@ -484,7 +489,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 	} else {
 		// auto confirm
 		if url := confirm.SubscribeURL; util.LenTrim(url) > 0 {
-			log.Println("/snsrouter 'subscriptionconfirmation' SubscribeURL From SNS = " + strings.ReplaceAll(strings.ReplaceAll(url, "\n", ""), "\r", ""))
+			log.Println("/snsrouter 'subscriptionconfirmation' SubscribeURL From SNS = " + escapeUserInput(url))
 
 			// validate serverKey
 			if util.LenTrim(serverKey) <= 0 {
@@ -498,7 +503,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				return
 			}
 
-			log.Println("/snsrouter 'subscriptionconfirmation' serverKey From Invoker = " + strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""))
+			log.Println("/snsrouter 'subscriptionconfirmation' serverKey From Invoker = " + escapeUserInput(serverKey))
 
 			// wait 250ms for notifier server to update ddb with server endpoint info
 			time.Sleep(250 * time.Millisecond)
@@ -507,20 +512,20 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 
 			for i := 0; i < 3; i++ {
 				if serverUrl, err := model.GetServerRouteFromDataStore(serverKey); err != nil {
-					log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), err.Error())
+					log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error())
 					c.String(412, "Server Key Not Valid")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), err.Error()))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error()))
 					}
 
 					return
 				} else if util.LenTrim(serverUrl) == 0 && i == 2 {
-					log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), "ServerUrl Returned is Blank")
+					log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank")
 					c.String(412, "Server Key Not Exist")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), "ServerUrl Returned is Blank"))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank"))
 					}
 
 					return
@@ -532,7 +537,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				}
 			}
 
-			log.Println("/snsrouter 'subscriptionconfirmation' GET " + strings.ReplaceAll(strings.ReplaceAll(url, "\n", ""), "\r", "") + "...")
+			log.Println("/snsrouter 'subscriptionconfirmation' GET " + escapeUserInput(url) + "...")
 
 			// perform confirmation action
 			if status, body, err := rest.GET(url, nil); err != nil {
@@ -704,29 +709,29 @@ func snsnotification(c *gin.Context, serverKey string) {
 
 		// validate serverKey
 		if serverUrl, err := model.GetServerRouteFromDataStore(serverKey); err != nil {
-			log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), err.Error())
+			log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error())
 			c.String(412, "Server Key Not Valid")
 
 			if seg != nil && seg.Ready() {
-				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), err.Error()))
+				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error()))
 			}
 		} else if util.LenTrim(serverUrl) == 0 {
-			log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), "ServerUrl Returned is Blank")
+			log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank")
 			unsubscribeSNS(notify)
 			c.String(412, "Server Key Not Exist")
 
 			if seg != nil && seg.Ready() {
-				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), strings.ReplaceAll(strings.ReplaceAll(c.ClientIP(), "\n", ""), "\r", ""), "ServerUrl Returned is Blank"))
+				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank"))
 			}
 		} else {
 			// perform sns notification routing task
 			// server url begins with http or https, then ip and port as the fully qualified url domain path (controller path not part of the url)
 			if notifyJson, err := util.MarshalJSONCompact(notify); err != nil {
-				log.Printf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, err.Error())
+				log.Printf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error())
 				c.String(412, "Notification Marshal Failed")
 
 				if seg != nil && seg.Ready() {
-					_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, err.Error()))
+					_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error()))
 				}
 			} else {
 				// relay sns notification to target notify server
@@ -741,15 +746,15 @@ func snsnotification(c *gin.Context, serverKey string) {
 					},
 				}, notifyJson); err != nil {
 					// error
-					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, err.Error())
+					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error())
 					c.String(412, "Route Notification to Internal Host Failed")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, err.Error()))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error()))
 					}
 				} else if statusCode != 200 {
 					// not status 200
-					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl, statusCode)
+					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", escapeUserInput(serverKey), serverUrl, statusCode)
 					c.Status(statusCode)
 
 					if seg != nil && seg.Ready() {
@@ -757,7 +762,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 					}
 				} else {
 					// success, reply to sns success
-					log.Printf("Server Key %s at Host %s Route Notification Complete", strings.ReplaceAll(strings.ReplaceAll(serverKey, "\n", ""), "\r", ""), serverUrl)
+					log.Printf("Server Key %s at Host %s Route Notification Complete", escapeUserInput(serverKey), serverUrl)
 					c.Status(200)
 				}
 			}
@@ -796,8 +801,8 @@ func unsubscribeSNS(notify *notification) {
 		return
 	}
 
-	topicArn := strings.ReplaceAll(strings.ReplaceAll(notify.TopicArn, "\n", ""), "\r", "")
-	unsubUrl := strings.ReplaceAll(strings.ReplaceAll(notify.UnsubscribeURL, "\n", ""), "\r", "")
+	topicArn := escapeUserInput(notify.TopicArn)
+	unsubUrl := escapeUserInput(notify.UnsubscribeURL)
 
 	if util.LenTrim(topicArn) == 0 {
 		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic Aborted: TopicArn Not Set in Notification Object Parsed from SNS !!!")
