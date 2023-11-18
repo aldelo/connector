@@ -796,8 +796,8 @@ func unsubscribeSNS(notify *notification) {
 		return
 	}
 
-	topicArn := notify.TopicArn
-	unsubUrl := notify.UnsubscribeURL
+	topicArn := strings.ReplaceAll(strings.ReplaceAll(notify.TopicArn, "\n", ""), "\r", "")
+	unsubUrl := strings.ReplaceAll(strings.ReplaceAll(notify.UnsubscribeURL, "\n", ""), "\r", "")
 
 	if util.LenTrim(topicArn) == 0 {
 		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic Aborted: TopicArn Not Set in Notification Object Parsed from SNS !!!")
