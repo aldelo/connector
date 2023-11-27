@@ -3,8 +3,8 @@ module github.com/aldelo/connector
 go 1.20
 
 require (
-	github.com/aldelo/common v1.3.7
-	github.com/aws/aws-sdk-go v1.48.0
+	github.com/aldelo/common v1.3.8
+	github.com/aws/aws-sdk-go v1.48.3
 	github.com/aws/aws-xray-sdk-go v1.8.3
 	github.com/gin-contrib/cors v1.4.0
 	github.com/gin-gonic/gin v1.9.1

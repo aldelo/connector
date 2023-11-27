@@ -43,8 +43,8 @@ github.com/DataDog/datadog-go v3.7.2+incompatible h1:o4QtYjBU/rG58VPh8Ne6F65YiMY
 github.com/DataDog/datadog-go v3.7.2+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
 github.com/afex/hystrix-go v0.0.0-20180502004556-fa1af6a1f4f5 h1:rFw4nCn9iMW+Vajsk51NtYIcwSTkXr+JGrMd36kTDJw=
 github.com/afex/hystrix-go v0.0.0-20180502004556-fa1af6a1f4f5/go.mod h1:SkGFH1ia65gfNATL8TAiHDNxPzPdmEL5uirI2Uyuz6c=
-github.com/aldelo/common v1.3.7 h1:cNvSSD3GXZQ8zklmWssVZ9ahUClWWacy7e8Afc7zBds=
-github.com/aldelo/common v1.3.7/go.mod h1:Gt5YbbfP4/+XRq7PPmFn06gGKLNy/q01sD8kbhrI4gc=
+github.com/aldelo/common v1.3.8 h1:mc7qJ8EMU5E/5oIc3I/FUjtqLDWSAMNYOfUmhsJ0Mc8=
+github.com/aldelo/common v1.3.8/go.mod h1:Ba9gNZbMS3rtUEOR3Pb36q4QOu/qAdAevbqbiYKAXTM=
 github.com/andybalholm/brotli v1.0.6 h1:Yf9fFpf49Zrxb9NlQaluyE92/+X7UVHlhMNJN2sxfOI=
 github.com/andybalholm/brotli v1.0.6/go.mod h1:fO7iG3H7G2nSZ7m0zPUDn85XEX2GTukHGRSepvi9Eig=
 github.com/antlr/antlr4 v0.0.0-20181218183524-be58ebffde8e/go.mod h1:T7PbCXFs94rrTttyxjbyT5+/1V8T2TYDejxUfHJjw1Y=
@@ -57,8 +57,8 @@ github.com/appleboy/gofight/v2 v2.1.2/go.mod h1:frW+U1QZEdDgixycTj4CygQ48yLTUhpl
 github.com/aws/aws-dax-go v1.2.13 h1:dSITSKKxugErsd00Js5Qhpb7bt3pPBbVcPIq5ra/5+I=
 github.com/aws/aws-dax-go v1.2.13/go.mod h1:SqxIoetx6kj8n3DHuCwOykVfPeuwm8xmabA4Nbf7Yq0=
 github.com/aws/aws-sdk-go v1.44.171/go.mod h1:aVsgQcEevwlmQ7qHE9I3h+dtQgpqhFB+i8Phjh7fkwI=
-github.com/aws/aws-sdk-go v1.48.0 h1:1SeJ8agckRDQvnSCt1dGZYAwUaoD2Ixj6IaXB4LCv8Q=
-github.com/aws/aws-sdk-go v1.48.0/go.mod h1:LF8svs817+Nz+DmiMQKTO3ubZ/6IaTpq3TjupRn3Eqk=
+github.com/aws/aws-sdk-go v1.48.3 h1:btYjT+opVFxUbRz+qSCjJe07cdX82BHmMX/FXYmoL7g=
+github.com/aws/aws-sdk-go v1.48.3/go.mod h1:LF8svs817+Nz+DmiMQKTO3ubZ/6IaTpq3TjupRn3Eqk=
 github.com/aws/aws-xray-sdk-go v1.8.3 h1:S8GdgVncBRhzbNnNUgTPwhEqhwt2alES/9rLASyhxjU=
 github.com/aws/aws-xray-sdk-go v1.8.3/go.mod h1:tv8uLMOSCABolrIF8YCcp3ghyswArsan8dfLCA1ZATk=
 github.com/benbjohnson/clock v1.3.0 h1:ip6w0uFQkncKQ979AypyG0ER7mqUSBdKLOgAle/AT8A=
