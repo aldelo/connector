@@ -25,6 +25,7 @@ import (
 	"github.com/aldelo/common/wrapper/sqs/sqscreatequeueattribute"
 	"github.com/aldelo/common/wrapper/sqs/sqssetqueueattribute"
 	awssqs "github.com/aws/aws-sdk-go/service/sqs"
+	"strings"
 	"time"
 )
 
@@ -59,7 +60,9 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 	queueUrl, notFound, err = q.GetQueueUrl(queueName, timeoutDuration...)
 
 	if err != nil {
-		return "", "", fmt.Errorf("GetQueue Failed: %s", err.Error())
+		if !(notFound && strings.Contains(err.Error(), "The specified queue does not exist")) {
+			return "", "", fmt.Errorf("GetQueue Failed: %s", err.Error())
+		}
 	}
 
 	if !notFound {
