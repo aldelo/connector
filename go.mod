@@ -3,7 +3,7 @@ module github.com/aldelo/connector
 go 1.20
 
 require (
-	github.com/aldelo/common v1.3.9
+	github.com/aldelo/common v1.4.0
 	github.com/aws/aws-sdk-go v1.49.13
 	github.com/aws/aws-xray-sdk-go v1.8.3
 	github.com/gin-contrib/cors v1.5.0

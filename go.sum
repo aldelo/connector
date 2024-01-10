@@ -43,8 +43,8 @@ github.com/DataDog/datadog-go v3.7.2+incompatible h1:o4QtYjBU/rG58VPh8Ne6F65YiMY
 github.com/DataDog/datadog-go v3.7.2+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
 github.com/afex/hystrix-go v0.0.0-20180502004556-fa1af6a1f4f5 h1:rFw4nCn9iMW+Vajsk51NtYIcwSTkXr+JGrMd36kTDJw=
 github.com/afex/hystrix-go v0.0.0-20180502004556-fa1af6a1f4f5/go.mod h1:SkGFH1ia65gfNATL8TAiHDNxPzPdmEL5uirI2Uyuz6c=
-github.com/aldelo/common v1.3.9 h1:Jo1MqB0REAG9TaDRUIjdzi21bUhMzx5vG8V38MCN2b0=
-github.com/aldelo/common v1.3.9/go.mod h1:0oIH46LWVu1SlpQZDyeNZUrMwu2pWA2agAD/82ZMm+I=
+github.com/aldelo/common v1.4.0 h1:NgH3WgUN+XeC6RVJt9PbtdPBf4y97WJoGg/JvF8ACqQ=
+github.com/aldelo/common v1.4.0/go.mod h1:0oIH46LWVu1SlpQZDyeNZUrMwu2pWA2agAD/82ZMm+I=
 github.com/andybalholm/brotli v1.0.6 h1:Yf9fFpf49Zrxb9NlQaluyE92/+X7UVHlhMNJN2sxfOI=
 github.com/andybalholm/brotli v1.0.6/go.mod h1:fO7iG3H7G2nSZ7m0zPUDn85XEX2GTukHGRSepvi9Eig=
 github.com/antlr/antlr4 v0.0.0-20181218183524-be58ebffde8e/go.mod h1:T7PbCXFs94rrTttyxjbyT5+/1V8T2TYDejxUfHJjw1Y=
