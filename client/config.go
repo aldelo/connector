@@ -419,7 +419,7 @@ func (c *config) Read() error {
 				return fmt.Errorf("Create Config File Failed: " + e.Error())
 			}
 		} else {
-			c._v.WatchConfig()
+			//c._v.WatchConfig()
 		}
 	}
 
