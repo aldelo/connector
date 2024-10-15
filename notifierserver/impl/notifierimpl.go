@@ -65,7 +65,7 @@ func (m *clientEndpointMap) Add(ep *clientEndpoint) bool {
 		m.Clients = make(map[string][]*clientEndpoint)
 	}
 
-	ep.DataToSend = make(chan *pb.NotificationData)
+	ep.DataToSend = make(chan *pb.NotificationData, 1)
 
 	epList := m.Clients[ep.TopicArn]
 	epList = append(epList, ep)
@@ -240,8 +240,13 @@ func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend 
 		for _, ep := range epList {
 			if ep != nil {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - Before <-dataToSend Assign to ep.DataToSend")
-				ep.DataToSend <- dataToSend
-				log.Println("Trace: SetDataSendByTopicArn (Loop) - After <-dataToSend Assign to ep.DataToSend")
+				select {
+				case ep.DataToSend <- dataToSend:
+					log.Println("Trace: SetDataSendByTopicArn (Loop) - After <-dataToSend Assign to ep.DataToSend")
+				case <-time.After(2 * time.Second):
+					log.Println("Trace: SetDataSendByTopicArn (Loop) - timeout(2s) on <-dataToSend Assign to ep.DataToSend")
+					continue
+				}
 			} else {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - ep Nil")
 			}
@@ -567,9 +572,12 @@ func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.N
 	}
 
 	// at this point, loop ended, we will clean up the client endpoint as the end of the service cycle
-	n._clients._mux.Lock()
-	n._clients.RemoveByClientId(ep.ClientId)
-	n._clients._mux.Unlock()
+	log.Println("### Notifier Server RPC Subscribe Send Loop Ending, Cleaning Up Client ID '" + ep.ClientId + "' ###")
+	func() {
+		n._clients._mux.Lock()
+		defer n._clients._mux.Unlock()
+		n._clients.RemoveByClientId(ep.ClientId)
+	}()
 	log.Println("### Notifier Server RPC Subscriber Send Loop Ended ###")
 
 	return nil
