@@ -369,7 +369,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 	nc := notifierpb.NewNotifierServiceClient(n._grpcClient.ClientConnection())
 
-	sessionId := util.NewULID()
+	sessionId := util.NewULID() + util.GetLocalIP()
+	n._grpcClient.ZLog().Printf("Notifier Client " + n.AppName + " Session ID Generated: " + sessionId)
 
 	seg := xray.NewSegmentNullable("GrpcClient-NotifierClient-SubscribeTopic")
 	if seg != nil {
