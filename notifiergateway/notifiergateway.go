@@ -22,6 +22,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -857,6 +858,9 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 	}
 
 	go func() {
+		// possible race condition
+		var mutex sync.Mutex
+
 		for {
 			select {
 			case <-stopService:
@@ -865,7 +869,7 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 
 			default:
 				log.Println(">>> Stale Health Report Record Remover - Processing Invoked <<<")
-				removeInactiveInstancesFromServiceDiscovery()
+				removeInactiveInstancesFromServiceDiscovery(&mutex)
 				time.Sleep(time.Duration(freq) * time.Second)
 			}
 		}
@@ -879,7 +883,7 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 // (this function is to be run from goroutine in for loop so it continuously checks for removal needs,
 //
 //	suggest 60 second wait before re-invoke this function from for loop)
-func removeInactiveInstancesFromServiceDiscovery() {
+func removeInactiveInstancesFromServiceDiscovery(mutex *sync.Mutex) {
 	if items, e := model.ListInactiveInstancesFromDataStore(); e != nil {
 		// error encountered
 		log.Println("!!! Remove Health Report Stale Records Failed: " + e.Error() + " !!!")
@@ -890,6 +894,9 @@ func removeInactiveInstancesFromServiceDiscovery() {
 		// has items to remove
 		keys := []*dynamodb.DynamoDBTableKeys{}
 		pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
+
+		mutex.Lock()
+		defer mutex.Unlock()
 
 		for _, v := range items {
 			if v != nil {
