@@ -18,13 +18,14 @@ package model
 
 import (
 	"fmt"
+	"time"
+
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/dynamodb"
 	"github.com/aldelo/connector/notifiergateway/config"
 	"github.com/aws/aws-sdk-go/aws"
 	ddb "github.com/aws/aws-sdk-go/service/dynamodb"
-	"time"
 )
 
 var DynamoDBActionRetryAttempts uint
@@ -214,13 +215,13 @@ func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instance
 	}
 }
 
-func DeleteInstanceHealthFromDataStore(instanceKeys ...*dynamodb.DynamoDBTableKeys) (deleteFailKeys []*dynamodb.DynamoDBTableKeys, err error) {
+func DeleteInstanceHealthFromDataStore(instanceKeys ...*dynamodb.DynamoDBTableKeyValue) (deleteFailKeys []*dynamodb.DynamoDBTableKeyValue, err error) {
 	if _ddbStore == nil {
-		return []*dynamodb.DynamoDBTableKeys{}, fmt.Errorf("Delete Instance Health From Data Store Failed: DynamoDB Connection Not Established")
+		return []*dynamodb.DynamoDBTableKeyValue{}, fmt.Errorf("Delete Instance Health From Data Store Failed: DynamoDB Connection Not Established")
 	}
 
 	if len(instanceKeys) == 0 {
-		return []*dynamodb.DynamoDBTableKeys{}, fmt.Errorf("Delete Instance Health From Data Store Failed: %s", "InstanceKeys To Delete is Required")
+		return []*dynamodb.DynamoDBTableKeyValue{}, fmt.Errorf("Delete Instance Health From Data Store Failed: %s", "InstanceKeys To Delete is Required")
 	}
 
 	if deleteFailKeys, err = _ddbStore.BatchDeleteItemsWithRetry(_ddbActionRetries, _ddbStore.TimeOutDuration(_ddbTimeoutSeconds), instanceKeys...); err != nil {
@@ -234,7 +235,7 @@ func DeleteInstanceHealthFromDataStore(instanceKeys ...*dynamodb.DynamoDBTableKe
 		}
 	} else {
 		// delete all success
-		return []*dynamodb.DynamoDBTableKeys{}, nil
+		return []*dynamodb.DynamoDBTableKeyValue{}, nil
 	}
 }
 

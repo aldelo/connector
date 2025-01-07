@@ -18,14 +18,19 @@ package resolver
 
 import (
 	"fmt"
+	"log"
+	"strings"
+	"sync"
+
 	util "github.com/aldelo/common"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/resolver/manual"
-	"log"
-	"strings"
 )
 
-var schemeMap map[string]*manual.Resolver
+var (
+	schemeMap map[string]*manual.Resolver
+	_mux      sync.Mutex // thread-safety for accessing and modifying schemeMap
+)
 
 func NewManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
 	if util.LenTrim(schemeName) == 0 {
@@ -50,11 +55,7 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 		Addresses: addrs,
 	})
 
-	if schemeMap == nil {
-		schemeMap = make(map[string]*manual.Resolver)
-	}
-
-	schemeMap[strings.ToLower(schemeName+serviceName)] = r
+	setResolver(schemeName, serviceName, r)
 
 	var builder resolver.Builder
 	builder = r
@@ -66,10 +67,6 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 }
 
 func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
-	if schemeMap == nil {
-		return fmt.Errorf("Resolver SchemeMap Nil")
-	}
-
 	if len(endpointAddrs) == 0 {
 		return fmt.Errorf("Endpoint Addresses Required")
 	}
@@ -82,23 +79,50 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		return fmt.Errorf("ServiceName is Required")
 	}
 
-	if r := schemeMap[strings.ToLower(schemeName+serviceName)]; r != nil {
-		addrs := []resolver.Address{}
+	r, err := getResolver(schemeName, serviceName)
+	if err != nil {
+		return err
+	}
 
-		for _, v := range endpointAddrs {
-			addrs = append(addrs, resolver.Address{
-				Addr: v,
-			})
-		}
+	addrs := []resolver.Address{}
 
-		r.UpdateState(resolver.State{
-			Addresses: addrs,
+	for _, v := range endpointAddrs {
+		addrs = append(addrs, resolver.Address{
+			Addr: v,
 		})
+	}
 
-		log.Println("[NOTE] Please Ignore Error 'Health check is requested but health check function is not set'; UpdateManualResolver is Completed")
+	r.UpdateState(resolver.State{
+		Addresses: addrs,
+	})
 
-		return nil
+	log.Println("[NOTE] Please Ignore Error 'Health check is requested but health check function is not set'; UpdateManualResolver is Completed")
+
+	return nil
+}
+
+func setResolver(schemeName string, serviceName string, r *manual.Resolver) {
+	_mux.Lock()
+	defer _mux.Unlock()
+
+	if schemeMap == nil {
+		schemeMap = make(map[string]*manual.Resolver)
+	}
+
+	schemeMap[strings.ToLower(schemeName+serviceName)] = r
+}
+
+func getResolver(schemeName string, serviceName string) (*manual.Resolver, error) {
+	_mux.Lock()
+	defer _mux.Unlock()
+
+	if schemeMap == nil {
+		return nil, fmt.Errorf("Resolver SchemeMap Nil")
+	}
+
+	if r := schemeMap[strings.ToLower(schemeName+serviceName)]; r != nil {
+		return r, nil
 	} else {
-		return fmt.Errorf("No Resolver Found for SchemeName '" + schemeName + "' in SchemeMap")
+		return nil, fmt.Errorf("No Resolver Found for SchemeName '" + schemeName + "' in SchemeMap")
 	}
 }

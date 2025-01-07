@@ -2,6 +2,12 @@ package notifiergateway
 
 import (
 	"fmt"
+	"log"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/crypto"
 	"github.com/aldelo/common/rest"
@@ -19,11 +25,6 @@ import (
 	"github.com/aldelo/connector/webserver"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"log"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 )
 
 /*
@@ -364,7 +365,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		defer trace.Close()
 
 		trace.Capture("healthReporter.deleteFromDataStore", func() error {
-			if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeys{PK: pk, SK: sk}); e != nil {
+			if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeyValue{PK: pk, SK: sk}); e != nil {
 				log.Println("!!! Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store Failed: " + e.Error() + " !!!")
 				c.String(500, "Delete Health Report Service Record From Data Store Failed")
 				return fmt.Errorf("Delete Health Report Service Record From Data Store Failed: %s", e.Error())
@@ -380,7 +381,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 			},
 		})
 	} else {
-		if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeys{PK: pk, SK: sk}); e != nil {
+		if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeyValue{PK: pk, SK: sk}); e != nil {
 			log.Println("!!! Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store Failed: " + e.Error() + " !!!")
 			c.String(500, "Delete Health Report Service Record From Data Store Failed")
 		} else {
@@ -892,7 +893,7 @@ func removeInactiveInstancesFromServiceDiscovery(mutex *sync.Mutex) {
 		log.Println("~~~ Health Report Stale Record Clean Up: 0 Found, All OK ~~~")
 	} else {
 		// has items to remove
-		keys := []*dynamodb.DynamoDBTableKeys{}
+		keys := []*dynamodb.DynamoDBTableKeyValue{}
 		pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
 
 		mutex.Lock()
@@ -902,7 +903,7 @@ func removeInactiveInstancesFromServiceDiscovery(mutex *sync.Mutex) {
 			if v != nil {
 				if e := sdDeregisterInstance(v.NamespaceId, v.ServiceId, v.InstanceId, v.AwsRegion); e == nil {
 					// deregister success, queue instance for delete from data store
-					keys = append(keys, &dynamodb.DynamoDBTableKeys{
+					keys = append(keys, &dynamodb.DynamoDBTableKeyValue{
 						PK: pk,
 						SK: fmt.Sprintf("InstanceID^%s", v.InstanceId),
 					})
@@ -912,7 +913,7 @@ func removeInactiveInstancesFromServiceDiscovery(mutex *sync.Mutex) {
 
 		if len(keys) > 0 {
 			// delete keys from data store
-			var deleteFailKeys []*dynamodb.DynamoDBTableKeys
+			var deleteFailKeys []*dynamodb.DynamoDBTableKeyValue
 
 			if deleteFailKeys, e = model.DeleteInstanceHealthFromDataStore(keys...); e != nil {
 				// all delete from data store failed
