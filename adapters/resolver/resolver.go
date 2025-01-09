@@ -57,12 +57,6 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 
 	setResolver(schemeName, serviceName, r)
 
-	var builder resolver.Builder
-	builder = r
-
-	resolver.Register(builder)
-	//resolver.SetDefaultScheme(r.Scheme())
-
 	return nil
 }
 
@@ -110,6 +104,13 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) {
 	}
 
 	schemeMap[strings.ToLower(schemeName+serviceName)] = r
+
+	// 1/9/2025 by yao.bin - Caution: There is a global map in "grpc/resolver", so we have to put "resolver.Register" in mutex lock too
+	var builder resolver.Builder
+	builder = r
+
+	resolver.Register(builder)
+	//resolver.SetDefaultScheme(r.Scheme())
 }
 
 func getResolver(schemeName string, serviceName string) (*manual.Resolver, error) {
