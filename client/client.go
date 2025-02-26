@@ -521,7 +521,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	}
 
 	// discover service endpoints
-	if err := c.discoverEndpoints(); err != nil {
+	if err := c.discoverEndpoints(true); err != nil {
 		return err
 	} else if len(c._endpoints) == 0 {
 		return fmt.Errorf("No Service Endpoints Discovered for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
@@ -678,6 +678,83 @@ func (c *Client) Dial(ctx context.Context) error {
 	}
 }
 
+// GetLiveEndpointsCount queries cloudmap to retrieve live endpoints count,
+// optionally update endpoints into client cache
+//
+// if updateEndpointsToLoadBalanceResolver = true, then endpoint addresses will force refresh from cloudmap
+func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool) (int, error) {
+	if c._conn == nil {
+		c._z.Errorf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Requires Current Client Connection Already Established First")
+		return 0, fmt.Errorf("GetLiveEndpointsCount Requires Current Client Connection Already Established First")
+	}
+
+	if c._config.Target.ServiceDiscoveryType == "direct" {
+		c._z.Warnf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Service Discovery Type is Direct")
+		return 0, nil
+	}
+
+	c._z.Printf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Started...")
+
+	forceRefresh := false
+
+	if len(c._endpoints) == 0 || updateEndpointsToLoadBalanceResolver {
+		// force refresh endpoints
+		forceRefresh = true
+	}
+
+	if e := c.discoverEndpoints(forceRefresh); e != nil {
+		s := "GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Error) " + e.Error()
+		c._z.Errorf(s)
+		return 0, fmt.Errorf(s)
+	}
+
+	if len(c._endpoints) == 0 {
+		s := "GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Yielded Zero)"
+		c._z.Errorf(s)
+		return 0, fmt.Errorf(s)
+	}
+
+	if updateEndpointsToLoadBalanceResolver {
+		// get endpoint addresses
+		endpointAddrs := []string{}
+
+		for i, ep := range c._endpoints {
+			endpointAddrs = append(endpointAddrs, fmt.Sprintf("%s:%s", ep.Host, util.UintToStr(ep.Port)))
+
+			info := strconv.Itoa(i+1) + ") "
+			info += ep.SdType + "=" + ep.Host + ":" + util.UintToStr(ep.Port) + ", "
+			info += "Version=" + ep.Version + ", "
+			info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
+
+			c._z.Printf("       - " + info)
+		}
+
+		if len(endpointAddrs) == 0 {
+			s := "GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Endpoint Addresses Required"
+			c._z.Errorf(s)
+			return 0, fmt.Errorf(s)
+		}
+
+		// update load balance resolver with new endpoint addresses
+		serviceName := fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
+
+		schemeName, _ := util.ExtractAlpha(c._config.AppName)
+		schemeName = "clb" + schemeName
+
+		if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
+			c._z.Errorf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: " + e.Error())
+			return 0, e
+		}
+
+		c._z.Printf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' OK")
+	}
+
+	c._z.Printf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' OK")
+
+	// get live endpoints count
+	return len(c._endpoints), nil
+}
+
 // UpdateLoadBalanceResolves updates client load balancer resolver state with new endpoint addresses
 func (c *Client) UpdateLoadBalanceResolver() error {
 	if c._conn == nil {
@@ -693,7 +770,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	c._z.Printf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Started...")
 
 	if len(c._endpoints) == 0 {
-		if e := c.discoverEndpoints(); e != nil {
+		if e := c.discoverEndpoints(false); e != nil {
 			s := "UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Error) " + e.Error()
 			c._z.Errorf(s)
 			return fmt.Errorf(s)
@@ -1121,7 +1198,7 @@ func (c *Client) connectSd() error {
 }
 
 // discoverEndpoints uses srv, a, api, or direct to query endpoints
-func (c *Client) discoverEndpoints() error {
+func (c *Client) discoverEndpoints(forceRefresh bool) error {
 	if c._config == nil {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
@@ -1142,10 +1219,10 @@ func (c *Client) discoverEndpoints() error {
 		fallthrough
 	case "a":
 		return c.setDnsDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceDiscoveryType == "srv", c._config.Target.ServiceName,
-			c._config.Target.NamespaceName, c._config.Target.InstancePort)
+			c._config.Target.NamespaceName, c._config.Target.InstancePort, forceRefresh)
 	case "api":
 		return c.setApiDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceName, c._config.Target.NamespaceName, c._config.Target.InstanceVersion,
-			int64(c._config.Target.SdInstanceMaxResult), c._config.Target.SdTimeout)
+			int64(c._config.Target.SdInstanceMaxResult), c._config.Target.SdTimeout, forceRefresh)
 	default:
 		return fmt.Errorf("Unexpected Service Discovery Type: " + c._config.Target.ServiceDiscoveryType)
 	}
@@ -1177,7 +1254,7 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 	return nil
 }
 
-func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, serviceName string, namespaceName string, instancePort uint) error {
+func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, serviceName string, namespaceName string, instancePort uint, forceRefresh bool) error {
 	if util.LenTrim(serviceName) == 0 {
 		return fmt.Errorf("Service Name Not Defined in Config (SRV / A SD)")
 	}
@@ -1200,7 +1277,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	//
 	found := _cache.GetLiveServiceEndpoints(serviceName+"."+namespaceName, "")
 
-	if len(found) > 0 {
+	if len(found) > 0 && !forceRefresh {
 		c._endpoints = found
 		c._z.Printf("Using DNS Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
 		for _, v := range c._endpoints {
@@ -1258,7 +1335,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	}
 }
 
-func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint) error {
+func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint, forceRefresh bool) error {
 	if c._sd == nil {
 		return fmt.Errorf("Service Discovery Client Not Connected")
 	}
@@ -1279,7 +1356,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	//
 	found := _cache.GetLiveServiceEndpoints(serviceName+"."+namespaceName, version)
 
-	if len(found) > 0 {
+	if len(found) > 0 && !forceRefresh {
 		c._endpoints = found
 		c._z.Printf("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
 		for _, v := range c._endpoints {
