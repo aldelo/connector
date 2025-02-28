@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.23.3
 
 require (
-	github.com/aldelo/common v1.6.0
+	github.com/aldelo/common v1.6.1
 	github.com/aws/aws-sdk-go v1.55.6
 	github.com/aws/aws-xray-sdk-go v1.8.5
 	github.com/gin-contrib/cors v1.7.4-0.20250212004727-dac7b691dacc
