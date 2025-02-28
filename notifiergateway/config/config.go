@@ -18,6 +18,9 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"strings"
+
 	util "github.com/aldelo/common"
 	data "github.com/aldelo/common/wrapper/viper"
 )
@@ -190,6 +193,9 @@ func (c *Config) Read() error {
 
 // Save persists config settings to disk
 func (c *Config) Save() error {
+	if strings.ToLower(os.Getenv("CONFIG_READ_ONLY")) == "true" {
+		return nil
+	}
 	if c._v != nil {
 		return c._v.Save()
 	} else {
