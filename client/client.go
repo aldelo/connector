@@ -19,6 +19,13 @@ package client
 import (
 	"context"
 	"fmt"
+	"log"
+	"path"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/rest"
 	"github.com/aldelo/common/tlsconfig"
@@ -47,12 +54,6 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/stats"
-	"log"
-	"path"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 )
 
 // client side cache
@@ -65,6 +66,8 @@ func init() {
 func ClearEndpointCache() {
 	_cache = new(Cache)
 }
+
+var _mux sync.Mutex // thread-safety for accessing resolver map in DialContext()
 
 // Client represents a gRPC client's connection and entry point,
 // also provides optional gin based web server upon dial
@@ -602,7 +605,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			defer seg.Close()
 		}
 
-		if c._conn, err = grpc.DialContext(ctxWithTimeout, target, opts...); err != nil {
+		if c._conn, err = muxDialContext(ctxWithTimeout, target, opts...); err != nil {
 			c._z.Errorf("Dial Failed: (If TLS/mTLS, Check Certificate SAN) %s", err.Error())
 			e := fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: (If TLS/mTLS, Check Certificate SAN) %s", target, err.Error())
 			if seg != nil {
@@ -676,6 +679,13 @@ func (c *Client) Dial(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func muxDialContext(ctx context.Context, target string, opts ...grpc.DialOption) (conn *grpc.ClientConn, err error) {
+	_mux.Lock()
+	defer _mux.Unlock()
+
+	return grpc.DialContext(ctx, target, opts...)
 }
 
 // GetLiveEndpointsCount queries cloudmap to retrieve live endpoints count,
