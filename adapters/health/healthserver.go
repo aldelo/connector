@@ -19,9 +19,12 @@ package health
 import (
 	"context"
 	"fmt"
-	util "github.com/aldelo/common"
-	"google.golang.org/grpc/health/grpc_health_v1"
 	"log"
+
+	util "github.com/aldelo/common"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 )
 
 type HealthServer struct {
@@ -78,4 +81,9 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 
 func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, server grpc_health_v1.Health_WatchServer) error {
 	return fmt.Errorf("Health Server Watch Not Supported, Use Check Instead")
+}
+
+func (h *HealthServer) List(ctx context.Context, req *grpc_health_v1.HealthListRequest) (*grpc_health_v1.HealthListResponse, error) {
+	// minimal implementation; fill out with your existing status map
+	return nil, status.Errorf(codes.Unimplemented, "List not implemented yet")
 }
