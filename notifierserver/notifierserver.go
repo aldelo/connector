@@ -53,6 +53,9 @@ package notifierserver
 import (
 	"context"
 	"fmt"
+	"log"
+	"time"
+
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	ginw "github.com/aldelo/common/wrapper/gin"
@@ -64,8 +67,6 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc"
-	"log"
-	"time"
 )
 
 var notifierServer *impl.NotifierImpl
