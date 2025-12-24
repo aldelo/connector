@@ -177,6 +177,10 @@ func NewClient(appName string, configFileName string, customConfigPath string) *
 
 // readConfig will read in config data
 func (c *Client) readConfig() error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	c._config = &config{
 		AppName:          c.AppName,
 		ConfigFileName:   c.ConfigFileName,
@@ -212,6 +216,10 @@ func (c *Client) readConfig() error {
 
 // buildDialOptions returns slice of dial options built from client struct fields
 func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOption, err error) {
+	if c == nil {
+		return []grpc.DialOption{}, fmt.Errorf("Client Object Nil")
+	}
+
 	if c._config == nil {
 		return []grpc.DialOption{}, fmt.Errorf("Config Data Not Loaded")
 	}
@@ -375,6 +383,11 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 // ZLog access internal zap logger
 func (c *Client) ZLog() *data.ZapLog {
+	if c == nil {
+		log.Println("ZLog(): Client Object Nil")
+		return nil
+	}
+
 	if c._z != nil {
 		return c._z
 	} else {
@@ -401,6 +414,10 @@ func (c *Client) ZLog() *data.ZapLog {
 
 // PreloadConfigData will load the config data before Dial()
 func (c *Client) PreloadConfigData() error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if err := c.readConfig(); err != nil {
 		return err
 	} else {
@@ -410,6 +427,11 @@ func (c *Client) PreloadConfigData() error {
 
 // ConfiguredDialMinConnectTimeoutSeconds gets the timeout seconds from config yaml
 func (c *Client) ConfiguredDialMinConnectTimeoutSeconds() uint {
+	if c == nil {
+		log.Println("ConfiguredDialMinConnectTimeoutSeconds(): Client Object Nil")
+		return 5
+	}
+
 	if c._config != nil {
 		if c._config.Grpc.DialMinConnectTimeout > 0 {
 			return c._config.Grpc.DialMinConnectTimeout
@@ -421,6 +443,11 @@ func (c *Client) ConfiguredDialMinConnectTimeoutSeconds() uint {
 
 // ConfiguredForClientDial checks if the config yaml is ready for client dial operation
 func (c *Client) ConfiguredForClientDial() bool {
+	if c == nil {
+		log.Println("ConfiguredForClientDial(): Client Object Nil")
+		return false
+	}
+
 	if c._config == nil {
 		return false
 	}
@@ -450,6 +477,11 @@ func (c *Client) ConfiguredForClientDial() bool {
 
 // ConfiguredForSNSDiscoveryTopicArn indicates if the sns topic arn for service discovery is configured within the config yaml
 func (c *Client) ConfiguredForSNSDiscoveryTopicArn() bool {
+	if c == nil {
+		log.Println("ConfiguredForSNSDiscoveryTopicArn(): Client Object Nil")
+		return false
+	}
+
 	if c._config == nil {
 		return false
 	}
@@ -463,6 +495,11 @@ func (c *Client) ConfiguredForSNSDiscoveryTopicArn() bool {
 
 // ConfiguredSNSDiscoveryTopicArn returns the sns discovery topic arn as configured in config yaml
 func (c *Client) ConfiguredSNSDiscoveryTopicArn() string {
+	if c == nil {
+		log.Println("ConfiguredSNSDiscoveryTopicArn(): Client Object Nil")
+		return ""
+	}
+
 	if c._config == nil {
 		return ""
 	}
@@ -472,6 +509,10 @@ func (c *Client) ConfiguredSNSDiscoveryTopicArn() string {
 
 // Ready indicates client connection is ready to invoke grpc methods
 func (c *Client) Ready() bool {
+	if c == nil {
+		log.Println("Ready(): Client Object Nil")
+		return false
+	}
 	if c._conn != nil && len(c._endpoints) > 0 && (c._conn.GetState() == connectivity.Ready || c._conn.GetState() == connectivity.Idle) {
 		return true
 	} else {
@@ -481,6 +522,10 @@ func (c *Client) Ready() bool {
 
 // Dial will dial grpc service and establish client connection
 func (c *Client) Dial(ctx context.Context) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	c._remoteAddress = ""
 
 	// read client config data in
@@ -693,6 +738,10 @@ func muxDialContext(ctx context.Context, target string, opts ...grpc.DialOption)
 //
 // if updateEndpointsToLoadBalanceResolver = true, then endpoint addresses will force refresh from cloudmap
 func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool) (int, error) {
+	if c == nil {
+		return 0, fmt.Errorf("Client Object Nil")
+	}
+
 	if c._conn == nil {
 		c._z.Errorf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Requires Current Client Connection Already Established First")
 		return 0, fmt.Errorf("GetLiveEndpointsCount Requires Current Client Connection Already Established First")
@@ -767,6 +816,10 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 
 // UpdateLoadBalanceResolves updates client load balancer resolver state with new endpoint addresses
 func (c *Client) UpdateLoadBalanceResolver() error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if c._conn == nil {
 		c._z.Errorf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Requires Current Client Connection Already Established First")
 		return fmt.Errorf("UpdateLoadBalanceResolver Requires Current Client Connection Already Established First")
@@ -832,6 +885,10 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 //				  svc1Cli.DoNotifierAlertService()
 //			  }()
 func (c *Client) DoNotifierAlertService() (err error) {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	// finally, run notifier client to subscribe for notification callbacks
 	// the notifier client uses the same client config yaml, but a copy of it to keep the scope separated
 	// within the notifier client config yaml, named xyz-notifier-client.yaml, where xyz is the endpoint service name,
@@ -966,6 +1023,10 @@ func (c *Client) DoNotifierAlertService() (err error) {
 // waitForWebServerReady is called after web server is expected to start,
 // this function will wait a short time for web server startup success or timeout
 func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if util.LenTrim(c.WebServerConfig.WebServerLocalAddress) == 0 {
 		return fmt.Errorf("Web Server Host Address is Empty")
 	}
@@ -1035,6 +1096,10 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 
 // waitForEndpointReady is called after Dial to check if target service is ready as reported by health probe
 func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	var timeout time.Duration
 
 	if len(timeoutDuration) > 0 {
@@ -1091,6 +1156,11 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 
 // setupHealthManualChecker sets up the HealthChecker for manual use by HealthProbe method
 func (c *Client) setupHealthManualChecker() {
+	if c == nil {
+		log.Println("setupHealthManualChecker(): Client Object Nil")
+		return
+	}
+
 	if c._conn == nil {
 		return
 	}
@@ -1100,6 +1170,10 @@ func (c *Client) setupHealthManualChecker() {
 
 // HealthProbe manually checks service serving health status
 func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) {
+	if c == nil {
+		return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Client Object Nil")
+	}
+
 	if c._healthManualChecker == nil {
 		if c._conn != nil {
 			c.setupHealthManualChecker()
@@ -1120,6 +1194,11 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 
 // GetState returns the current grpc client connection's state
 func (c *Client) GetState() connectivity.State {
+	if c == nil {
+		log.Println("GetState(): Client Object Nil")
+		return connectivity.Shutdown
+	}
+
 	if c._conn != nil {
 		return c._conn.GetState()
 	} else {
@@ -1129,6 +1208,11 @@ func (c *Client) GetState() connectivity.State {
 
 // Close will close grpc client connection
 func (c *Client) Close() {
+	if c == nil {
+		log.Println("Close(): Client Object Nil")
+		return
+	}
+
 	if c.BeforeClientClose != nil {
 		c._z.Printf("Before gRPC Client Close Begin...")
 
@@ -1182,16 +1266,30 @@ func (c *Client) Close() {
 
 // ClientConnection returns the currently loaded grpc client connection
 func (c *Client) ClientConnection() grpc.ClientConnInterface {
+	if c == nil {
+		log.Println("ClientConnection(): Client Object Nil")
+		return nil
+	}
+
 	return c._conn
 }
 
 // RemoteAddress gets the remote endpoint address currently connected to
 func (c *Client) RemoteAddress() string {
+	if c == nil {
+		log.Println("RemoteAddress(): Client Object Nil")
+		return ""
+	}
+
 	return c._remoteAddress
 }
 
 // connectSd will try to establish service discovery object to struct
 func (c *Client) connectSd() error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if util.LenTrim(c._config.Target.NamespaceName) > 0 && util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.Region) > 0 {
 		c._sd = &cloudmap.CloudMap{
 			AwsRegion: awsregion.GetAwsRegion(c._config.Target.Region),
@@ -1209,6 +1307,10 @@ func (c *Client) connectSd() error {
 
 // discoverEndpoints uses srv, a, api, or direct to query endpoints
 func (c *Client) discoverEndpoints(forceRefresh bool) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if c._config == nil {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
@@ -1239,6 +1341,10 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 }
 
 func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort string) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	v := strings.Split(directIpPort, ":")
 	ip := ""
 	port := uint(0)
@@ -1265,6 +1371,10 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 }
 
 func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, serviceName string, namespaceName string, instancePort uint, forceRefresh bool) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if util.LenTrim(serviceName) == 0 {
 		return fmt.Errorf("Service Name Not Defined in Config (SRV / A SD)")
 	}
@@ -1299,6 +1409,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	//
 	// acquire dns ip port from service discovery
 	//
+	log.Printf("Start DiscoverDnsIps %s.%s SRV=%v", serviceName, namespaceName, srv)
 	if ipList, err := registry.DiscoverDnsIps(serviceName+"."+namespaceName, srv); err != nil {
 		return fmt.Errorf("Service Discovery By DNS Failed: " + err.Error())
 	} else {
@@ -1346,6 +1457,10 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 }
 
 func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint, forceRefresh bool) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if c._sd == nil {
 		return fmt.Errorf("Service Discovery Client Not Connected")
 	}
@@ -1396,6 +1511,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		customAttr = nil
 	}
 
+	log.Printf("Start DiscoverInstances %s.%s attr=%v count=%d", serviceName, namespaceName, customAttr, maxCount)
 	if instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, true, customAttr, &maxCount, timeoutDuration...); err != nil {
 		return fmt.Errorf("Service Discovery By API Failed: " + err.Error())
 	} else {
@@ -1419,6 +1535,10 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 
 // findUnhealthyInstances will call cloud map sd to discover unhealthy instances, a slice of unhealthy instances is returned
 func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint) (unhealthyList []*serviceEndpoint, err error) {
+	if c == nil {
+		return []*serviceEndpoint{}, fmt.Errorf("Client Object Nil")
+	}
+
 	if c._sd == nil {
 		return []*serviceEndpoint{}, fmt.Errorf("Service Discovery Client Not Connected")
 	}
@@ -1470,6 +1590,10 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 
 // updateHealth will update instance health
 func (c *Client) updateHealth(p *serviceEndpoint, healthy bool) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if c._sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
 		var timeoutDuration []time.Duration
 
@@ -1485,6 +1609,10 @@ func (c *Client) updateHealth(p *serviceEndpoint, healthy bool) error {
 
 // deregisterInstance will remove instance from cloudmap and route 53
 func (c *Client) deregisterInstance(p *serviceEndpoint) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if c._sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
 		c._z.Printf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Begin...")
 
@@ -1529,6 +1657,10 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 }
 
 func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if c._config.Grpc.CircuitBreakerEnabled {
 		c._z.Printf("In - Unary Circuit Breaker Handler: " + method)
 
@@ -1592,6 +1724,10 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 }
 
 func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	if c == nil {
+		return nil, fmt.Errorf("Client Object Nil")
+	}
+
 	if c._config.Grpc.CircuitBreakerEnabled {
 		c._z.Printf("In - Stream Circuit Breaker Handler: " + method)
 
@@ -1663,6 +1799,10 @@ func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.Str
 }
 
 func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if xray.XRayServiceOn() {
 		parentSegID := ""
 		parentTraceID := ""
@@ -1715,6 +1855,10 @@ func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req 
 }
 
 func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (cs grpc.ClientStream, err error) {
+	if c == nil {
+		return cs, fmt.Errorf("Client Object Nil")
+	}
+
 	if xray.XRayServiceOn() {
 		parentSegID := ""
 		parentTraceID := ""
@@ -1808,6 +1952,10 @@ type WebServerConfig struct {
 }
 
 func (c *Client) startWebServer() error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+
 	if c.WebServerConfig == nil {
 		return fmt.Errorf("Start Web Server Failed: Web Server Config Not Setup")
 	}
