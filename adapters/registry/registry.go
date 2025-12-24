@@ -18,10 +18,12 @@ package registry
 
 import (
 	"fmt"
+	"log"
+	"time"
+
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
-	"time"
 )
 
 type InstanceInfo struct {
@@ -202,6 +204,7 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 	}
 
 	if lst, e := sd.DiscoverInstances(namespaceName, serviceName, healthy, customAttributes, maxResults, timeoutDuration...); e != nil {
+		log.Printf("Discover Instances Failed for Service: %v, %s.%s", err, serviceName, namespaceName)
 		return []*InstanceInfo{}, e
 	} else {
 		for _, v := range lst {
@@ -217,6 +220,11 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 			})
 		}
 
+		if len(instanceList) == 0 {
+			log.Printf("Discover Instances Returned No Results for Service: %s.%s", serviceName, namespaceName)
+		}
+
+		log.Printf("Discover Instances Returned %v for Service: %s.%s", instanceList, serviceName, namespaceName)
 		return instanceList, nil
 	}
 }
