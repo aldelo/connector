@@ -115,9 +115,9 @@ func (p *HystrixGoPlugin) Exec(async bool,
 	dataIn interface{}) (interface{}, error) {
 
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	hystrixGo := p.HystrixGo
+	p.mu.RUnlock()
+
 	if hystrixGo == nil {
 		return nil, fmt.Errorf("HystrixGo Object Not Initialized")
 	}
@@ -146,9 +146,9 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 	dataIn interface{}) (interface{}, error) {
 
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	hystrixGo := p.HystrixGo
+	p.mu.RUnlock()
+
 	if hystrixGo == nil {
 		return nil, fmt.Errorf("HystrixGo Object Not Initialized")
 	}
@@ -163,6 +163,9 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 
 	// surface the original context error (deadline/cancel) instead of a generic message
 	if err := ctx.Err(); err != nil {
+		if fallbackFn != nil {
+			return fallbackFn(dataIn, err, ctx)
+		}
 		return nil, err
 	}
 
