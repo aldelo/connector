@@ -30,6 +30,10 @@ import (
 // HystrixGoPlugin each instance represents a specific command
 // circuit breaker is tracking against multiple commands
 // use a map to track all commands and invoke circuit breaker per command
+//
+// HystrixGo must not be set to nil or swapped after initialization unless
+// the plugin is discarded and not currently in service. Methods are concurrency-safe,
+// but best practice is one plugin per command lifecycle.
 type HystrixGoPlugin struct {
 	HystrixGo *hystrixgo.CircuitBreaker
 	mu        sync.RWMutex
@@ -100,9 +104,10 @@ func NewHystrixGoPlugin(commandName string,
 }
 
 // Exec offers both async and sync execution of circuit breaker action
+// Note: fallbackFn may be nil if no fallback logic is required
 //
 // runFn = function to be executed under circuit breaker
-// fallbackFn = function to be executed if runFn fails
+// fallbackFn = function to be executed if runFn fails (can be nil)
 // dataIn = input parameter value for runFn and fallbackFn
 func (p *HystrixGoPlugin) Exec(async bool,
 	runFn func(dataIn interface{}, ctx ...context.Context) (dataOut interface{}, err error),
@@ -110,9 +115,10 @@ func (p *HystrixGoPlugin) Exec(async bool,
 	dataIn interface{}) (interface{}, error) {
 
 	p.mu.RLock()
-	defer p.mu.RUnlock()
+	hystrixGo := p.HystrixGo
+	p.mu.RUnlock()
 
-	if p.HystrixGo == nil {
+	if hystrixGo == nil {
 		return nil, fmt.Errorf("HystrixGo Object Not Initialized")
 	}
 
@@ -121,13 +127,14 @@ func (p *HystrixGoPlugin) Exec(async bool,
 	}
 
 	if async {
-		return p.HystrixGo.Go(runFn, fallbackFn, dataIn)
+		return hystrixGo.Go(runFn, fallbackFn, dataIn)
 	} else {
-		return p.HystrixGo.Do(runFn, fallbackFn, dataIn)
+		return hystrixGo.Do(runFn, fallbackFn, dataIn)
 	}
 }
 
 // ExecWithContext offers both async and sync execution of circuit breaker action with context
+// Note: fallbackFn may be nil if no fallback logic is required
 //
 // runFn = function to be executed under circuit breaker
 // fallbackFn = function to be executed if runFn fails
@@ -139,9 +146,10 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 	dataIn interface{}) (interface{}, error) {
 
 	p.mu.RLock()
-	defer p.mu.RUnlock()
+	hystrixGo := p.HystrixGo
+	p.mu.RUnlock()
 
-	if p.HystrixGo == nil {
+	if hystrixGo == nil {
 		return nil, fmt.Errorf("HystrixGo Object Not Initialized")
 	}
 
@@ -153,20 +161,28 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 		return nil, fmt.Errorf("HystrixGo ExecWithContext runFn Function Is Nil")
 	}
 
+	// context canceled double-check
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("ExecWithContext: context canceled before circuit breaker execution")
+	default:
+	}
+
 	if async {
-		return p.HystrixGo.GoC(ctx, runFn, fallbackFn, dataIn)
+		return hystrixGo.GoC(ctx, runFn, fallbackFn, dataIn)
 	} else {
-		return p.HystrixGo.DoC(ctx, runFn, fallbackFn, dataIn)
+		return hystrixGo.DoC(ctx, runFn, fallbackFn, dataIn)
 	}
 }
 
 // Reset will cause circuit breaker to reset all circuits from memory
 func (p *HystrixGoPlugin) Reset() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	hystrixGo := p.HystrixGo
+	p.mu.Unlock()
 
-	if p.HystrixGo != nil {
-		p.HystrixGo.FlushAll()
+	if hystrixGo != nil {
+		hystrixGo.FlushAll()
 	}
 }
 
@@ -185,36 +201,37 @@ func (p *HystrixGoPlugin) Update(timeout int,
 	logger *data.ZapLog) error {
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	hystrixGo := p.HystrixGo
+	p.mu.Unlock()
 
-	if p.HystrixGo == nil {
+	if hystrixGo == nil {
 		return fmt.Errorf("HystrixGo Object Not Initialized")
 	}
 
 	// Only update values if > 0, otherwise preserve current values
 	if timeout > 0 {
-		p.HystrixGo.TimeOut = timeout
+		hystrixGo.TimeOut = timeout
 	}
 	if maxConcurrentRequests > 0 {
-		p.HystrixGo.MaxConcurrentRequests = maxConcurrentRequests
+		hystrixGo.MaxConcurrentRequests = maxConcurrentRequests
 	}
 	if requestVolumeThreshold > 0 {
-		p.HystrixGo.RequestVolumeThreshold = requestVolumeThreshold
+		hystrixGo.RequestVolumeThreshold = requestVolumeThreshold
 	}
 	if sleepWindow > 0 {
-		p.HystrixGo.SleepWindow = sleepWindow
+		hystrixGo.SleepWindow = sleepWindow
 	}
 	if errorPercentThreshold > 0 {
-		p.HystrixGo.ErrorPercentThreshold = errorPercentThreshold
+		hystrixGo.ErrorPercentThreshold = errorPercentThreshold
 	}
 
 	if logger != nil {
-		p.HystrixGo.Logger = logger
+		hystrixGo.Logger = logger
 	}
 
 	// These functions presumably handle their own concurrency
-	p.HystrixGo.UpdateConfig()
-	p.HystrixGo.UpdateLogger()
+	hystrixGo.UpdateConfig()
+	hystrixGo.UpdateLogger()
 
 	return nil
 }
@@ -223,9 +240,10 @@ func (p *HystrixGoPlugin) Update(timeout int,
 // true = disable; false = re-engage circuit breaker service
 func (p *HystrixGoPlugin) Disable(b bool) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	hystrixGo := p.HystrixGo
+	p.mu.Unlock()
 
-	if p.HystrixGo != nil {
-		p.HystrixGo.DisableCircuitBreaker = b
+	if hystrixGo != nil {
+		hystrixGo.DisableCircuitBreaker = b
 	}
 }
