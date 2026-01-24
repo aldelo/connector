@@ -161,11 +161,9 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 		return nil, fmt.Errorf("HystrixGo ExecWithContext runFn Function Is Nil")
 	}
 
-	// context canceled double-check
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("ExecWithContext: context canceled before circuit breaker execution")
-	default:
+	// surface the original context error (deadline/cancel) instead of a generic message
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	if async {
@@ -226,9 +224,8 @@ func (p *HystrixGoPlugin) Update(timeout int,
 		hystrixGo.ErrorPercentThreshold = errorPercentThreshold
 	}
 
-	if logger != nil {
-		hystrixGo.Logger = logger
-	}
+	// allow explicitly disabling logging (nil => no logs) per documented contract
+	hystrixGo.Logger = logger
 
 	// These functions presumably handle their own concurrency
 	hystrixGo.UpdateConfig()
