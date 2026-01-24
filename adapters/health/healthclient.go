@@ -24,7 +24,9 @@ import (
 
 	util "github.com/aldelo/common"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 
 	"strings"
 )
@@ -52,20 +54,19 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: %s", "Health Check Client Nil")
 	}
 
+	const defaultTimeout = 5 * time.Second // avoid indefinite hang
+
+	// track effective timeout for clearer error messages
+	effectiveTimeout := defaultTimeout
+	if len(timeoutDuration) > 0 && timeoutDuration[0] > 0 {
+		effectiveTimeout = timeoutDuration[0]
+	}
+
 	var (
 		ctx    context.Context
 		cancel context.CancelFunc
 	)
-
-	const defaultTimeout = 5 * time.Second // avoid indefinite hang
-
-	// sanitize timeout input and ensure a usable timeout
-	switch {
-	case len(timeoutDuration) > 0 && timeoutDuration[0] > 0:
-		ctx, cancel = context.WithTimeout(context.Background(), timeoutDuration[0])
-	default:
-		ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
-	}
+	ctx, cancel = context.WithTimeout(context.Background(), effectiveTimeout)
 	defer cancel()
 
 	// trim service name before use
@@ -78,10 +79,32 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 
 	resp, err := h.hcClient.Check(ctx, in)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: (Timeout Exceeded after %s)", ctx.Err().Error())
+		// classify gRPC status codes for accurate reporting
+		if st, ok := status.FromError(err); ok {
+			switch st.Code() {
+			case codes.DeadlineExceeded:
+				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+					fmt.Errorf("Health Check Failed: (Timeout exceeded after %s)", effectiveTimeout)
+			case codes.Canceled:
+				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+					fmt.Errorf("Health Check Failed: (Context canceled) %s", st.Message())
+			case codes.Unavailable:
+				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+					fmt.Errorf("Health Check Failed: (Service unavailable) %s", st.Message())
+			default:
+				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+					fmt.Errorf("Health Check Failed: (Call Health Server Error) [%s] %s", st.Code(), st.Message())
+			}
 		}
-		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: (Call Health Server Error) %s", err.Error())
+
+		// Fallback for non-status errors (kept from original logic)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+				fmt.Errorf("Health Check Failed: (Timeout exceeded after %s)", effectiveTimeout)
+		}
+
+		return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+			fmt.Errorf("Health Check Failed: (Call Health Server Error) %s", err.Error())
 	}
 
 	if resp == nil {
