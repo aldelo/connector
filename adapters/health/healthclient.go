@@ -1,7 +1,7 @@
 package health
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,10 +19,13 @@ package health
 import (
 	"context"
 	"fmt"
+	"time"
+
 	util "github.com/aldelo/common"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
-	"time"
+
+	"strings"
 )
 
 type HealthClient struct {
@@ -44,24 +47,30 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: %s", "Health Check Client Nil")
 	}
 
-	var ctx context.Context
-	var cancel context.CancelFunc
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
 
-	if len(timeoutDuration) > 0 {
+	const defaultTimeout = 5 * time.Second // avoid indefinite hang
+
+	// sanitize timeout input and ensure a usable timeout
+	switch {
+	case len(timeoutDuration) > 0 && timeoutDuration[0] > 0:
 		ctx, cancel = context.WithTimeout(context.Background(), timeoutDuration[0])
-	} else {
-		ctx = context.Background()
+	default:
+		ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
 	}
+
+	// trim service name before use
+	trimmedSvc := strings.TrimSpace(svcName)
 
 	in := &grpc_health_v1.HealthCheckRequest{}
-
-	if util.LenTrim(svcName) > 0 {
-		in.Service = svcName
+	if util.LenTrim(trimmedSvc) > 0 {
+		in.Service = trimmedSvc
 	}
 
-	if cancel != nil {
-		defer cancel()
-	}
+	defer cancel()
 
 	if resp, err := h.hcClient.Check(ctx, in); err != nil {
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: (Call Health Server Error) %s", err.Error())
