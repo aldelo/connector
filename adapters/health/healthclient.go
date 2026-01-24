@@ -54,6 +54,12 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: %s", "Health Check Client Nil")
 	}
 
+	// reject multiple timeout arguments to avoid silent misuse.
+	if len(timeoutDuration) > 1 {
+		return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+			fmt.Errorf("Health Check Failed: only one timeoutDuration argument is allowed (got %d)", len(timeoutDuration))
+	}
+
 	const defaultTimeout = 5 * time.Second // avoid indefinite hang
 
 	// track effective timeout for clearer error messages
