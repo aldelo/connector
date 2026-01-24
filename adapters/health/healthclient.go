@@ -97,10 +97,16 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 			}
 		}
 
-		// Fallback for non-status errors (kept from original logic)
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		// distinguish cancellation from timeout in non-status errors
+		if errors.Is(err, context.DeadlineExceeded) {
 			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
 				fmt.Errorf("Health Check Failed: (Timeout exceeded after %s)", effectiveTimeout)
+		}
+		
+		// report caller/transport cancellation accurately
+		if errors.Is(err, context.Canceled) {
+			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+				fmt.Errorf("Health Check Failed: (Context canceled) %w", err)
 		}
 
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN,
