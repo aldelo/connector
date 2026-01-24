@@ -22,6 +22,8 @@ import (
 	data "github.com/aldelo/common/wrapper/zap"
 )
 
+// CircuitBreakerIFace defines the contract for circuit breaker adapters, including execution,
+// fallback handling, configuration updates, and enable/disable control.
 type CircuitBreakerIFace interface {
 	// Exec offers both async and sync execution of circuit breaker action
 	//
