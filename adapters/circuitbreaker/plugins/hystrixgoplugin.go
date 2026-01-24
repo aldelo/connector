@@ -116,21 +116,28 @@ func (p *HystrixGoPlugin) Exec(async bool,
 
 	p.mu.RLock()
 	hystrixGo := p.HystrixGo
-	p.mu.RUnlock()
 
 	if hystrixGo == nil {
+		p.mu.RUnlock()
 		return nil, fmt.Errorf("HystrixGo Object Not Initialized")
 	}
 
 	if runFn == nil {
+		p.mu.RUnlock()
 		return nil, fmt.Errorf("HystrixGo Exec runFn Function Is Nil")
 	}
 
+	var out interface{}
+	var err error
+
 	if async {
-		return hystrixGo.Go(runFn, fallbackFn, dataIn)
+		out, err = hystrixGo.Go(runFn, fallbackFn, dataIn)
+	} else {
+		out, err = hystrixGo.Do(runFn, fallbackFn, dataIn)
 	}
 
-	return hystrixGo.Do(runFn, fallbackFn, dataIn)
+	p.mu.RUnlock()
+	return out, err
 }
 
 // ExecWithContext offers both async and sync execution of circuit breaker action with context
@@ -147,33 +154,42 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 
 	p.mu.RLock()
 	hystrixGo := p.HystrixGo
-	p.mu.RUnlock()
 
 	if hystrixGo == nil {
+		p.mu.RUnlock()
 		return nil, fmt.Errorf("HystrixGo Object Not Initialized")
 	}
 
 	if ctx == nil {
+		p.mu.RUnlock()
 		return nil, fmt.Errorf("HystrixGo ExecWithContext ctx Context Is Nil")
 	}
 
 	if runFn == nil {
+		p.mu.RUnlock()
 		return nil, fmt.Errorf("HystrixGo ExecWithContext runFn Function Is Nil")
 	}
 
 	// surface the original context error (deadline/cancel) instead of a generic message
 	if err := ctx.Err(); err != nil {
+		p.mu.RUnlock()
 		if fallbackFn != nil {
 			return fallbackFn(dataIn, err, ctx)
 		}
 		return nil, err
 	}
 
+	var out interface{}
+	var err error
+
 	if async {
-		return hystrixGo.GoC(ctx, runFn, fallbackFn, dataIn)
+		out, err = hystrixGo.GoC(ctx, runFn, fallbackFn, dataIn)
+	} else {
+		out, err = hystrixGo.DoC(ctx, runFn, fallbackFn, dataIn)
 	}
 
-	return hystrixGo.DoC(ctx, runFn, fallbackFn, dataIn)
+	p.mu.RUnlock()
+	return out, err
 }
 
 // Reset will cause circuit breaker to reset all circuits from memory
