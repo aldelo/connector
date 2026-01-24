@@ -1,7 +1,7 @@
 package circuitbreaker
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package circuitbreaker
 
 import (
 	"context"
+
 	data "github.com/aldelo/common/wrapper/zap"
 )
 
