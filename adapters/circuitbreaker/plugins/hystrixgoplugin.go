@@ -127,17 +127,13 @@ func (p *HystrixGoPlugin) Exec(async bool,
 		return nil, fmt.Errorf("HystrixGo Exec runFn Function Is Nil")
 	}
 
-	var out interface{}
-	var err error
+	p.mu.RUnlock()
 
 	if async {
-		out, err = hystrixGo.Go(runFn, fallbackFn, dataIn)
-	} else {
-		out, err = hystrixGo.Do(runFn, fallbackFn, dataIn)
+		return hystrixGo.Go(runFn, fallbackFn, dataIn)
 	}
 
-	p.mu.RUnlock()
-	return out, err
+	return hystrixGo.Do(runFn, fallbackFn, dataIn)
 }
 
 // ExecWithContext offers both async and sync execution of circuit breaker action with context
@@ -179,17 +175,13 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 		return nil, err
 	}
 
-	var out interface{}
-	var err error
+	p.mu.RUnlock()
 
 	if async {
-		out, err = hystrixGo.GoC(ctx, runFn, fallbackFn, dataIn)
-	} else {
-		out, err = hystrixGo.DoC(ctx, runFn, fallbackFn, dataIn)
+		return hystrixGo.GoC(ctx, runFn, fallbackFn, dataIn)
 	}
 
-	p.mu.RUnlock()
-	return out, err
+	return hystrixGo.DoC(ctx, runFn, fallbackFn, dataIn)
 }
 
 // Reset will cause circuit breaker to reset all circuits from memory
