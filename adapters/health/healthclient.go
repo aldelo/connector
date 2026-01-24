@@ -84,25 +84,25 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 			switch st.Code() {
 			case codes.DeadlineExceeded:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Timeout exceeded after %s)", effectiveTimeout)
+					fmt.Errorf("Health Check Failed: (Timeout exceeded after %s): %w", effectiveTimeout, err)
 			case codes.Canceled:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Context canceled) %s", st.Message())
+					fmt.Errorf("Health Check Failed: (Context canceled) %w", err)
 			case codes.Unavailable:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Service unavailable) %s", st.Message())
+					fmt.Errorf("Health Check Failed: (Service unavailable) %w", err)
 			default:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Call Health Server Error) [%s] %s", st.Code(), st.Message())
+					fmt.Errorf("Health Check Failed: (Call Health Server Error) [%s]: %w", st.Code(), err)
 			}
 		}
 
 		// distinguish cancellation from timeout in non-status errors
 		if errors.Is(err, context.DeadlineExceeded) {
 			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-				fmt.Errorf("Health Check Failed: (Timeout exceeded after %s)", effectiveTimeout)
+				fmt.Errorf("Health Check Failed: (Timeout exceeded after %s): %w", effectiveTimeout, err)
 		}
-		
+
 		// report caller/transport cancellation accurately
 		if errors.Is(err, context.Canceled) {
 			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
@@ -110,7 +110,7 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 		}
 
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-			fmt.Errorf("Health Check Failed: (Call Health Server Error) %s", err.Error())
+			fmt.Errorf("Health Check Failed: (Call Health Server Error) %w", err)
 	}
 
 	if resp == nil {
