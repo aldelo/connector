@@ -58,16 +58,29 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 
 	// track effective timeout for clearer error messages
 	effectiveTimeout := defaultTimeout
-	if len(timeoutDuration) > 0 && timeoutDuration[0] > 0 {
-		effectiveTimeout = timeoutDuration[0]
+	useTimeout := true
+	if len(timeoutDuration) > 0 {
+		switch t := timeoutDuration[0]; {
+		case t < 0:
+			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+				fmt.Errorf("Health Check Failed: invalid timeout %s (must be >= 0)", t)
+		case t == 0:
+			useTimeout = false // caller explicitly requested no timeout
+		default:
+			effectiveTimeout = t
+		}
 	}
 
 	var (
 		ctx    context.Context
 		cancel context.CancelFunc
 	)
-	ctx, cancel = context.WithTimeout(context.Background(), effectiveTimeout)
-	defer cancel()
+	if useTimeout {
+		ctx, cancel = context.WithTimeout(context.Background(), effectiveTimeout)
+		defer cancel()
+	} else {
+		ctx = context.Background()
+	}
 
 	// trim service name before use
 	trimmedSvc := strings.TrimSpace(svcName)
@@ -83,8 +96,13 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 		if st, ok := status.FromError(err); ok {
 			switch st.Code() {
 			case codes.DeadlineExceeded:
+				if useTimeout {
+					return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+						fmt.Errorf("Health Check Failed: (Timeout exceeded after %s): %w", effectiveTimeout, err)
+				}
+				// no-timeout call should not hit this unless server imposed its own deadline
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Timeout exceeded after %s): %w", effectiveTimeout, err)
+					fmt.Errorf("Health Check Failed: (Server/transport deadline exceeded): %w", err)
 			case codes.Canceled:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
 					fmt.Errorf("Health Check Failed: (Context canceled) %w", err)
@@ -99,8 +117,12 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 
 		// distinguish cancellation from timeout in non-status errors
 		if errors.Is(err, context.DeadlineExceeded) {
+			if useTimeout {
+				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+					fmt.Errorf("Health Check Failed: (Timeout exceeded after %s): %w", effectiveTimeout, err)
+			}
 			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-				fmt.Errorf("Health Check Failed: (Timeout exceeded after %s): %w", effectiveTimeout, err)
+				fmt.Errorf("Health Check Failed: (Server/transport deadline exceeded): %w", err)
 		}
 
 		// report caller/transport cancellation accurately
