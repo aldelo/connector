@@ -115,9 +115,9 @@ func (p *HystrixGoPlugin) Exec(async bool,
 	dataIn interface{}) (interface{}, error) {
 
 	p.mu.RLock()
-	hystrixGo := p.HystrixGo
-	p.mu.RUnlock()
+	defer p.mu.RUnlock()
 
+	hystrixGo := p.HystrixGo
 	if hystrixGo == nil {
 		return nil, fmt.Errorf("HystrixGo Object Not Initialized")
 	}
@@ -128,9 +128,9 @@ func (p *HystrixGoPlugin) Exec(async bool,
 
 	if async {
 		return hystrixGo.Go(runFn, fallbackFn, dataIn)
-	} else {
-		return hystrixGo.Do(runFn, fallbackFn, dataIn)
 	}
+
+	return hystrixGo.Do(runFn, fallbackFn, dataIn)
 }
 
 // ExecWithContext offers both async and sync execution of circuit breaker action with context
@@ -146,9 +146,9 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 	dataIn interface{}) (interface{}, error) {
 
 	p.mu.RLock()
-	hystrixGo := p.HystrixGo
-	p.mu.RUnlock()
+	defer p.mu.RUnlock()
 
+	hystrixGo := p.HystrixGo
 	if hystrixGo == nil {
 		return nil, fmt.Errorf("HystrixGo Object Not Initialized")
 	}
@@ -168,9 +168,9 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 
 	if async {
 		return hystrixGo.GoC(ctx, runFn, fallbackFn, dataIn)
-	} else {
-		return hystrixGo.DoC(ctx, runFn, fallbackFn, dataIn)
 	}
+
+	return hystrixGo.DoC(ctx, runFn, fallbackFn, dataIn)
 }
 
 // Reset will cause circuit breaker to reset all circuits from memory
