@@ -178,8 +178,9 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 // Reset will cause circuit breaker to reset all circuits from memory
 func (p *HystrixGoPlugin) Reset() {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	hystrixGo := p.HystrixGo
-	p.mu.Unlock()
 
 	if hystrixGo != nil {
 		hystrixGo.FlushAll()
@@ -201,14 +202,14 @@ func (p *HystrixGoPlugin) Update(timeout int,
 	logger *data.ZapLog) error {
 
 	p.mu.Lock()
-	hystrixGo := p.HystrixGo
-	p.mu.Unlock()
+	defer p.mu.Unlock()
 
+	hystrixGo := p.HystrixGo
 	if hystrixGo == nil {
 		return fmt.Errorf("HystrixGo Object Not Initialized")
 	}
 
-	// Only update values if > 0, otherwise preserve current values
+	// keep lock while mutating shared config to avoid data races with Exec/Hystrix usage
 	if timeout > 0 {
 		hystrixGo.TimeOut = timeout
 	}
@@ -240,9 +241,9 @@ func (p *HystrixGoPlugin) Update(timeout int,
 // true = disable; false = re-engage circuit breaker service
 func (p *HystrixGoPlugin) Disable(b bool) {
 	p.mu.Lock()
-	hystrixGo := p.HystrixGo
-	p.mu.Unlock()
+	defer p.mu.Unlock()
 
+	hystrixGo := p.HystrixGo
 	if hystrixGo != nil {
 		hystrixGo.DisableCircuitBreaker = b
 	}
