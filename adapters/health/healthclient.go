@@ -18,6 +18,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -43,6 +44,10 @@ func NewHealthClient(conn *grpc.ClientConn) (*HealthClient, error) {
 }
 
 func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) {
+	if h == nil { // guard nil receiver to avoid panic
+		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: %s", "HealthClient receiver is nil")
+	}
+
 	if h.hcClient == nil {
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: %s", "Health Check Client Nil")
 	}
@@ -61,6 +66,7 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 	default:
 		ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
 	}
+	defer cancel()
 
 	// trim service name before use
 	trimmedSvc := strings.TrimSpace(svcName)
@@ -70,11 +76,17 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 		in.Service = trimmedSvc
 	}
 
-	defer cancel()
-
-	if resp, err := h.hcClient.Check(ctx, in); err != nil {
+	resp, err := h.hcClient.Check(ctx, in)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: (Timeout Exceeded after %s)", ctx.Err().Error())
+		}
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: (Call Health Server Error) %s", err.Error())
-	} else {
-		return resp.Status, nil
 	}
+
+	if resp == nil {
+		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: (Health Server Response Nil)")
+	}
+
+	return resp.Status, nil
 }
