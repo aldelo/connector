@@ -45,7 +45,13 @@ func NewHealthClient(conn *grpc.ClientConn) (*HealthClient, error) {
 	}, nil
 }
 
-func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) {
+// Check preserves the original API but now delegates to the context-aware version
+func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) { // CHANGED
+	return h.CheckContext(context.Background(), svcName, timeoutDuration...)
+}
+
+// CheckContext allows callers to propagate cancellation, deadlines, and metadata
+func (h *HealthClient) CheckContext(ctx context.Context, svcName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) {
 	if h == nil { // guard nil receiver to avoid panic
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: %s", "HealthClient receiver is nil")
 	}
@@ -77,15 +83,19 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 		}
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	var (
-		ctx    context.Context
-		cancel context.CancelFunc
+		childCtx context.Context
+		cancel   context.CancelFunc
 	)
 	if useTimeout {
-		ctx, cancel = context.WithTimeout(context.Background(), effectiveTimeout)
+		childCtx, cancel = context.WithTimeout(ctx, effectiveTimeout)
 		defer cancel()
 	} else {
-		ctx = context.Background()
+		childCtx = ctx
 	}
 
 	// trim service name before use
@@ -96,7 +106,7 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 		in.Service = trimmedSvc
 	}
 
-	resp, err := h.hcClient.Check(ctx, in)
+	resp, err := h.hcClient.Check(childCtx, in)
 	if err != nil {
 		// classify gRPC status codes for accurate reporting
 		if st, ok := status.FromError(err); ok {
@@ -115,6 +125,12 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 			case codes.Unavailable:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
 					fmt.Errorf("Health Check Failed: (Service unavailable) %w", err)
+			case codes.NotFound:
+				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+					fmt.Errorf("Health Check Failed: (Service not found) %w", err)
+			case codes.Unimplemented:
+				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
+					fmt.Errorf("Health Check Failed: (Health service unimplemented on server) %w", err)
 			default:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
 					fmt.Errorf("Health Check Failed: (Call Health Server Error) [%s]: %w", st.Code(), err)
