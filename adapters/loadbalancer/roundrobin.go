@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	res "github.com/aldelo/connector/adapters/resolver"
+	_ "google.golang.org/grpc/balancer/roundrobin"
 )
 
 // add precompiled regex for scheme validation
@@ -80,6 +81,14 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		host, port, splitErr := net.SplitHostPort(trimmed)
 		if splitErr != nil || host == "" || port == "" {
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (want host:port; IPv6 must be in [::1]:port form): %w", i, a, splitErr)
+		}
+
+		// allow absolute FQDNs with trailing dot; still reject empty host
+		if !strings.Contains(host, ":") && strings.HasSuffix(host, ".") {
+			host = strings.TrimSuffix(host, ".")
+			if host == "" {
+				return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (host cannot be empty)", i, a)
+			}
 		}
 
 		// ensure host segment itself has no embedded scheme/path
