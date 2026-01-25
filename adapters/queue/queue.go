@@ -43,6 +43,33 @@ func NewQueueAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2.HttpCl
 	}
 }
 
+// composeSnsPolicy builds the policy that allows an SNS topic to send to the queue
+func composeSnsPolicy(snsTopicArn, queueArn string) string {
+	if util.LenTrim(snsTopicArn) == 0 || util.LenTrim(queueArn) == 0 {
+		return ""
+	}
+
+	policy := `{ 
+		  "Statement": [{ 
+			"Effect":"Allow", 
+			"Principal": { 
+			  "Service": "sns.amazonaws.com" 
+			}, 
+			"Action":"sqs:SendMessage", 
+			"Resource":"[QUEUE-ARN]", 
+			"Condition":{ 
+			  "ArnEquals":{ 
+				"aws:SourceArn":"[TOPIC-ARN]" 
+			  } 
+			} 
+		  }] 
+		}`
+
+	policy = util.Replace(policy, "[TOPIC-ARN]", snsTopicArn)
+	policy = util.Replace(policy, "[QUEUE-ARN]", queueArn)
+	return policy
+}
+
 // GetQueue will retrieve queueUrl and queueArn based on queueName,
 // if queue is not found, a new queue will be created with the given queueName
 // snsTopicArn = optional, set sns topic arn if needing to allow sns topic to send message to this newly created sqs
@@ -68,6 +95,17 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 		if queueArn, e := q.GetQueueArnFromQueue(queueUrl, timeoutDuration...); e != nil {
 			return "", "", fmt.Errorf("GetQueue Failed: (%s) %s", "Get Queue ARN From Attribute Error", e.Error())
 		} else {
+			// Apply SNS policy even when queue already exists
+			if util.LenTrim(snsTopicArn) > 0 {
+				if policy := composeSnsPolicy(snsTopicArn, queueArn); util.LenTrim(policy) > 0 {
+					if err = q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
+						sqssetqueueattribute.Policy: policy,
+					}, timeoutDuration...); err != nil {
+						return "", "", fmt.Errorf("GetQueue Failed: (%s) %s", "Set Queue Attribute Policy Error", err.Error())
+					}
+				}
+			}
+
 			return queueUrl, queueArn, nil
 		}
 	} else {
