@@ -76,9 +76,21 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 
 	svcName := strings.TrimSpace(req.GetService())
 	if util.LenTrim(svcName) == 0 {
-		svcName = "*"
+		svcName = ""
 	}
 	log.Println("Health Check Invoked for " + svcName + "...")
+
+	// invoke health check handler
+	fn := h.handlerFor(svcName)
+	if fn == nil && h.DefaultHealthCheck != nil {
+		fn = h.DefaultHealthCheck
+	}
+
+	// if no handler exists, return NOT_FOUND per gRPC health spec guidance
+	if fn == nil { // distinguish “no handler” from “handler returned UNKNOWN”
+		log.Printf("... Health Check Result for %s = %s [No Handler]", svcName, grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN.String())
+		return nil, status.Errorf(codes.NotFound, "health check handler not found for %q", svcName)
+	}
 
 	var statusVal grpc_health_v1.HealthCheckResponse_ServingStatus
 
@@ -92,17 +104,7 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 		}
 	}()
 
-	// invoke health check handler
-	fn := h.handlerFor(svcName)
-	if fn == nil && h.DefaultHealthCheck != nil {
-		fn = h.DefaultHealthCheck
-	}
-
-	if fn != nil {
-		statusVal = fn(ctx)
-	} else {
-		statusVal = grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN
-	}
+	statusVal = fn(ctx)
 
 	// follow gRPC health spec—unknown service returns NOT_FOUND
 	if statusVal == grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN {
