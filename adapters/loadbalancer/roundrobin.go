@@ -26,11 +26,15 @@ import (
 
 // WithRoundRobin returns gRPC dial target, and defaultServiceConfig set for Round Robin client side load balancer
 func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []string) (target string, loadBalancerPolicy string, err error) {
-	if util.LenTrim(serviceName) == 0 {
+	// trim inputs before validation/use
+	scheme := strings.TrimSpace(schemeName)
+	service := strings.TrimSpace(serviceName)
+
+	if util.LenTrim(service) == 0 {
 		return "", "", fmt.Errorf("Resolver Service Name is Required")
 	}
 
-	if util.LenTrim(schemeName) == 0 {
+	if util.LenTrim(scheme) == 0 {
 		return "", "", fmt.Errorf("Resolver Scheme Name is Required")
 	}
 
@@ -50,14 +54,14 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required (All Were Empty)")
 	}
 
-	if err = res.NewManualResolver(schemeName, serviceName, endpointAddrs); err != nil {
+	if err = res.NewManualResolver(scheme, service, cleanAddrs); err != nil {
 		return "", "", fmt.Errorf("Setup CLB New Resolver Failed: %s", err.Error())
 	}
 
 	// load balancer round robin is per call, rather than per connection
 	// this means, load balancer will connect to all discovered ip and
 	// perform per call actions in round robin fashion across all channels
-	target = fmt.Sprintf("%s:///%s", schemeName, serviceName)
+	target = fmt.Sprintf("%s:///%s", scheme, service)
 
 	// return a valid gRPC service config string for round_robin
 	loadBalancerPolicy = `{"loadBalancingConfig":[{"round_robin":{}}]}`
