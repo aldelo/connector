@@ -33,26 +33,46 @@ type HealthServer struct {
 	DefaultHealthCheck                       func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 	HealthCheckHandlers                      map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 	mu                                       sync.RWMutex
+	handlers                                 map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 }
 
 func NewHealthServer(
 	defaultCheck func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus,
-	serviceChecks map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	serviceChecks map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus,
 ) *HealthServer {
 
 	var hc map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 	if serviceChecks != nil {
 		hc = make(map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus, len(serviceChecks))
 		for name, fn := range serviceChecks {
-			hc[name] = fn
+			if fn != nil {
+				hc[name] = fn
+			}
 		}
 	}
 
 	return &HealthServer{
 		DefaultHealthCheck:  defaultCheck,
-		HealthCheckHandlers: hc,
+		HealthCheckHandlers: serviceChecks,
+		handlers:            hc,
 	}
 
+}
+
+// public helper for safe, concurrent registration.
+func (h *HealthServer) RegisterHandler(service string, fn func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus) {
+	if h == nil || fn == nil {
+		return
+	}
+	service = strings.TrimSpace(service)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.handlers == nil { // should not happen, but defensive
+		h.handlers = make(map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus)
+	}
+	h.handlers[service] = fn
 }
 
 // centralized, concurrency-safe handler lookup with wildcard support
@@ -60,21 +80,21 @@ func (h *HealthServer) handlerFor(service string) func(context.Context) grpc_hea
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	if h.HealthCheckHandlers == nil {
+	if h.handlers == nil { // use internal map only
 		return nil
 	}
 
-	if fn := h.HealthCheckHandlers[service]; fn != nil {
+	if fn := h.handlers[service]; fn != nil {
 		return fn
 	}
 
 	if service == "" {
-		if fn := h.HealthCheckHandlers[""]; fn != nil {
+		if fn := h.handlers[""]; fn != nil {
 			return fn
 		}
 	}
 
-	if fn := h.HealthCheckHandlers["*"]; fn != nil {
+	if fn := h.handlers["*"]; fn != nil {
 		return fn
 	}
 
