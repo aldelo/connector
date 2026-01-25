@@ -96,8 +96,24 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (host must not contain scheme or path)", i, a)
 		}
 
-		// validate host labels for DNS names (skip IPv6 literals)
-		if !strings.Contains(host, ":") { // heuristically treat as DNS/IPv4 (IPv6 literals have ':')
+		var ipHost net.IP
+		ipZone := ""
+
+		if strings.Contains(host, ":") { // treat colon hosts as IP literals (IPv6 or IPv4-mapped)
+			baseHost := host
+			if zoneIdx := strings.LastIndex(host, "%"); zoneIdx != -1 {
+				baseHost = host[:zoneIdx]
+				ipZone = host[zoneIdx+1:]
+				if ipZone == "" { // validate non-empty zone if present
+					return "", "", fmt.Errorf("resolver endpoint address %d (%q) has invalid IPv6 zone (empty)", i, a)
+				}
+			}
+			ipHost = net.ParseIP(baseHost)
+			if ipHost == nil { // reject invalid IP literals
+				return "", "", fmt.Errorf("resolver endpoint address %d (%q) has invalid IP literal %q", i, a, baseHost)
+			}
+		} else {
+			// validate host labels for DNS names (skip IP literals)
 			labels := strings.Split(host, ".")
 			for _, lbl := range labels {
 				if lbl == "" || !hostLabelRE.MatchString(lbl) {
@@ -113,7 +129,12 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 
 		// canonicalize hostname for deduplication (lowercase DNS; preserve IP/zone) and rebuild
 		canonicalHost := host
-		if ip := net.ParseIP(host); ip == nil { // DNS name
+		if ipHost != nil { // canonicalize IP literal (preserve zone)
+			canonicalHost = ipHost.String()
+			if ipZone != "" {
+				canonicalHost = canonicalHost + "%" + ipZone
+			}
+		} else {
 			canonicalHost = strings.ToLower(host)
 		}
 		canonical := net.JoinHostPort(canonicalHost, port)
