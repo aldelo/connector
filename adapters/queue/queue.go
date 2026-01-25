@@ -19,6 +19,7 @@ package queue
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	util "github.com/aldelo/common"
@@ -75,6 +76,13 @@ func composeSnsPolicy(snsTopicArn, queueArn string) string {
 
 // helper to safely merge SNS policy without overwriting existing statements
 func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeoutDuration ...time.Duration) error {
+	const sqsPolicySizeLimit = 20480 // enforce AWS 20 KB policy limit
+
+	// trim to reject whitespace-only inputs
+	queueUrl = strings.TrimSpace(queueUrl)
+	queueArn = strings.TrimSpace(queueArn)
+	snsTopicArn = strings.TrimSpace(snsTopicArn)
+
 	// added queueUrl validation to fail fast before API calls
 	if util.LenTrim(queueUrl) == 0 {
 		return fmt.Errorf("ensureSnsPolicy: queueUrl is required")
@@ -119,6 +127,10 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 		bytes, marshalErr := json.Marshal(policy)
 		if marshalErr != nil {
 			return fmt.Errorf("ensureSnsPolicy: marshal new policy failed: %w", marshalErr)
+		}
+		// guard against AWS 20 KB policy size limit
+		if len(bytes) > sqsPolicySizeLimit {
+			return fmt.Errorf("ensureSnsPolicy: policy size %d exceeds 20KB limit", len(bytes))
 		}
 		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{sqssetqueueattribute.Policy: string(bytes)}, timeoutDuration...)
 	}
@@ -217,6 +229,10 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	if marshalErr != nil {
 		return fmt.Errorf("ensureSnsPolicy: marshal merged policy failed: %w", marshalErr)
 	}
+	// guard against AWS 20 KB policy size limit
+	if len(bytes) > sqsPolicySizeLimit {
+		return fmt.Errorf("ensureSnsPolicy: merged policy size %d exceeds 20KB limit", len(bytes))
+	}
 
 	return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{sqssetqueueattribute.Policy: string(bytes)}, timeoutDuration...)
 }
@@ -239,6 +255,11 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 
 	if err != nil {
 		return "", "", fmt.Errorf("GetQueue Failed: %s", err.Error())
+	}
+
+	if util.LenTrim(queueUrl) == 0 {
+		// defensive guard against empty URL on a successful lookup
+		return "", "", fmt.Errorf("GetQueue Failed: queue URL is empty")
 	}
 
 	if !notFound {
@@ -373,7 +394,7 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 		failList = append(failList, batchFail...)
 
 		if batchErr != nil {
-			return failList, fmt.Errorf("DeleteMessages Failed: " + batchErr.Error())
+			return failList, fmt.Errorf("DeleteMessages Failed: %d message(s) failed deletion; error: %s", len(batchFail), batchErr.Error())
 		}
 	}
 
