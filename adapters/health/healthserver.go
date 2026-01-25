@@ -70,6 +70,14 @@ func (h *HealthServer) handlerFor(service string) func(context.Context) grpc_hea
 }
 
 func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (resp *grpc_health_v1.HealthCheckResponse, err error) {
+	if h == nil {
+		return nil, status.Errorf(codes.Internal, "Health Server Not Initialized")
+	}
+
+	if req == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "Health Check Request Nil")
+	}
+
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, status.FromContextError(ctxErr).Err()
 	}
