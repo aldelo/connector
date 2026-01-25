@@ -32,6 +32,9 @@ var schemeRE = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
 // enforce URI-safe service names (RFC3986 unreserved + '.' '_' '-')
 var serviceRE = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
 
+// host label must not start/end with hyphen or dot; allow IPv6 literals separately
+var hostLabelRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+
 // WithRoundRobin returns gRPC dial target, and defaultServiceConfig set for Round Robin client side load balancer
 func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []string) (target string, loadBalancerPolicy string, err error) {
 	// trim inputs before validation/use
@@ -84,16 +87,33 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (host must not contain scheme or path)", i, a)
 		}
 
+		// validate host labels for DNS names (skip IPv6 literals)
+		if !strings.Contains(host, ":") { // heuristically treat as DNS/IPv4 (IPv6 literals have ':')
+			labels := strings.Split(host, ".")
+			for _, lbl := range labels {
+				if lbl == "" || !hostLabelRE.MatchString(lbl) {
+					return "", "", fmt.Errorf("resolver endpoint address %d (%q) has invalid host label %q", i, a, lbl)
+				}
+			}
+		}
+
 		// validate port is numeric and within 1-65535
 		if p, convErr := strconv.Atoi(port); convErr != nil || p < 1 || p > 65535 {
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) has invalid port %q (must be numeric 1-65535): %v", i, a, port, convErr)
 		}
 
-		if _, ok := seen[trimmed]; ok {
+		// canonicalize hostname for deduplication (lowercase DNS; preserve IP/zone) and rebuild
+		canonicalHost := host
+		if ip := net.ParseIP(host); ip == nil { // DNS name
+			canonicalHost = strings.ToLower(host)
+		}
+		canonical := net.JoinHostPort(canonicalHost, port)
+
+		if _, ok := seen[canonical]; ok {
 			continue // skip duplicates
 		}
-		seen[trimmed] = struct{}{}
-		cleanAddrs = append(cleanAddrs, trimmed)
+		seen[canonical] = struct{}{}
+		cleanAddrs = append(cleanAddrs, canonical)
 	}
 	if len(cleanAddrs) == 0 {
 		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required (all were empty, duplicate, or invalid)")
