@@ -75,8 +75,15 @@ func composeSnsPolicy(snsTopicArn, queueArn string) string {
 
 // helper to safely merge SNS policy without overwriting existing statements
 func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeoutDuration ...time.Duration) error {
-	if q == nil || util.LenTrim(snsTopicArn) == 0 || util.LenTrim(queueArn) == 0 {
-		return nil
+	// Fail fast on invalid inputs so policy application cannot silently no-op.
+	if q == nil {
+		return fmt.Errorf("ensureSnsPolicy: queue client is required")
+	}
+	if util.LenTrim(queueArn) == 0 {
+		return fmt.Errorf("ensureSnsPolicy: queueArn is required")
+	}
+	if util.LenTrim(snsTopicArn) == 0 {
+		return fmt.Errorf("ensureSnsPolicy: snsTopicArn is required")
 	}
 
 	// Fetch existing policy (if any)
@@ -113,10 +120,9 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 
 	// Try to merge into existing policy; fall back to overwrite if parse fails
 	var policyDoc map[string]interface{}
+	// surface the error so callers can fix it without losing statements.
 	if err := json.Unmarshal([]byte(existing), &policyDoc); err != nil {
-		// safest path: set a minimal policy that enables SNS (better than silently failing)
-		policy := composeSnsPolicy(snsTopicArn, queueArn)
-		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{sqssetqueueattribute.Policy: policy}, timeoutDuration...)
+		return fmt.Errorf("ensureSnsPolicy: existing policy is invalid JSON; refusing to overwrite: %w", err)
 	}
 
 	statements := []interface{}{}
