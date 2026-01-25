@@ -17,6 +17,7 @@ package queue
  */
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/sqs"
 	"github.com/aldelo/common/wrapper/sqs/sqscreatequeueattribute"
+	"github.com/aldelo/common/wrapper/sqs/sqsgetqueueattribute"
 	"github.com/aldelo/common/wrapper/sqs/sqssetqueueattribute"
 	awssqs "github.com/aws/aws-sdk-go/service/sqs"
 )
@@ -71,6 +73,87 @@ func composeSnsPolicy(snsTopicArn, queueArn string) string {
 	return policy
 }
 
+// helper to safely merge SNS policy without overwriting existing statements
+func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeoutDuration ...time.Duration) error {
+	if q == nil || util.LenTrim(snsTopicArn) == 0 || util.LenTrim(queueArn) == 0 {
+		return nil
+	}
+
+	// Fetch existing policy (if any)
+	attrs, err := q.GetQueueAttributes(queueUrl, []sqsgetqueueattribute.SQSGetQueueAttribute{
+		sqsgetqueueattribute.Policy,
+	}, timeoutDuration...)
+	if err != nil {
+		return fmt.Errorf("GetQueue Failed: (Get Queue Attributes Error) %s", err.Error())
+	}
+
+	existing := ""
+	if v, ok := attrs[sqsgetqueueattribute.Policy]; ok {
+		existing = v
+	}
+
+	newStmt := map[string]interface{}{
+		"Effect":    "Allow",
+		"Principal": map[string]interface{}{"Service": "sns.amazonaws.com"},
+		"Action":    "sqs:SendMessage",
+		"Resource":  queueArn,
+		"Condition": map[string]interface{}{"ArnEquals": map[string]interface{}{"aws:SourceArn": snsTopicArn}},
+	}
+
+	// If no existing policy, create a new one
+	if util.LenTrim(existing) == 0 {
+		policy := map[string]interface{}{
+			"Version":   "2012-10-17",
+			"Statement": []interface{}{newStmt},
+		}
+		bytes, _ := json.Marshal(policy)
+		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
+			sqssetqueueattribute.Policy: string(bytes),
+		}, timeoutDuration...)
+	}
+
+	// Try to merge into existing policy; fall back to overwrite if parse fails
+	var policyDoc map[string]interface{}
+	if err := json.Unmarshal([]byte(existing), &policyDoc); err != nil {
+		// safest path: set a minimal policy that enables SNS (better than silently failing)
+		policy := composeSnsPolicy(snsTopicArn, queueArn)
+		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
+			sqssetqueueattribute.Policy: policy,
+		}, timeoutDuration...)
+	}
+
+	statements := []interface{}{}
+	switch st := policyDoc["Statement"].(type) {
+	case []interface{}:
+		statements = st
+	case map[string]interface{}:
+		statements = []interface{}{st}
+	}
+
+	// Check if the statement already exists
+	for _, st := range statements {
+		if m, ok := st.(map[string]interface{}); ok {
+			resource, _ := m["Resource"].(string)
+			cond, _ := m["Condition"].(map[string]interface{})
+			arnEq, _ := cond["ArnEquals"].(map[string]interface{})
+			sourceArn, _ := arnEq["aws:SourceArn"].(string)
+			if resource == queueArn && sourceArn == snsTopicArn {
+				// already present; no update needed
+				return nil
+			}
+		}
+	}
+
+	// Append new statement and write back
+	statements = append(statements, newStmt)
+	policyDoc["Statement"] = statements
+	bytes, _ := json.Marshal(policyDoc)
+
+	return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
+		sqssetqueueattribute.Policy: string(bytes),
+	}, timeoutDuration...)
+}
+
 // GetQueue will retrieve queueUrl and queueArn based on queueName,
 // if queue is not found, a new queue will be created with the given queueName
 // snsTopicArn = optional, set sns topic arn if needing to allow sns topic to send message to this newly created sqs
@@ -98,12 +181,8 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 		} else {
 			// Apply SNS policy even when queue already exists
 			if util.LenTrim(snsTopicArn) > 0 {
-				if policy := composeSnsPolicy(snsTopicArn, queueArn); util.LenTrim(policy) > 0 {
-					if err = q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
-						sqssetqueueattribute.Policy: policy,
-					}, timeoutDuration...); err != nil {
-						return "", "", fmt.Errorf("GetQueue Failed: (%s) %s", "Set Queue Attribute Policy Error", err.Error())
-					}
+				if err = ensureSnsPolicy(q, queueUrl, queueArn, snsTopicArn, timeoutDuration...); err != nil {
+					return "", "", err
 				}
 			}
 
@@ -119,29 +198,6 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 			messageRetentionSeconds = 1209600
 		}
 
-		policy := ""
-
-		if util.LenTrim(snsTopicArn) > 0 {
-			policy = `{
-				  "Version":"2012-10-17",
-				  "Statement": [{
-					"Effect":"Allow",
-					"Principal": {
-					  "Service": "sns.amazonaws.com"
-					},
-					"Action":"sqs:SendMessage",
-					"Resource":"[QUEUE-ARN]",
-					"Condition":{
-					  "ArnEquals":{
-						"aws:SourceArn":"[TOPIC-ARN]"
-					  }
-					}
-				  }]
-				}`
-
-			policy = util.Replace(policy, "[TOPIC-ARN]", snsTopicArn)
-		}
-
 		if queueUrl, err = q.CreateQueue(queueName, map[sqscreatequeueattribute.SQSCreateQueueAttribute]string{
 			sqscreatequeueattribute.MessageRetentionPeriod: util.UintToStr(messageRetentionSeconds),
 		}, timeoutDuration...); err != nil {
@@ -155,15 +211,10 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 				return "", "", fmt.Errorf("CreateQueue Failed: (%s) %s", "Get Queue ARN From Attribute Error", e.Error())
 			}
 
-			// update queue attribute with policy if sns topic is defined
-			if util.LenTrim(policy) > 0 {
-				policy = util.Replace(policy, "[QUEUE-ARN]", queueArn)
-
-				if err = q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
-					sqssetqueueattribute.Policy: policy,
-				}, timeoutDuration...); err != nil {
-					// error setting queue attribute
-					return "", "", fmt.Errorf("CreateQueue Failed: (%s) %s", "Set Queue Attribute Policy Error", err.Error())
+			// apply SNS policy using merge helper (safe even if future defaults add a policy)
+			if util.LenTrim(snsTopicArn) > 0 {
+				if err = ensureSnsPolicy(q, queueUrl, queueArn, snsTopicArn, timeoutDuration...); err != nil {
+					return "", "", err
 				}
 			}
 
@@ -230,14 +281,22 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 		return []*sqs.SQSFailResult{}, fmt.Errorf("DeleteRequests are Required")
 	}
 
-	if _, failList, err = q.DeleteMessageBatch(queueUrl, deleteRequests, timeoutDuration...); err != nil {
-		// error
-		return []*sqs.SQSFailResult{}, fmt.Errorf("DeleteMessages Failed: " + err.Error())
-	} else {
-		if len(failList) == 0 {
-			return nil, nil
-		} else {
-			return failList, nil
+	// enforce SQS batch limit (10) by chunking requests
+	for start := 0; start < len(deleteRequests); start += 10 {
+		end := start + 10
+		if end > len(deleteRequests) {
+			end = len(deleteRequests)
 		}
+
+		_, batchFail, batchErr := q.DeleteMessageBatch(queueUrl, deleteRequests[start:end], timeoutDuration...)
+		if batchErr != nil {
+			return []*sqs.SQSFailResult{}, fmt.Errorf("DeleteMessages Failed: " + batchErr.Error())
+		}
+		failList = append(failList, batchFail...)
 	}
+
+	if len(failList) == 0 {
+		return nil, nil
+	}
+	return failList, nil
 }
