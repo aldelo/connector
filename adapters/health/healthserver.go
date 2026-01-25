@@ -1,7 +1,7 @@
 package health
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package health
 
 import (
 	"context"
-	"fmt"
 	"log"
 
 	util "github.com/aldelo/common"
@@ -28,8 +27,9 @@ import (
 )
 
 type HealthServer struct {
-	DefaultHealthCheck  func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
-	HealthCheckHandlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	grpc_health_v1.UnimplementedHealthServer // embed for forward compatibility
+	DefaultHealthCheck                       func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	HealthCheckHandlers                      map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 }
 
 func NewHealthServer(defaultCheck func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus,
@@ -49,6 +49,13 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 
 	log.Println("Health Check Invoked for " + svcName + "...")
 
+	// protect against handler panics
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("... Health Check panic for %s: %v", svcName, r)
+		}
+	}()
+
 	// invoke health check handler
 	var fn func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 
@@ -60,30 +67,25 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 		fn = h.DefaultHealthCheck
 	}
 
-	var status grpc_health_v1.HealthCheckResponse_ServingStatus
+	var statusVal grpc_health_v1.HealthCheckResponse_ServingStatus
 	noHandler := ""
 
 	if fn != nil {
-		status = fn(ctx)
+		statusVal = fn(ctx)
 	} else {
 		// if no handlers, default to serving
-		status = grpc_health_v1.HealthCheckResponse_SERVING
+		statusVal = grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN
 		noHandler = " [No Handler]"
 	}
 
-	log.Println("... Health Check Result for " + svcName + " = " + status.String() + noHandler)
+	log.Println("... Health Check Result for " + svcName + " = " + statusVal.String() + noHandler)
 
 	// return status result
 	return &grpc_health_v1.HealthCheckResponse{
-		Status: status,
+		Status: statusVal,
 	}, nil
 }
 
 func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, server grpc_health_v1.Health_WatchServer) error {
-	return fmt.Errorf("Health Server Watch Not Supported, Use Check Instead")
-}
-
-func (h *HealthServer) List(ctx context.Context, req *grpc_health_v1.HealthListRequest) (*grpc_health_v1.HealthListResponse, error) {
-	// minimal implementation; fill out with your existing status map
-	return nil, status.Errorf(codes.Unimplemented, "List not implemented yet")
+	return status.Errorf(codes.Unimplemented, "Health Server Watch Not Supported, Use Check Instead")
 }

@@ -46,7 +46,7 @@ func NewHealthClient(conn *grpc.ClientConn) (*HealthClient, error) {
 }
 
 // Check preserves the original API but now delegates to the context-aware version
-func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) { // CHANGED
+func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) {
 	return h.CheckContext(context.Background(), svcName, timeoutDuration...)
 }
 
