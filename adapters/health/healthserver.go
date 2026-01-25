@@ -128,6 +128,10 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 
 	// if no handler exists, return NOT_FOUND per gRPC health spec guidance
 	if fn == nil { // distinguish “no handler” from “handler returned UNKNOWN”
+		if svcName == "" { // empty service → Unknown status with OK response
+			log.Printf("... Health Check Result for %s = %s [No Handler]", svcName, grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN.String())
+			return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN}, nil
+		}
 		log.Printf("... Health Check Result for %s = %s [No Handler]", svcName, grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN.String())
 		return nil, status.Errorf(codes.NotFound, "health check handler not found for %q", svcName)
 	}
