@@ -18,11 +18,15 @@ package loadbalancer
 
 import (
 	"fmt"
+	"net"
+	"regexp"
 	"strings"
 
-	util "github.com/aldelo/common"
 	res "github.com/aldelo/connector/adapters/resolver"
 )
+
+// add precompiled regex for scheme validation
+var schemeRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
 
 // WithRoundRobin returns gRPC dial target, and defaultServiceConfig set for Round Robin client side load balancer
 func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []string) (target string, loadBalancerPolicy string, err error) {
@@ -30,32 +34,47 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 	scheme := strings.TrimSpace(schemeName)
 	service := strings.TrimSpace(serviceName)
 
-	if util.LenTrim(service) == 0 {
-		return "", "", fmt.Errorf("Resolver Service Name is Required")
+	if scheme == "" {
+		return "", "", fmt.Errorf("Resolver Scheme Name is Required")
+	}
+	if !schemeRE.MatchString(scheme) { // validate scheme syntax
+		return "", "", fmt.Errorf("resolver scheme name %q is invalid (must match [A-Za-z][A-Za-z0-9+.-]*)", scheme)
 	}
 
-	if util.LenTrim(scheme) == 0 {
-		return "", "", fmt.Errorf("Resolver Scheme Name is Required")
+	if service == "" {
+		return "", "", fmt.Errorf("Resolver Service Name is Required")
+	}
+	if strings.ContainsAny(service, "/ \t\r\n") { // disallow slashes/whitespace to keep target valid
+		return "", "", fmt.Errorf("resolver service name %q is invalid (must not contain slashes or whitespace)", service)
 	}
 
 	if len(endpointAddrs) == 0 {
 		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required")
 	}
 
+	seen := make(map[string]struct{}, len(endpointAddrs))
 	cleanAddrs := make([]string, 0, len(endpointAddrs))
-	for _, a := range endpointAddrs {
+	for i, a := range endpointAddrs {
 		trimmed := strings.TrimSpace(a)
 		if trimmed == "" {
 			continue
 		}
+		host, port, splitErr := net.SplitHostPort(trimmed)
+		if splitErr != nil || host == "" || port == "" {
+			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (want host:port; IPv6 must be in [::1]:port form): %w", i, a, splitErr)
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue // skip duplicates
+		}
+		seen[trimmed] = struct{}{}
 		cleanAddrs = append(cleanAddrs, trimmed)
 	}
 	if len(cleanAddrs) == 0 {
-		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required (All Were Empty)")
+		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required (all were empty, duplicate, or invalid)")
 	}
 
 	if err = res.NewManualResolver(scheme, service, cleanAddrs); err != nil {
-		return "", "", fmt.Errorf("Setup CLB New Resolver Failed: %s", err.Error())
+		return "", "", fmt.Errorf("Setup CLB New Resolver Failed: %w", err)
 	}
 
 	// load balancer round robin is per call, rather than per connection
