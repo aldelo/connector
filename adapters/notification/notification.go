@@ -78,7 +78,7 @@ func CreateTopic(n *sns.SNS, topicName string, timeoutDuration ...time.Duration)
 	}
 
 	if topicArn, err = n.CreateTopic(topicName, nil, timeoutDuration...); err != nil {
-		return "", fmt.Errorf("CreateTopic Failed: %s", err)
+		return "", fmt.Errorf("CreateTopic Failed: %w", err)
 	} else {
 		return topicArn, nil
 	}
