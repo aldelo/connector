@@ -49,7 +49,8 @@ func composeSnsPolicy(snsTopicArn, queueArn string) string {
 		return ""
 	}
 
-	policy := `{ 
+	policy := `{
+		  "Version":"2012-10-17",
 		  "Statement": [{ 
 			"Effect":"Allow", 
 			"Principal": { 
@@ -122,6 +123,7 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 
 		if util.LenTrim(snsTopicArn) > 0 {
 			policy = `{
+				  "Version":"2012-10-17",
 				  "Statement": [{
 					"Effect":"Allow",
 					"Principal": {
