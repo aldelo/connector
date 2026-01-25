@@ -20,25 +20,26 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 
 	res "github.com/aldelo/connector/adapters/resolver"
 )
 
 // add precompiled regex for scheme validation
-var schemeRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
+var schemeRE = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
 
 // WithRoundRobin returns gRPC dial target, and defaultServiceConfig set for Round Robin client side load balancer
 func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []string) (target string, loadBalancerPolicy string, err error) {
 	// trim inputs before validation/use
-	scheme := strings.TrimSpace(schemeName)
+	scheme := strings.TrimSpace(strings.ToLower(schemeName))
 	service := strings.TrimSpace(serviceName)
 
 	if scheme == "" {
 		return "", "", fmt.Errorf("Resolver Scheme Name is Required")
 	}
 	if !schemeRE.MatchString(scheme) { // validate scheme syntax
-		return "", "", fmt.Errorf("resolver scheme name %q is invalid (must match [A-Za-z][A-Za-z0-9+.-]*)", scheme)
+		return "", "", fmt.Errorf("resolver scheme name %q is invalid (must match [a-z][a-z0-9+.-]*)", scheme)
 	}
 
 	if service == "" {
@@ -46,6 +47,9 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 	}
 	if strings.ContainsAny(service, "/ \t\r\n") { // disallow slashes/whitespace to keep target valid
 		return "", "", fmt.Errorf("resolver service name %q is invalid (must not contain slashes or whitespace)", service)
+	}
+	if strings.Contains(service, "://") { // prevent embedded scheme-like fragments
+		return "", "", fmt.Errorf("resolver service name %q is invalid (must not contain \"://\")", service)
 	}
 
 	if len(endpointAddrs) == 0 {
@@ -63,6 +67,12 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		if splitErr != nil || host == "" || port == "" {
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (want host:port; IPv6 must be in [::1]:port form): %w", i, a, splitErr)
 		}
+
+		// validate port is numeric and within 1-65535
+		if p, convErr := strconv.Atoi(port); convErr != nil || p < 1 || p > 65535 {
+			return "", "", fmt.Errorf("resolver endpoint address %d (%q) has invalid port %q (must be numeric 1-65535): %v", i, a, port, convErr)
+		}
+
 		if _, ok := seen[trimmed]; ok {
 			continue // skip duplicates
 		}
