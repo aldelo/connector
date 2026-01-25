@@ -19,6 +19,7 @@ package health
 import (
 	"context"
 	"log"
+	"sync"
 
 	util "github.com/aldelo/common"
 	"google.golang.org/grpc/codes"
@@ -30,6 +31,7 @@ type HealthServer struct {
 	grpc_health_v1.UnimplementedHealthServer // embed for forward compatibility
 	DefaultHealthCheck                       func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 	HealthCheckHandlers                      map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	mu                                       sync.RWMutex
 }
 
 func NewHealthServer(defaultCheck func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus,
@@ -40,50 +42,74 @@ func NewHealthServer(defaultCheck func(ctx context.Context) grpc_health_v1.Healt
 	}
 }
 
-func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
-	svcName := req.Service
+// centralized, concurrency-safe handler lookup with wildcard support
+func (h *HealthServer) handlerFor(service string) func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 
+	if h.HealthCheckHandlers == nil {
+		return nil
+	}
+	if fn := h.HealthCheckHandlers[service]; fn != nil {
+		return fn
+	}
+	if fn := h.HealthCheckHandlers["*"]; fn != nil {
+		return fn
+	}
+	if service == "" {
+		if fn := h.HealthCheckHandlers[""]; fn != nil {
+			return fn
+		}
+	}
+	return nil
+}
+
+func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (resp *grpc_health_v1.HealthCheckResponse, err error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, status.FromContextError(ctxErr).Err()
+	}
+
+	svcName := req.GetService()
 	if util.LenTrim(svcName) == 0 {
 		svcName = "*"
 	}
 
 	log.Println("Health Check Invoked for " + svcName + "...")
 
+	var statusVal grpc_health_v1.HealthCheckResponse_ServingStatus
+
 	// protect against handler panics
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("... Health Check panic for %s: %v", svcName, r)
+			statusVal = grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN
+			resp = nil
+			err = status.Errorf(codes.Internal, "Health Check Handler Panic: %q", svcName)
 		}
 	}()
 
 	// invoke health check handler
-	var fn func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
-
-	if h.HealthCheckHandlers != nil {
-		fn = h.HealthCheckHandlers[svcName]
-	}
-
+	fn := h.handlerFor(svcName)
 	if fn == nil && h.DefaultHealthCheck != nil {
 		fn = h.DefaultHealthCheck
 	}
 
-	var statusVal grpc_health_v1.HealthCheckResponse_ServingStatus
 	noHandler := ""
-
 	if fn != nil {
 		statusVal = fn(ctx)
 	} else {
-		// if no handlers, default to serving
-		statusVal = grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN
+		statusVal = grpc_health_v1.HealthCheckResponse_NOT_SERVING
 		noHandler = " [No Handler]"
 	}
 
-	log.Println("... Health Check Result for " + svcName + " = " + statusVal.String() + noHandler)
+	// follow gRPC health spec—unknown service returns NOT_FOUND
+	if statusVal == grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN {
+		log.Printf("... Health Check Result for %s = %s%s", svcName, statusVal.String(), noHandler)
+		return nil, status.Errorf(codes.NotFound, "health check handler not found for %q", svcName)
+	}
 
-	// return status result
-	return &grpc_health_v1.HealthCheckResponse{
-		Status: statusVal,
-	}, nil
+	log.Printf("... Health Check Result for %s = %s%s", svcName, statusVal.String(), noHandler)
+	return &grpc_health_v1.HealthCheckResponse{Status: statusVal}, nil
 }
 
 func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, server grpc_health_v1.Health_WatchServer) error {
