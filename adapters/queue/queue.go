@@ -75,6 +75,11 @@ func composeSnsPolicy(snsTopicArn, queueArn string) string {
 
 // helper to safely merge SNS policy without overwriting existing statements
 func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeoutDuration ...time.Duration) error {
+	// added queueUrl validation to fail fast before API calls
+	if util.LenTrim(queueUrl) == 0 {
+		return fmt.Errorf("ensureSnsPolicy: queueUrl is required")
+	}
+
 	// Fail fast on invalid inputs so policy application cannot silently no-op.
 	if q == nil {
 		return fmt.Errorf("ensureSnsPolicy: queue client is required")
@@ -123,6 +128,16 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	// surface the error so callers can fix it without losing statements.
 	if err := json.Unmarshal([]byte(existing), &policyDoc); err != nil {
 		return fmt.Errorf("ensureSnsPolicy: existing policy is invalid JSON; refusing to overwrite: %w", err)
+	}
+
+	// guard nil map from unmarshalling "null"
+	if policyDoc == nil {
+		policyDoc = map[string]interface{}{}
+	}
+
+	// ensure Version is present to keep policy valid
+	if _, ok := policyDoc["Version"]; !ok {
+		policyDoc["Version"] = "2012-10-17"
 	}
 
 	statements := []interface{}{}
@@ -324,8 +339,8 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 		}
 	}
 
-	if len(failList) == 0 {
-		return nil, nil
+	if len(failList) > 0 {
+		return failList, fmt.Errorf("DeleteMessages Failed: %d message(s) failed deletion", len(failList))
 	}
-	return failList, nil
+	return nil, nil
 }
