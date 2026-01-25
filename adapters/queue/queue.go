@@ -80,9 +80,7 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	}
 
 	// Fetch existing policy (if any)
-	attrs, err := q.GetQueueAttributes(queueUrl, []sqsgetqueueattribute.SQSGetQueueAttribute{
-		sqsgetqueueattribute.Policy,
-	}, timeoutDuration...)
+	attrs, err := q.GetQueueAttributes(queueUrl, []sqsgetqueueattribute.SQSGetQueueAttribute{sqsgetqueueattribute.Policy}, timeoutDuration...)
 	if err != nil {
 		return fmt.Errorf("GetQueue Failed: (Get Queue Attributes Error) %s", err.Error())
 	}
@@ -106,10 +104,11 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 			"Version":   "2012-10-17",
 			"Statement": []interface{}{newStmt},
 		}
-		bytes, _ := json.Marshal(policy)
-		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
-			sqssetqueueattribute.Policy: string(bytes),
-		}, timeoutDuration...)
+		bytes, marshalErr := json.Marshal(policy)
+		if marshalErr != nil {
+			return fmt.Errorf("ensureSnsPolicy: marshal new policy failed: %w", marshalErr)
+		}
+		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{sqssetqueueattribute.Policy: string(bytes)}, timeoutDuration...)
 	}
 
 	// Try to merge into existing policy; fall back to overwrite if parse fails
@@ -117,9 +116,7 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	if err := json.Unmarshal([]byte(existing), &policyDoc); err != nil {
 		// safest path: set a minimal policy that enables SNS (better than silently failing)
 		policy := composeSnsPolicy(snsTopicArn, queueArn)
-		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
-			sqssetqueueattribute.Policy: policy,
-		}, timeoutDuration...)
+		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{sqssetqueueattribute.Policy: policy}, timeoutDuration...)
 	}
 
 	statements := []interface{}{}
@@ -130,16 +127,40 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 		statements = []interface{}{st}
 	}
 
-	// Check if the statement already exists
+	// guard map accesses and support Resource arrays to avoid panics and detect existing grants
 	for _, st := range statements {
-		if m, ok := st.(map[string]interface{}); ok {
-			resource, _ := m["Resource"].(string)
-			cond, _ := m["Condition"].(map[string]interface{})
-			arnEq, _ := cond["ArnEquals"].(map[string]interface{})
-			sourceArn, _ := arnEq["aws:SourceArn"].(string)
-			if resource == queueArn && sourceArn == snsTopicArn {
-				// already present; no update needed
-				return nil
+		m, ok := st.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		var resources []string
+		switch r := m["Resource"].(type) {
+		case string:
+			resources = []string{r}
+		case []interface{}:
+			for _, v := range r {
+				if s, ok := v.(string); ok {
+					resources = append(resources, s)
+				}
+			}
+		}
+
+		var sourceArn string
+		if cond, ok := m["Condition"].(map[string]interface{}); ok {
+			if arnEq, ok := cond["ArnEquals"].(map[string]interface{}); ok {
+				if sa, ok := arnEq["aws:SourceArn"].(string); ok {
+					sourceArn = sa
+				}
+			}
+		}
+
+		if sourceArn == snsTopicArn {
+			for _, res := range resources {
+				if res == queueArn {
+					// already present; no update needed
+					return nil
+				}
 			}
 		}
 	}
@@ -147,11 +168,12 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	// Append new statement and write back
 	statements = append(statements, newStmt)
 	policyDoc["Statement"] = statements
-	bytes, _ := json.Marshal(policyDoc)
+	bytes, marshalErr := json.Marshal(policyDoc)
+	if marshalErr != nil {
+		return fmt.Errorf("ensureSnsPolicy: marshal merged policy failed: %w", marshalErr)
+	}
 
-	return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
-		sqssetqueueattribute.Policy: string(bytes),
-	}, timeoutDuration...)
+	return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{sqssetqueueattribute.Policy: string(bytes)}, timeoutDuration...)
 }
 
 // GetQueue will retrieve queueUrl and queueArn based on queueName,
