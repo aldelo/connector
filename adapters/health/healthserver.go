@@ -106,10 +106,9 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 
 	statusVal = fn(ctx)
 
-	// follow gRPC health spec—unknown service returns NOT_FOUND
-	if statusVal == grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN {
-		log.Printf("... Health Check Result for %s = %s [No Handler]", svcName, statusVal.String())
-		return nil, status.Errorf(codes.NotFound, "health check handler not found for %q", svcName)
+	// honor context cancellation after handler execution
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, status.FromContextError(ctxErr).Err() // surface context error if cancelled mid-call
 	}
 
 	log.Printf("... Health Check Result for %s = %s", svcName, statusVal.String())
