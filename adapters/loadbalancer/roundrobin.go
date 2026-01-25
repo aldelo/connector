@@ -29,6 +29,9 @@ import (
 // add precompiled regex for scheme validation
 var schemeRE = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
 
+// enforce URI-safe service names (RFC3986 unreserved + '.' '_' '-')
+var serviceRE = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+
 // WithRoundRobin returns gRPC dial target, and defaultServiceConfig set for Round Robin client side load balancer
 func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []string) (target string, loadBalancerPolicy string, err error) {
 	// trim inputs before validation/use
@@ -44,6 +47,9 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 
 	if service == "" {
 		return "", "", fmt.Errorf("Resolver Service Name is Required")
+	}
+	if !serviceRE.MatchString(service) {
+		return "", "", fmt.Errorf("resolver service name %q is invalid (allowed: A-Z a-z 0-9 . _ ~ -)", service)
 	}
 	if strings.ContainsAny(service, "/ \t\r\n") { // disallow slashes/whitespace to keep target valid
 		return "", "", fmt.Errorf("resolver service name %q is invalid (must not contain slashes or whitespace)", service)
@@ -63,9 +69,19 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		if trimmed == "" {
 			continue
 		}
+		// block addresses that already include a URI scheme
+		if strings.Contains(trimmed, "://") {
+			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (must not include a URI scheme)", i, a)
+		}
+
 		host, port, splitErr := net.SplitHostPort(trimmed)
 		if splitErr != nil || host == "" || port == "" {
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (want host:port; IPv6 must be in [::1]:port form): %w", i, a, splitErr)
+		}
+
+		// ensure host segment itself has no embedded scheme/path
+		if strings.Contains(host, "://") || strings.ContainsAny(host, "/?#") {
+			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (host must not contain scheme or path)", i, a)
 		}
 
 		// validate port is numeric and within 1-65535
