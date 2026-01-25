@@ -141,11 +141,15 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	}
 
 	statements := []interface{}{}
-	switch st := policyDoc["Statement"].(type) {
-	case []interface{}:
-		statements = st
-	case map[string]interface{}:
-		statements = []interface{}{st}
+	if rawSt, ok := policyDoc["Statement"]; ok && rawSt != nil {
+		switch st := rawSt.(type) {
+		case []interface{}:
+			statements = st
+		case map[string]interface{}:
+			statements = []interface{}{st}
+		default:
+			return fmt.Errorf("ensureSnsPolicy: existing policy Statement has unsupported type %T; refusing to overwrite", rawSt)
+		}
 	}
 
 	// guard map accesses and support Resource arrays to avoid panics and detect existing grants
@@ -342,5 +346,5 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 	if len(failList) > 0 {
 		return failList, fmt.Errorf("DeleteMessages Failed: %d message(s) failed deletion", len(failList))
 	}
-	return nil, nil
+	return []*sqs.SQSFailResult{}, nil
 }
