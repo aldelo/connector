@@ -1,7 +1,7 @@
 package queue
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package queue
 
 import (
 	"fmt"
+	"time"
+
 	util "github.com/aldelo/common"
 	awshttp2 "github.com/aldelo/common/wrapper/aws"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
@@ -25,7 +27,6 @@ import (
 	"github.com/aldelo/common/wrapper/sqs/sqscreatequeueattribute"
 	"github.com/aldelo/common/wrapper/sqs/sqssetqueueattribute"
 	awssqs "github.com/aws/aws-sdk-go/service/sqs"
-	"time"
 )
 
 // NewQueueAdapter creates a new sqs queue service provider, and auto connect for use
@@ -189,7 +190,7 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 		return []*sqs.SQSFailResult{}, fmt.Errorf("DeleteRequests are Required")
 	}
 
-	if _, failList, err = q.DeleteMessageBatch(queueUrl, deleteRequests); err != nil {
+	if _, failList, err = q.DeleteMessageBatch(queueUrl, deleteRequests, timeoutDuration...); err != nil {
 		// error
 		return []*sqs.SQSFailResult{}, fmt.Errorf("DeleteMessages Failed: " + err.Error())
 	} else {
