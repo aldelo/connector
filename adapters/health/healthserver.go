@@ -19,6 +19,7 @@ package health
 import (
 	"context"
 	"log"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -77,6 +78,10 @@ func (h *HealthServer) RegisterHandler(service string, fn func(ctx context.Conte
 
 // centralized, concurrency-safe handler lookup with wildcard support
 func (h *HealthServer) handlerFor(service string) func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus {
+	if h == nil {
+		return nil
+	}
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
@@ -128,6 +133,10 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 		fn = h.DefaultHealthCheck
 	}
 
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, status.FromContextError(ctxErr).Err() // surface context error if cancelled mid-call
+	}
+
 	// if no handler exists, return NOT_FOUND per gRPC health spec guidance
 	if fn == nil { // distinguish “no handler” from “handler returned UNKNOWN”
 		log.Printf("... Health Check Result for %s = %s [No Handler]", svcName, grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN.String())
@@ -139,7 +148,7 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 	// protect against handler panics
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("... Health Check panic for %s: %v", svcName, r)
+			log.Printf("... Health Check panic for %s: %v\n%s", svcName, r, debug.Stack())
 			statusVal = grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN
 			resp = nil
 			err = status.Errorf(codes.Internal, "Health Check Handler Panic: %q", svcName)
