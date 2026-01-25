@@ -1,7 +1,7 @@
 package notification
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,13 +18,14 @@ package notification
 
 import (
 	"fmt"
+	"time"
+
 	util "github.com/aldelo/common"
 	awshttp2 "github.com/aldelo/common/wrapper/aws"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/sns"
 	"github.com/aldelo/common/wrapper/sns/snsprotocol"
 	snsaws "github.com/aws/aws-sdk-go/service/sns"
-	"time"
 )
 
 // NewNotificationAdapter creates a new sns service provider, and auto connect for use
@@ -51,7 +52,7 @@ func ListTopics(n *sns.SNS, timeoutDuration ...time.Duration) (topicArnsList []s
 
 	for {
 		if t, nt, e := n.ListTopics(nextToken, timeoutDuration...); e != nil {
-			return []string{}, fmt.Errorf("ListTopics Failed: %s", e)
+			return topicArnsList, fmt.Errorf("ListTopics Failed After Partial Fetch: %w", e)
 		} else {
 			topicArnsList = append(topicArnsList, t...)
 
