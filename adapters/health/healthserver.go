@@ -31,9 +31,9 @@ import (
 type HealthServer struct {
 	grpc_health_v1.UnimplementedHealthServer // embed for forward compatibility
 	DefaultHealthCheck                       func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
-	HealthCheckHandlers                      map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
-	mu                                       sync.RWMutex
-	handlers                                 map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+
+	mu       sync.RWMutex
+	handlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 }
 
 func NewHealthServer(
@@ -41,21 +41,21 @@ func NewHealthServer(
 	serviceChecks map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus,
 ) *HealthServer {
 
-	var hc map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
-	if serviceChecks != nil {
-		hc = make(map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus, len(serviceChecks))
-		for name, fn := range serviceChecks {
-			if fn != nil {
-				hc[name] = fn
-			}
-		}
+	h := &HealthServer{
+		DefaultHealthCheck: defaultCheck,
+		handlers:           make(map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus),
 	}
 
-	return &HealthServer{
-		DefaultHealthCheck:  defaultCheck,
-		HealthCheckHandlers: serviceChecks,
-		handlers:            hc,
+	for name, fn := range serviceChecks {
+		if fn == nil {
+			continue
+		}
+
+		trimmed := strings.TrimSpace(name)
+		h.handlers[trimmed] = fn
 	}
+
+	return h
 
 }
 
