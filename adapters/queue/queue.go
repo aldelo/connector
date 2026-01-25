@@ -317,10 +317,11 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 		}
 
 		_, batchFail, batchErr := q.DeleteMessageBatch(queueUrl, deleteRequests[start:end], timeoutDuration...)
-		if batchErr != nil {
-			return []*sqs.SQSFailResult{}, fmt.Errorf("DeleteMessages Failed: " + batchErr.Error())
-		}
 		failList = append(failList, batchFail...)
+
+		if batchErr != nil {
+			return failList, fmt.Errorf("DeleteMessages Failed: " + batchErr.Error())
+		}
 	}
 
 	if len(failList) == 0 {
