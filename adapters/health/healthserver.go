@@ -19,6 +19,7 @@ package health
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 
 	util "github.com/aldelo/common"
@@ -50,17 +51,21 @@ func (h *HealthServer) handlerFor(service string) func(context.Context) grpc_hea
 	if h.HealthCheckHandlers == nil {
 		return nil
 	}
+
 	if fn := h.HealthCheckHandlers[service]; fn != nil {
 		return fn
 	}
-	if fn := h.HealthCheckHandlers["*"]; fn != nil {
-		return fn
-	}
+
 	if service == "" {
 		if fn := h.HealthCheckHandlers[""]; fn != nil {
 			return fn
 		}
 	}
+
+	if fn := h.HealthCheckHandlers["*"]; fn != nil {
+		return fn
+	}
+
 	return nil
 }
 
@@ -69,11 +74,10 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 		return nil, status.FromContextError(ctxErr).Err()
 	}
 
-	svcName := req.GetService()
+	svcName := strings.TrimSpace(req.GetService())
 	if util.LenTrim(svcName) == 0 {
 		svcName = "*"
 	}
-
 	log.Println("Health Check Invoked for " + svcName + "...")
 
 	var statusVal grpc_health_v1.HealthCheckResponse_ServingStatus
@@ -94,21 +98,19 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 		fn = h.DefaultHealthCheck
 	}
 
-	noHandler := ""
 	if fn != nil {
 		statusVal = fn(ctx)
 	} else {
-		statusVal = grpc_health_v1.HealthCheckResponse_NOT_SERVING
-		noHandler = " [No Handler]"
+		statusVal = grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN
 	}
 
 	// follow gRPC health spec—unknown service returns NOT_FOUND
 	if statusVal == grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN {
-		log.Printf("... Health Check Result for %s = %s%s", svcName, statusVal.String(), noHandler)
+		log.Printf("... Health Check Result for %s = %s [No Handler]", svcName, statusVal.String())
 		return nil, status.Errorf(codes.NotFound, "health check handler not found for %q", svcName)
 	}
 
-	log.Printf("... Health Check Result for %s = %s%s", svcName, statusVal.String(), noHandler)
+	log.Printf("... Health Check Result for %s = %s", svcName, statusVal.String())
 	return &grpc_health_v1.HealthCheckResponse{Status: statusVal}, nil
 }
 
