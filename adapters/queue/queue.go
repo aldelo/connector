@@ -152,6 +152,28 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 		}
 	}
 
+	// robust detection of existing grants (handles ArnEquals/ArnLike and string/array forms)
+	extractSourceArns := func(cond map[string]interface{}) []string {
+		var out []string
+		for _, key := range []string{"ArnEquals", "ArnLike"} {
+			if arnMap, ok := cond[key].(map[string]interface{}); ok {
+				if v, ok := arnMap["aws:SourceArn"]; ok {
+					switch vv := v.(type) {
+					case string:
+						out = append(out, vv)
+					case []interface{}:
+						for _, x := range vv {
+							if s, ok := x.(string); ok {
+								out = append(out, s)
+							}
+						}
+					}
+				}
+			}
+		}
+		return out
+	}
+
 	// guard map accesses and support Resource arrays to avoid panics and detect existing grants
 	for _, st := range statements {
 		m, ok := st.(map[string]interface{})
@@ -171,20 +193,18 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 			}
 		}
 
-		var sourceArn string
+		var sourceArns []string
 		if cond, ok := m["Condition"].(map[string]interface{}); ok {
-			if arnEq, ok := cond["ArnEquals"].(map[string]interface{}); ok {
-				if sa, ok := arnEq["aws:SourceArn"].(string); ok {
-					sourceArn = sa
-				}
-			}
+			sourceArns = extractSourceArns(cond)
 		}
 
-		if sourceArn == snsTopicArn {
-			for _, res := range resources {
-				if res == queueArn {
-					// already present; no update needed
-					return nil
+		for _, sa := range sourceArns {
+			if sa == snsTopicArn {
+				for _, res := range resources {
+					if res == queueArn {
+						// already present; no update needed
+						return nil
+					}
 				}
 			}
 		}
@@ -326,6 +346,20 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 
 	if len(deleteRequests) == 0 {
 		return []*sqs.SQSFailResult{}, fmt.Errorf("DeleteRequests are Required")
+	}
+
+	// validate entries before calling SQS to avoid API rejections
+	for i, req := range deleteRequests {
+		if req == nil {
+			return []*sqs.SQSFailResult{}, fmt.Errorf("DeleteRequests[%d] is nil", i)
+		}
+		if util.LenTrim(req.ReceiptHandle) == 0 {
+			return []*sqs.SQSFailResult{}, fmt.Errorf("DeleteRequests[%d].ReceiptHandle is required", i)
+		}
+		// Ensure Id is set; SQS requires a non-empty Id per batch entry
+		if util.LenTrim(req.Id) == 0 {
+			req.Id = util.Itoa(i)
+		}
 	}
 
 	// enforce SQS batch limit (10) by chunking requests
