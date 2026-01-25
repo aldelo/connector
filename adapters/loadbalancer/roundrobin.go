@@ -1,7 +1,7 @@
 package loadbalancer
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package loadbalancer
 
 import (
 	"fmt"
+	"strings"
+
 	util "github.com/aldelo/common"
 	res "github.com/aldelo/connector/adapters/resolver"
 )
@@ -28,15 +30,37 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		return "", "", fmt.Errorf("Resolver Service Name is Required")
 	}
 
+	if util.LenTrim(schemeName) == 0 {
+		return "", "", fmt.Errorf("Resolver Scheme Name is Required")
+	}
+
 	if len(endpointAddrs) == 0 {
 		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required")
+	}
+
+	cleanAddrs := make([]string, 0, len(endpointAddrs))
+	for _, a := range endpointAddrs {
+		trimmed := strings.TrimSpace(a)
+		if trimmed == "" {
+			continue
+		}
+		cleanAddrs = append(cleanAddrs, trimmed)
+	}
+	if len(cleanAddrs) == 0 {
+		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required (All Were Empty)")
 	}
 
 	if err = res.NewManualResolver(schemeName, serviceName, endpointAddrs); err != nil {
 		return "", "", fmt.Errorf("Setup CLB New Resolver Failed: %s", err.Error())
 	}
 
-	// note: load balancer round robin is per call, rather than per connection
-	// this means, load balancer will connect to all discovered ip and perform per call actions in round robin fashion across all channels
-	return fmt.Sprintf("%s:///%s", schemeName, serviceName), `"loadBalancingPolicy":"round_robin"`, nil
+	// load balancer round robin is per call, rather than per connection
+	// this means, load balancer will connect to all discovered ip and
+	// perform per call actions in round robin fashion across all channels
+	target = fmt.Sprintf("%s:///%s", schemeName, serviceName)
+
+	// return a valid gRPC service config string for round_robin
+	loadBalancerPolicy = `{"loadBalancingConfig":[{"round_robin":{}}]}`
+
+	return target, loadBalancerPolicy, nil
 }
