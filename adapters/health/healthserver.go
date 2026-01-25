@@ -35,12 +35,24 @@ type HealthServer struct {
 	mu                                       sync.RWMutex
 }
 
-func NewHealthServer(defaultCheck func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus,
-	serviceChecks map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus) *HealthServer {
+func NewHealthServer(
+	defaultCheck func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus,
+	serviceChecks map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+) *HealthServer {
+
+	var hc map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	if serviceChecks != nil {
+		hc = make(map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus, len(serviceChecks))
+		for name, fn := range serviceChecks {
+			hc[name] = fn
+		}
+	}
+
 	return &HealthServer{
 		DefaultHealthCheck:  defaultCheck,
-		HealthCheckHandlers: serviceChecks,
+		HealthCheckHandlers: hc,
 	}
+
 }
 
 // centralized, concurrency-safe handler lookup with wildcard support
