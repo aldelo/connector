@@ -31,7 +31,6 @@ import (
 	"github.com/aldelo/common/wrapper/sqs/sqscreatequeueattribute"
 	"github.com/aldelo/common/wrapper/sqs/sqsgetqueueattribute"
 	"github.com/aldelo/common/wrapper/sqs/sqssetqueueattribute"
-	aws "github.com/aws/aws-sdk-go/aws"
 	awssqs "github.com/aws/aws-sdk-go/service/sqs"
 )
 
