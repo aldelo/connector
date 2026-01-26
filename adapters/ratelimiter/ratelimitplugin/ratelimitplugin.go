@@ -26,6 +26,18 @@ import (
 type RateLimitPlugin struct {
 	RateLimit *ratelimit.RateLimiter
 	mu        sync.Mutex
+
+	// track per-pointer initialization so externally swapped limiters get Init() exactly once.
+	initOnce       sync.Once
+	lastInitTarget *ratelimit.RateLimiter
+}
+
+// clamp negative input to 0 (unlimited).
+func sanitizeRateLimitPerSecond(v int) int {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // NewRateLimitPlugin creates a hystrixgo plugin struct object
@@ -36,29 +48,39 @@ type RateLimitPlugin struct {
 func NewRateLimitPlugin(rateLimitPerSecond int, initializeWithoutSlack bool) *RateLimitPlugin {
 	p := &RateLimitPlugin{
 		RateLimit: &ratelimit.RateLimiter{
-			RateLimitPerSecond:     rateLimitPerSecond,
+			RateLimitPerSecond:     sanitizeRateLimitPerSecond(rateLimitPerSecond),
 			InitializeWithoutSlack: initializeWithoutSlack,
 		},
 	}
 
 	p.RateLimit.Init()
+	p.lastInitTarget = p.RateLimit
 	return p
 }
 
 // ensureRateLimiter guarantees RateLimit is non-nil and initialized
 func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.RateLimit == nil {
+	if p.RateLimit == nil { // lazy create if missing
 		p.RateLimit = &ratelimit.RateLimiter{
 			RateLimitPerSecond:     0,     // unlimited default
 			InitializeWithoutSlack: false, // default slack
 		}
-		p.RateLimit.Init()
 	}
+	rl := p.RateLimit
 
-	return p.RateLimit
+	// if the RateLimit pointer was swapped externally, reset initOnce so we can init the new instance.
+	if p.lastInitTarget != rl {
+		p.initOnce = sync.Once{}
+		p.lastInitTarget = rl
+	}
+	once := &p.initOnce
+	p.mu.Unlock()
+
+	// initialize exactly once per RateLimiter instance
+	once.Do(func() { rl.Init() })
+
+	return rl
 }
 
 // Take is called by each method needing rate limit applied
