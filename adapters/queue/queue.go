@@ -280,8 +280,8 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 		return "", "", fmt.Errorf("GetQueue Failed: %s", err.Error())
 	}
 
-	if util.LenTrim(queueUrl) == 0 {
-		// defensive guard against empty URL on a successful lookup
+	// Only treat empty queueUrl as an error when the queue was expected to exist.
+	if !notFound && util.LenTrim(queueUrl) == 0 {
 		return "", "", fmt.Errorf("GetQueue Failed: queue URL is empty")
 	}
 
