@@ -186,10 +186,33 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 		return out
 	}
 
+	// require Effect=Allow AND Action includes sqs:SendMessage (or sqs:*) before treating as an existing grant
+	actionAllowsSend := func(a interface{}) bool {
+		switch v := a.(type) {
+		case string:
+			return strings.EqualFold(v, "sqs:SendMessage") || strings.EqualFold(v, "sqs:*")
+		case []interface{}:
+			for _, x := range v {
+				if s, ok := x.(string); ok && (strings.EqualFold(s, "sqs:SendMessage") || strings.EqualFold(s, "sqs:*")) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
 	// guard map accesses and support Resource arrays to avoid panics and detect existing grants
 	for _, st := range statements {
 		m, ok := st.(map[string]interface{})
 		if !ok {
+			continue
+		}
+
+		// skip statements that are not explicit Allow
+		if eff, ok := m["Effect"].(string); !ok || strings.ToLower(eff) != "allow" {
+			continue
+		}
+		if !actionAllowsSend(m["Action"]) {
 			continue
 		}
 
