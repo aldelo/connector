@@ -65,6 +65,11 @@ func NewRateLimitPlugin(rateLimitPerSecond int, initializeWithoutSlack bool) *Ra
 // ensureRateLimiter guarantees RateLimit is non-nil and initialized
 func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 	p.mu.Lock()
+
+	if p.initOnce == nil {
+		p.initOnce = new(sync.Once)
+	}
+
 	if p.RateLimit == nil { // lazy create if missing
 		p.RateLimit = &ratelimit.RateLimiter{
 			RateLimitPerSecond:     0,     // unlimited default
