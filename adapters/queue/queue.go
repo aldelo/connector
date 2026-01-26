@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -33,6 +34,9 @@ import (
 	aws "github.com/aws/aws-sdk-go/aws"
 	awssqs "github.com/aws/aws-sdk-go/service/sqs"
 )
+
+// precompiled queue name validator (supports optional .fifo)
+var fifoQueueNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}(\.fifo)?$`)
 
 // NewQueueAdapter creates a new sqs queue service provider, and auto connect for use
 func NewQueueAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2.HttpClientSettings) (*sqs.SQS, error) {
@@ -202,11 +206,16 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	actionAllowsSend := func(a interface{}) bool {
 		switch v := a.(type) {
 		case string:
-			return strings.EqualFold(v, "sqs:SendMessage") || strings.EqualFold(v, "sqs:*")
+			// treat "*" as already granting send to avoid duplicate statements
+			vl := strings.ToLower(v)
+			return vl == "sqs:sendmessage" || vl == "sqs:*" || vl == "*"
 		case []interface{}:
 			for _, x := range v {
-				if s, ok := x.(string); ok && (strings.EqualFold(s, "sqs:SendMessage") || strings.EqualFold(s, "sqs:*")) {
-					return true
+				if s, ok := x.(string); ok {
+					sl := strings.ToLower(s)
+					if sl == "sqs:sendmessage" || sl == "sqs:*" || sl == "*" {
+						return true
+					}
 				}
 			}
 		}
@@ -290,8 +299,13 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 		return "", "", fmt.Errorf("Queue Object is Required")
 	}
 
-	if util.LenTrim(queueName) == 0 {
+	queueName = strings.TrimSpace(queueName)
+	if queueName == "" {
 		return "", "", fmt.Errorf("QueueName is Required")
+	}
+
+	if !fifoQueueNamePattern.MatchString(queueName) { // validate SQS name rules up to 80 chars and optional .fifo
+		return "", "", fmt.Errorf("QueueName is invalid; only alphanumeric, underscore, hyphen, optional .fifo suffix, max 80 chars")
 	}
 
 	// use existing queue if already exist
@@ -413,6 +427,9 @@ func SendMessageFIFO(
 	if queueUrl == "" {
 		return "", fmt.Errorf("QueueUrl is Required")
 	}
+	if !strings.HasSuffix(strings.ToLower(queueUrl), ".fifo") { // fail fast if not a FIFO queue
+		return "", fmt.Errorf("SendMessageFIFO: target queue is not FIFO (missing .fifo suffix in URL)")
+	}
 
 	if util.LenTrim(messageBody) == 0 {
 		return "", fmt.Errorf("MessageBody is Required")
@@ -437,7 +454,8 @@ func ReceiveMessages(q *sqs.SQS, queueUrl string, messageAttributeFilters []stri
 		return []*sqs.SQSReceivedMessage{}, fmt.Errorf("Queue Object is Required")
 	}
 
-	if util.LenTrim(queueUrl) == 0 {
+	queueUrl = strings.TrimSpace(queueUrl)
+	if queueUrl == "" {
 		return []*sqs.SQSReceivedMessage{}, fmt.Errorf("QueueUrl is Required")
 	}
 
@@ -458,7 +476,8 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 		return []*sqs.SQSFailResult{}, fmt.Errorf("Queue Object is Required")
 	}
 
-	if util.LenTrim(queueUrl) == 0 {
+	queueUrl = strings.TrimSpace(queueUrl)
+	if queueUrl == "" {
 		return []*sqs.SQSFailResult{}, fmt.Errorf("QueueUrl is Required")
 	}
 
