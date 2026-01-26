@@ -53,8 +53,11 @@ func NewRateLimitPlugin(rateLimitPerSecond int, initializeWithoutSlack bool) *Ra
 		},
 	}
 
-	p.RateLimit.Init()
+	// initialize via initOnce so the first limiter is only initialized once
 	p.lastInitTarget = p.RateLimit
+	p.initOnce.Do(func() {
+		p.RateLimit.Init()
+	})
 	return p
 }
 
@@ -77,8 +80,11 @@ func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 	once := &p.initOnce
 	p.mu.Unlock()
 
-	// initialize exactly once per RateLimiter instance
-	once.Do(func() { rl.Init() })
+	// sanitize before initializing to prevent negative rates from breaking Init()
+	once.Do(func() {
+		rl.RateLimitPerSecond = sanitizeRateLimitPerSecond(rl.RateLimitPerSecond)
+		rl.Init()
+	})
 
 	return rl
 }
