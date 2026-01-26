@@ -116,7 +116,14 @@ func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 		rl.Init()
 	})
 
-	return rl
+	// verify the limiter wasn't swapped during init; if it was, retry to init the new one
+	p.mu.Lock()
+	current := p.RateLimit
+	p.mu.Unlock()
+
+	if current == rl {
+		return rl
+	}
 }
 
 // Take is called by each method needing rate limit applied
