@@ -152,19 +152,8 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	var policyDoc map[string]interface{}
 	// surface the error so callers can fix it without losing statements.
 	if err := json.Unmarshal([]byte(existing), &policyDoc); err != nil {
-		// fallback to a minimal valid policy instead of failing hard on bad JSON
-		fallback := map[string]interface{}{
-			"Version":   "2012-10-17",
-			"Statement": []interface{}{newStmt},
-		}
-		bytes, marshalErr := json.Marshal(fallback)
-		if marshalErr != nil {
-			return fmt.Errorf("ensureSnsPolicy: fallback marshal failed after JSON parse error: %w", marshalErr)
-		}
-		if len(bytes) > sqsPolicySizeLimit {
-			return fmt.Errorf("ensureSnsPolicy: fallback policy size %d exceeds 20KB limit", len(bytes))
-		}
-		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{sqssetqueueattribute.Policy: string(bytes)}, timeoutDuration...)
+		// return an error instead of overwriting a malformed policy to avoid silently dropping prior statements.
+		return fmt.Errorf("ensureSnsPolicy: existing policy is not valid JSON (refusing to overwrite): %w", err)
 	}
 
 	// guard nil map from unmarshalling "null"
@@ -340,6 +329,20 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 		if queueArn, e := q.GetQueueArnFromQueue(queueUrl, timeoutDuration...); e != nil {
 			return "", "", fmt.Errorf("GetQueue Failed: (%s) %s", "Get Queue ARN From Attribute Error", e.Error())
 		} else {
+			// if caller asked for a specific retention, apply it to existing queue as well.
+			if messageRetentionSeconds > 0 {
+				if messageRetentionSeconds < 60 {
+					messageRetentionSeconds = 60
+				} else if messageRetentionSeconds > 1209600 {
+					messageRetentionSeconds = 1209600
+				}
+				if errAttr := q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
+					sqssetqueueattribute.MessageRetentionPeriod: util.UintToStr(messageRetentionSeconds),
+				}, timeoutDuration...); errAttr != nil {
+					return "", "", fmt.Errorf("GetQueue Failed: (Set MessageRetentionPeriod Error) %s", errAttr.Error())
+				}
+			}
+
 			// Apply SNS policy even when queue already exists
 			if util.LenTrim(snsTopicArn) > 0 {
 				if err = ensureSnsPolicy(q, queueUrl, queueArn, snsTopicArn, timeoutDuration...); err != nil {
