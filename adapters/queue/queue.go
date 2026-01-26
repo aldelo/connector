@@ -17,6 +17,7 @@ package queue
  */
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/aldelo/common/wrapper/sqs/sqscreatequeueattribute"
 	"github.com/aldelo/common/wrapper/sqs/sqsgetqueueattribute"
 	"github.com/aldelo/common/wrapper/sqs/sqssetqueueattribute"
+	aws "github.com/aws/aws-sdk-go/aws"
 	awssqs "github.com/aws/aws-sdk-go/service/sqs"
 )
 
@@ -44,6 +46,14 @@ func NewQueueAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2.HttpCl
 	} else {
 		return q, nil
 	}
+}
+
+// small helper to honor timeoutDuration when calling AWS SDK directly
+func contextWithTimeout(timeoutDuration ...time.Duration) (context.Context, context.CancelFunc) {
+	if len(timeoutDuration) > 0 && timeoutDuration[0] > 0 {
+		return context.WithTimeout(context.Background(), timeoutDuration[0])
+	}
+	return context.Background(), func() {}
 }
 
 // composeSnsPolicy builds the policy that allows an SNS topic to send to the queue
@@ -139,11 +149,8 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	var policyDoc map[string]interface{}
 	// surface the error so callers can fix it without losing statements.
 	if err := json.Unmarshal([]byte(existing), &policyDoc); err != nil {
-		// fallback to a minimal policy instead of hard failing on invalid JSON
-		policyDoc = map[string]interface{}{
-			"Version":   "2012-10-17",
-			"Statement": []interface{}{},
-		}
+		// do not silently wipe an existing policy; surface the error so callers can fix bad JSON
+		return fmt.Errorf("ensureSnsPolicy: existing queue policy is invalid JSON: %w", err)
 	}
 
 	// guard nil map from unmarshalling "null"
@@ -364,12 +371,18 @@ func SendMessage(q *sqs.SQS, queueUrl string, messageBody string, messageAttribu
 		return "", fmt.Errorf("Queue Object is Required")
 	}
 
-	if util.LenTrim(queueUrl) == 0 {
+	queueUrl = strings.TrimSpace(queueUrl)
+	if queueUrl == "" {
 		return "", fmt.Errorf("QueueUrl is Required")
 	}
 
 	if util.LenTrim(messageBody) == 0 {
 		return "", fmt.Errorf("MessageBody is Required")
+	}
+
+	// explicit guard for FIFO queues; direct users to FIFO-aware helper
+	if strings.HasSuffix(strings.ToLower(queueUrl), ".fifo") {
+		return "", fmt.Errorf("SendMessage: FIFO queue detected; use SendMessageFIFO to provide MessageGroupId")
 	}
 
 	if result, err := q.SendMessage(queueUrl, messageBody, messageAttributes, 0, timeoutDuration...); err != nil {
@@ -379,6 +392,43 @@ func SendMessage(q *sqs.SQS, queueUrl string, messageBody string, messageAttribu
 		// send message successful
 		return result.MessageId, nil
 	}
+}
+
+// FIFO-aware helper that supplies MessageGroupId / MessageDeduplicationId
+func SendMessageFIFO(
+	q *sqs.SQS,
+	queueUrl string,
+	messageBody string,
+	messageGroupId string,
+	messageDeduplicationId string,
+	messageAttributes map[string]*awssqs.MessageAttributeValue,
+	timeoutDuration ...time.Duration,
+) (messageId string, err error) {
+
+	if q == nil {
+		return "", fmt.Errorf("Queue Object is Required")
+	}
+
+	queueUrl = strings.TrimSpace(queueUrl)
+	if queueUrl == "" {
+		return "", fmt.Errorf("QueueUrl is Required")
+	}
+
+	if util.LenTrim(messageBody) == 0 {
+		return "", fmt.Errorf("MessageBody is Required")
+	}
+
+	if util.LenTrim(messageGroupId) == 0 {
+		return "", fmt.Errorf("MessageGroupId is Required for FIFO queues")
+	}
+	// DeduplicationId is optional when ContentBasedDeduplication is enabled
+
+	// use wrapper FIFO helper instead of nonexistent q.SqsClient
+	res, sendErr := q.SendMessageFifo(queueUrl, messageDeduplicationId, messageGroupId, messageBody, messageAttributes, timeoutDuration...)
+	if sendErr != nil {
+		return "", fmt.Errorf("SendMessageFIFO Failed: %s", sendErr.Error())
+	}
+	return res.MessageId, nil
 }
 
 // ReceiveMessages will attempt to receive up to 10 messages from given queueUrl
