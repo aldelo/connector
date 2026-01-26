@@ -286,9 +286,18 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 			messageRetentionSeconds = 1209600
 		}
 
-		if queueUrl, err = q.CreateQueue(queueName, map[sqscreatequeueattribute.SQSCreateQueueAttribute]string{
+		// add FIFO handling so .fifo queues are created with required attributes
+		isFifo := strings.HasSuffix(strings.ToLower(queueName), ".fifo")
+		attrs := map[sqscreatequeueattribute.SQSCreateQueueAttribute]string{
 			sqscreatequeueattribute.MessageRetentionPeriod: util.UintToStr(messageRetentionSeconds),
-		}, timeoutDuration...); err != nil {
+		}
+		if isFifo {
+			attrs[sqscreatequeueattribute.FifoQueue] = "true"
+			// Enable content-based dedup by default; callers needing explicit MessageDeduplicationId can override at send time.
+			attrs[sqscreatequeueattribute.ContentBasedDeduplication] = "true"
+		}
+
+		if queueUrl, err = q.CreateQueue(queueName, attrs, timeoutDuration...); err != nil {
 			// create queue failed
 			return "", "", fmt.Errorf("CreateQueue Failed: %s", err.Error())
 		} else {
