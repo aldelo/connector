@@ -88,41 +88,44 @@ func (p *RateLimitPlugin) RateLimiter() *ratelimit.RateLimiter {
 
 // ensureRateLimiter guarantees RateLimit is non-nil and initialized
 func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
-	p.mu.Lock()
+	for { // retry until we return the current, initialized limiter
+		p.mu.Lock()
 
-	if p.initOnce == nil {
-		p.initOnce = new(sync.Once)
-	}
-
-	if p.RateLimit == nil { // lazy create if missing
-		p.RateLimit = &ratelimit.RateLimiter{
-			RateLimitPerSecond:     0,     // unlimited default
-			InitializeWithoutSlack: false, // default slack
+		if p.initOnce == nil {
+			p.initOnce = new(sync.Once)
 		}
-	}
-	rl := p.RateLimit
 
-	// if the RateLimit pointer was swapped externally, reset initOnce so we can init the new instance.
-	if p.lastInitTarget != rl {
-		p.initOnce = new(sync.Once)
-		p.lastInitTarget = rl
-	}
-	once := p.initOnce
-	p.mu.Unlock()
+		if p.RateLimit == nil { // lazy create if missing
+			p.RateLimit = &ratelimit.RateLimiter{
+				RateLimitPerSecond:     0,     // unlimited default
+				InitializeWithoutSlack: false, // default slack
+			}
+		}
+		rl := p.RateLimit
 
-	// sanitize before initializing to prevent negative rates from breaking Init()
-	once.Do(func() {
-		rl.RateLimitPerSecond = sanitizeRateLimitPerSecond(rl.RateLimitPerSecond)
-		rl.Init()
-	})
+		// if the RateLimit pointer was swapped externally, reset initOnce so we can init the new instance.
+		if p.lastInitTarget != rl {
+			p.initOnce = new(sync.Once)
+			p.lastInitTarget = rl
+		}
+		once := p.initOnce
+		p.mu.Unlock()
 
-	// verify the limiter wasn't swapped during init; if it was, retry to init the new one
-	p.mu.Lock()
-	current := p.RateLimit
-	p.mu.Unlock()
+		// sanitize before initializing to prevent negative rates from breaking Init()
+		once.Do(func() {
+			rl.RateLimitPerSecond = sanitizeRateLimitPerSecond(rl.RateLimitPerSecond)
+			rl.Init()
+		})
 
-	if current == rl {
-		return rl
+		// verify the limiter wasn't swapped during init; if it was, retry to init the new one
+		p.mu.Lock()
+		current := p.RateLimit
+		p.mu.Unlock()
+
+		if current == rl {
+			return rl
+		}
+		// loop to initialize the newly swapped-in limiter instead of returning nil
 	}
 }
 
