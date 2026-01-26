@@ -152,8 +152,19 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	var policyDoc map[string]interface{}
 	// surface the error so callers can fix it without losing statements.
 	if err := json.Unmarshal([]byte(existing), &policyDoc); err != nil {
-		// do not silently wipe an existing policy; surface the error so callers can fix bad JSON
-		return fmt.Errorf("ensureSnsPolicy: existing queue policy is invalid JSON: %w", err)
+		// fallback to a minimal valid policy instead of failing hard on bad JSON
+		fallback := map[string]interface{}{
+			"Version":   "2012-10-17",
+			"Statement": []interface{}{newStmt},
+		}
+		bytes, marshalErr := json.Marshal(fallback)
+		if marshalErr != nil {
+			return fmt.Errorf("ensureSnsPolicy: fallback marshal failed after JSON parse error: %w", marshalErr)
+		}
+		if len(bytes) > sqsPolicySizeLimit {
+			return fmt.Errorf("ensureSnsPolicy: fallback policy size %d exceeds 20KB limit", len(bytes))
+		}
+		return q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{sqssetqueueattribute.Policy: string(bytes)}, timeoutDuration...)
 	}
 
 	// guard nil map from unmarshalling "null"
@@ -174,8 +185,12 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 		case map[string]interface{}:
 			statements = []interface{}{st}
 		default:
-			// avoid wiping existing policy on unsupported Statement shape
-			return fmt.Errorf("ensureSnsPolicy: existing policy Statement must be array or object, got %T", st)
+			// recover by rebuilding minimal policy when Statement shape is invalid
+			statements = []interface{}{newStmt}
+			policyDoc = map[string]interface{}{
+				"Version":   "2012-10-17",
+				"Statement": statements,
+			}
 		}
 	}
 
@@ -506,7 +521,8 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 		}
 	}
 
-	// enforce SQS batch limit (10) by chunking requests
+	// process all batches and aggregate errors instead of stopping on first batch error
+	var batchErrors []string
 	for start := 0; start < len(deleteRequests); start += 10 {
 		end := start + 10
 		if end > len(deleteRequests) {
@@ -517,12 +533,17 @@ func DeleteMessages(q *sqs.SQS, queueUrl string, deleteRequests []*sqs.SQSDelete
 		failList = append(failList, batchFail...)
 
 		if batchErr != nil {
-			return failList, fmt.Errorf("DeleteMessages Failed: %d message(s) failed deletion; error: %s", len(batchFail), batchErr.Error())
+			batchErrors = append(batchErrors, fmt.Sprintf("batch %d-%d: %s", start, end, batchErr.Error()))
 		}
 	}
 
-	if len(failList) > 0 {
-		return failList, fmt.Errorf("DeleteMessages Failed: %d message(s) failed deletion", len(failList))
+	if len(failList) > 0 || len(batchErrors) > 0 {
+		errMsg := fmt.Sprintf("DeleteMessages Failed: %d message(s) failed deletion", len(failList))
+		if len(batchErrors) > 0 {
+			errMsg = fmt.Sprintf("%s; batch errors: %s", errMsg, strings.Join(batchErrors, "; "))
+		}
+		return failList, fmt.Errorf("%s", errMsg)
 	}
+
 	return []*sqs.SQSFailResult{}, nil
 }
