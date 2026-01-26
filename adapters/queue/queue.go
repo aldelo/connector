@@ -174,8 +174,8 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 		case map[string]interface{}:
 			statements = []interface{}{st}
 		default:
-			// recover from unsupported Statement type by resetting to empty slice
-			statements = []interface{}{}
+			// avoid wiping existing policy on unsupported Statement shape
+			return fmt.Errorf("ensureSnsPolicy: existing policy Statement must be array or object, got %T", st)
 		}
 	}
 
@@ -434,10 +434,18 @@ func SendMessageFIFO(
 		return "", fmt.Errorf("MessageBody is Required")
 	}
 
+	// normalize group/dedup IDs to avoid accidental whitespace bugs
+	messageGroupId = strings.TrimSpace(messageGroupId)
+	messageDeduplicationId = strings.TrimSpace(messageDeduplicationId)
+
 	if util.LenTrim(messageGroupId) == 0 {
 		return "", fmt.Errorf("MessageGroupId is Required for FIFO queues")
 	}
-	// DeduplicationId is optional when ContentBasedDeduplication is enabled
+
+	// supply a safe deduplication ID when caller leaves it empty and content-based dedup is off
+	if util.LenTrim(messageDeduplicationId) == 0 {
+		messageDeduplicationId = fmt.Sprintf("%s-%d", messageGroupId, time.Now().UnixNano())
+	}
 
 	// use wrapper FIFO helper instead of nonexistent q.SqsClient
 	res, sendErr := q.SendMessageFifo(queueUrl, messageDeduplicationId, messageGroupId, messageBody, messageAttributes, timeoutDuration...)
