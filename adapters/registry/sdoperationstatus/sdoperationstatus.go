@@ -16,7 +16,7 @@ package sdoperationstatus
  * limitations under the License.
  */
 
-// go:generate gen-enumer -type SdOperationStatus
+//go:generate gen-enumer -type SdOperationStatus
 
 type SdOperationStatus int
 
