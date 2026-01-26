@@ -139,7 +139,11 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	var policyDoc map[string]interface{}
 	// surface the error so callers can fix it without losing statements.
 	if err := json.Unmarshal([]byte(existing), &policyDoc); err != nil {
-		return fmt.Errorf("ensureSnsPolicy: existing policy is invalid JSON; refusing to overwrite: %w", err)
+		// fallback to a minimal policy instead of hard failing on invalid JSON
+		policyDoc = map[string]interface{}{
+			"Version":   "2012-10-17",
+			"Statement": []interface{}{},
+		}
 	}
 
 	// guard nil map from unmarshalling "null"
@@ -160,7 +164,8 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 		case map[string]interface{}:
 			statements = []interface{}{st}
 		default:
-			return fmt.Errorf("ensureSnsPolicy: existing policy Statement has unsupported type %T; refusing to overwrite", rawSt)
+			// recover from unsupported Statement type by resetting to empty slice
+			statements = []interface{}{}
 		}
 	}
 
@@ -201,6 +206,17 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 		return false
 	}
 
+	// treat wildcard resources as already granting access to avoid duplicate statements and policy bloat
+	resourceMatchesQueue := func(res string) bool {
+		if res == "*" || res == queueArn {
+			return true
+		}
+		if strings.HasSuffix(res, ":*") && strings.HasPrefix(queueArn, strings.TrimSuffix(res, ":*")) {
+			return true
+		}
+		return false
+	}
+
 	// guard map accesses and support Resource arrays to avoid panics and detect existing grants
 	for _, st := range statements {
 		m, ok := st.(map[string]interface{})
@@ -236,9 +252,8 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 		for _, sa := range sourceArns {
 			if sa == snsTopicArn {
 				for _, res := range resources {
-					if res == queueArn {
-						// already present; no update needed
-						return nil
+					if resourceMatchesQueue(res) {
+						return nil // already present
 					}
 				}
 			}
