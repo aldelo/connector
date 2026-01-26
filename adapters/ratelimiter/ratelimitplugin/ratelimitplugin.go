@@ -28,7 +28,7 @@ type RateLimitPlugin struct {
 	mu        sync.Mutex
 
 	// track per-pointer initialization so externally swapped limiters get Init() exactly once.
-	initOnce       sync.Once
+	initOnce       *sync.Once
 	lastInitTarget *ratelimit.RateLimiter
 }
 
@@ -51,6 +51,7 @@ func NewRateLimitPlugin(rateLimitPerSecond int, initializeWithoutSlack bool) *Ra
 			RateLimitPerSecond:     sanitizeRateLimitPerSecond(rateLimitPerSecond),
 			InitializeWithoutSlack: initializeWithoutSlack,
 		},
+		initOnce: new(sync.Once),
 	}
 
 	// initialize via initOnce so the first limiter is only initialized once
@@ -74,10 +75,10 @@ func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 
 	// if the RateLimit pointer was swapped externally, reset initOnce so we can init the new instance.
 	if p.lastInitTarget != rl {
-		p.initOnce = sync.Once{}
+		p.initOnce = new(sync.Once)
 		p.lastInitTarget = rl
 	}
-	once := &p.initOnce
+	once := p.initOnce
 	p.mu.Unlock()
 
 	// sanitize before initializing to prevent negative rates from breaking Init()
