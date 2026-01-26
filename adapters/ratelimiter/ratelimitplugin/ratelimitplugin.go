@@ -1,7 +1,7 @@
 package ratelimitplugin
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,12 +17,15 @@ package ratelimitplugin
  */
 
 import (
-	"github.com/aldelo/common/wrapper/ratelimit"
+	"sync"
 	"time"
+
+	"github.com/aldelo/common/wrapper/ratelimit"
 )
 
 type RateLimitPlugin struct {
 	RateLimit *ratelimit.RateLimiter
+	mu        sync.Mutex
 }
 
 // NewRateLimitPlugin creates a hystrixgo plugin struct object
@@ -30,8 +33,7 @@ type RateLimitPlugin struct {
 //
 // rateLimitPerSecond = number of actions per second allowed, 0 for no rate limit control
 // initializeWithoutSlack = true: no slack (disallow initial spike consideration)
-func NewRateLimitPlugin(rateLimitPerSecond int,
-	initializeWithoutSlack bool) *RateLimitPlugin {
+func NewRateLimitPlugin(rateLimitPerSecond int, initializeWithoutSlack bool) *RateLimitPlugin {
 	p := &RateLimitPlugin{
 		RateLimit: &ratelimit.RateLimiter{
 			RateLimitPerSecond:     rateLimitPerSecond,
@@ -41,6 +43,22 @@ func NewRateLimitPlugin(rateLimitPerSecond int,
 
 	p.RateLimit.Init()
 	return p
+}
+
+// ensureRateLimiter guarantees RateLimit is non-nil and initialized
+func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.RateLimit == nil {
+		p.RateLimit = &ratelimit.RateLimiter{
+			RateLimitPerSecond:     0,     // unlimited default
+			InitializeWithoutSlack: false, // default slack
+		}
+		p.RateLimit.Init()
+	}
+
+	return p.RateLimit
 }
 
 // Take is called by each method needing rate limit applied
@@ -53,9 +71,6 @@ func NewRateLimitPlugin(rateLimitPerSecond int,
 //
 // returns time when Take took place
 func (p *RateLimitPlugin) Take() time.Time {
-	if p.RateLimit != nil {
-		return p.RateLimit.Take()
-	} else {
-		return time.Time{}
-	}
+	rl := p.ensureRateLimiter() // lazy, threadsafe init
+	return rl.Take()            // always apply rate limiting
 }
