@@ -62,6 +62,30 @@ func NewRateLimitPlugin(rateLimitPerSecond int, initializeWithoutSlack bool) *Ra
 	return p
 }
 
+// SetRateLimiter safely swaps the limiter, sanitizes input, and resets init state.
+func (p *RateLimitPlugin) SetRateLimiter(rl *ratelimit.RateLimiter) {
+	if rl == nil {
+		rl = &ratelimit.RateLimiter{
+			RateLimitPerSecond:     0,
+			InitializeWithoutSlack: false,
+		}
+	}
+	rl.RateLimitPerSecond = sanitizeRateLimitPerSecond(rl.RateLimitPerSecond)
+
+	p.mu.Lock()
+
+	p.RateLimit = rl
+	p.initOnce = new(sync.Once)
+	p.lastInitTarget = rl
+
+	p.mu.Unlock()
+}
+
+// RateLimiter accessor returns the initialized limiter.
+func (p *RateLimitPlugin) RateLimiter() *ratelimit.RateLimiter {
+	return p.ensureRateLimiter()
+}
+
 // ensureRateLimiter guarantees RateLimit is non-nil and initialized
 func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 	p.mu.Lock()
