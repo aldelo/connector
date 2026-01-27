@@ -24,6 +24,7 @@ import (
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
+	"github.com/aws/aws-sdk-go/aws"
 )
 
 type InstanceInfo struct {
@@ -54,6 +55,7 @@ func CreateService(sd *cloudmap.CloudMap,
 	healthCheckConf *cloudmap.HealthCheckConf,
 	description string,
 	timeoutDuration ...time.Duration) (serviceId string, err error) {
+
 	if sd == nil {
 		return "", fmt.Errorf("SD Client is Required")
 	}
@@ -68,6 +70,8 @@ func CreateService(sd *cloudmap.CloudMap,
 
 	if svc, e := sd.CreateService(name, util.NewUUID(), namespaceId, dnsConf, healthCheckConf, description, nil, timeoutDuration...); e != nil {
 		return "", e
+	} else if svc == nil || svc.Id == nil {
+		return "", fmt.Errorf("Create Service Failed, No ServiceId Returned")
 	} else {
 		return *svc.Id, nil
 	}
@@ -91,6 +95,7 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 	healthy bool,
 	version string,
 	timeoutDuration ...time.Duration) (instanceId string, operationId string, err error) {
+
 	if sd == nil {
 		return "", "", fmt.Errorf("SD Client is Required")
 	}
@@ -103,8 +108,8 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		return "", "", fmt.Errorf("Instance IP is Required")
 	}
 
-	if port > 65535 {
-		return "", "", fmt.Errorf("Instance Port Maximum is 65535")
+	if port == 0 || port > 65535 {
+		return "", "", fmt.Errorf("Instance Port Must Be Between 1 and 65535")
 	}
 
 	// create instance id
@@ -135,6 +140,7 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 func GetOperationStatus(sd *cloudmap.CloudMap,
 	operationId string,
 	timeoutDuration ...time.Duration) (status sdoperationstatus.SdOperationStatus, err error) {
+
 	if sd == nil {
 		return sdoperationstatus.UNKNOWN, fmt.Errorf("SD Client is Required")
 	}
@@ -146,6 +152,8 @@ func GetOperationStatus(sd *cloudmap.CloudMap,
 	// check if a operation has completed
 	if op, err := sd.GetOperation(operationId, timeoutDuration...); err != nil {
 		return sdoperationstatus.UNKNOWN, err
+	} else if op == nil || op.Status == nil {
+		return sdoperationstatus.UNKNOWN, fmt.Errorf("Operation Status Not Available")
 	} else {
 		switch *op.Status {
 		case sdoperationstatus.Submitted.Key():
@@ -155,7 +163,7 @@ func GetOperationStatus(sd *cloudmap.CloudMap,
 		case sdoperationstatus.Success.Key():
 			return sdoperationstatus.Success, nil
 		case sdoperationstatus.Fail.Key():
-			return sdoperationstatus.Fail, fmt.Errorf("%s [%s]", *op.ErrorMessage, *op.ErrorCode)
+			return sdoperationstatus.Fail, fmt.Errorf("%s [%s]", aws.StringValue(op.ErrorMessage), aws.StringValue(op.ErrorCode))
 		default:
 			return sdoperationstatus.UNKNOWN, fmt.Errorf("%s", "Unknown Error")
 		}
@@ -168,6 +176,7 @@ func UpdateHealthStatus(sd *cloudmap.CloudMap,
 	serviceId string,
 	healthy bool,
 	timeoutDuration ...time.Duration) error {
+
 	if sd == nil {
 		return fmt.Errorf("SD Client is Required")
 	}
@@ -191,6 +200,7 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 	customAttributes map[string]string,
 	maxResults *int64,
 	timeoutDuration ...time.Duration) (instanceList []*InstanceInfo, err error) {
+
 	if sd == nil {
 		return []*InstanceInfo{}, fmt.Errorf("SD Client is Required")
 	}
@@ -208,23 +218,52 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 		return []*InstanceInfo{}, e
 	} else {
 		for _, v := range lst {
+			if v == nil || v.Attributes == nil {
+				continue
+			}
+
+			attrs := v.Attributes
+
+			// required fields
+			svcIDPtr, okSvcID := attrs["SERVICE_ID"]
+			ipPtr, okIP := attrs["AWS_INSTANCE_IPV4"]
+			portPtr, okPort := attrs["AWS_INSTANCE_PORT"]
+
+			if !okSvcID || svcIDPtr == nil || !okIP || ipPtr == nil || !okPort || portPtr == nil {
+				continue
+			}
+			if v.ServiceName == nil || v.NamespaceName == nil || v.InstanceId == nil {
+				continue
+			}
+
+			version := ""
+			if verPtr, ok := attrs["INSTANCE_VERSION"]; ok && verPtr != nil {
+				version = *verPtr
+			}
+
+			healthyStatus := false
+			if v.HealthStatus != nil {
+				healthyStatus = *v.HealthStatus == "HEALTHY"
+			}
+
 			instanceList = append(instanceList, &InstanceInfo{
-				ServiceId:       *v.Attributes["SERVICE_ID"],
+				ServiceId:       *svcIDPtr,
 				ServiceName:     *v.ServiceName,
 				NamespaceName:   *v.NamespaceName,
 				InstanceId:      *v.InstanceId,
-				InstanceIP:      *v.Attributes["AWS_INSTANCE_IPV4"],
-				InstancePort:    util.StrToUint(*v.Attributes["AWS_INSTANCE_PORT"]),
-				InstanceVersion: *v.Attributes["INSTANCE_VERSION"],
-				InstanceHealthy: *v.HealthStatus == "HEALTHY",
+				InstanceIP:      *ipPtr,
+				InstancePort:    util.StrToUint(*portPtr),
+				InstanceVersion: version,
+				InstanceHealthy: healthyStatus,
 			})
 		}
 
 		if len(instanceList) == 0 {
 			log.Printf("Discover Instances Returned No Results for Service: %s.%s", serviceName, namespaceName)
+		} else {
+			log.Printf("Discover Instances Returned %v for Service: %s.%s", instanceList, serviceName, namespaceName)
 		}
 
-		log.Printf("Discover Instances Returned %v for Service: %s.%s", instanceList, serviceName, namespaceName)
 		return instanceList, nil
 	}
 }
@@ -293,6 +332,7 @@ func DeregisterInstance(sd *cloudmap.CloudMap,
 	instanceId string,
 	serviceId string,
 	timeoutDuration ...time.Duration) (operationId string, err error) {
+
 	if sd == nil {
 		return "", fmt.Errorf("SD Client is Required")
 	}
