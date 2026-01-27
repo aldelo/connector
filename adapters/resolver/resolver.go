@@ -28,47 +28,71 @@ import (
 )
 
 var (
-	schemeMap map[string]*manual.Resolver
-	_mux      sync.Mutex // thread-safety for accessing and modifying schemeMap
+	schemeMap         map[string]*manual.Resolver
+	registeredSchemes map[string]string // track which service owns a registered scheme
+	_mux              sync.Mutex        // thread-safety for accessing and modifying schemeMap
 )
 
+// collision-safe map key builder
+func composeKey(schemeName string, serviceName string) string {
+	return strings.ToLower(strings.TrimSpace(schemeName)) + ":" + strings.ToLower(strings.TrimSpace(serviceName))
+}
+
 func NewManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
+	schemeName = strings.ToLower(strings.TrimSpace(schemeName))
 	if util.LenTrim(schemeName) == 0 {
 		schemeName = "clb"
 	}
 
-	if len(endpointAddrs) == 0 {
-		return fmt.Errorf("Endpoint Address is Required")
+	serviceName = strings.ToLower(strings.TrimSpace(serviceName))
+	if util.LenTrim(serviceName) == 0 {
+		return fmt.Errorf("ServiceName is Required")
+	}
+
+	addrs := make([]resolver.Address, 0, len(endpointAddrs))
+	for _, raw := range endpointAddrs {
+		addr := strings.TrimSpace(raw)
+		if len(addr) == 0 {
+			continue
+		}
+		addrs = append(addrs, resolver.Address{Addr: addr})
+	}
+
+	if len(addrs) == 0 {
+		return fmt.Errorf("No Valid Endpoint Address Found")
 	}
 
 	r := manual.NewBuilderWithScheme(schemeName)
-
-	addrs := []resolver.Address{}
-
-	for _, v := range endpointAddrs {
-		addrs = append(addrs, resolver.Address{
-			Addr: v,
-		})
-	}
-
 	r.InitialState(resolver.State{
 		Addresses: addrs,
 	})
 
-	setResolver(schemeName, serviceName, r)
+	if err := setResolver(schemeName, serviceName, r); err != nil {
+		return err
+	}
 
 	return nil
 }
 
 func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
-	if len(endpointAddrs) == 0 {
+	addrs := make([]resolver.Address, 0, len(endpointAddrs))
+	for _, raw := range endpointAddrs {
+		addr := strings.TrimSpace(raw)
+		if len(addr) == 0 {
+			continue
+		}
+		addrs = append(addrs, resolver.Address{Addr: addr})
+	}
+	if len(addrs) == 0 {
 		return fmt.Errorf("Endpoint Addresses Required")
 	}
 
+	schemeName = strings.ToLower(strings.TrimSpace(schemeName))
 	if util.LenTrim(schemeName) == 0 {
 		return fmt.Errorf("SchemeName is Required")
 	}
 
+	serviceName = strings.ToLower(strings.TrimSpace(serviceName))
 	if util.LenTrim(serviceName) == 0 {
 		return fmt.Errorf("ServiceName is Required")
 	}
@@ -78,39 +102,45 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		return err
 	}
 
-	addrs := []resolver.Address{}
-
-	for _, v := range endpointAddrs {
-		addrs = append(addrs, resolver.Address{
-			Addr: v,
-		})
-	}
-
 	r.UpdateState(resolver.State{
 		Addresses: addrs,
 	})
 
 	log.Println("[NOTE] Please Ignore Error 'Health check is requested but health check function is not set'; UpdateManualResolver is Completed")
-
 	return nil
 }
 
-func setResolver(schemeName string, serviceName string, r *manual.Resolver) {
+func setResolver(schemeName string, serviceName string, r *manual.Resolver) error {
 	_mux.Lock()
 	defer _mux.Unlock()
 
 	if schemeMap == nil {
 		schemeMap = make(map[string]*manual.Resolver)
 	}
+	if registeredSchemes == nil {
+		registeredSchemes = make(map[string]string)
+	}
 
-	schemeMap[strings.ToLower(schemeName+serviceName)] = r
+	key := composeKey(schemeName, serviceName)
+
+	if _, exists := schemeMap[key]; exists {
+		return fmt.Errorf("Resolver already registered for scheme '%s' and service '%s'", schemeName, serviceName)
+	}
+
+	if existingService, taken := registeredSchemes[schemeName]; taken && existingService != serviceName {
+		return fmt.Errorf("Scheme '%s' already registered for service '%s'; use a unique scheme per service", schemeName, existingService)
+	}
+
+	schemeMap[key] = r
+	registeredSchemes[serviceName] = serviceName
 
 	// 1/9/2025 by yao.bin - Caution: There is a global map in "grpc/resolver", so we have to put "resolver.Register" in mutex lock too
 	var builder resolver.Builder
 	builder = r
 
 	resolver.Register(builder)
-	//resolver.SetDefaultScheme(r.Scheme())
+	//resolver.SetDefaultScheme(r.Scheme()) // optional
+	return nil
 }
 
 func getResolver(schemeName string, serviceName string) (*manual.Resolver, error) {
@@ -121,9 +151,10 @@ func getResolver(schemeName string, serviceName string) (*manual.Resolver, error
 		return nil, fmt.Errorf("Resolver SchemeMap Nil")
 	}
 
-	if r := schemeMap[strings.ToLower(schemeName+serviceName)]; r != nil {
+	key := composeKey(schemeName, serviceName)
+	if r := schemeMap[key]; r != nil {
 		return r, nil
-	} else {
-		return nil, fmt.Errorf("No Resolver Found for SchemeName '" + schemeName + "' in SchemeMap")
 	}
+
+	return nil, fmt.Errorf("No Resolver Found for SchemeName '%s' and ServiceName '%s' in SchemeMap", schemeName, serviceName)
 }
