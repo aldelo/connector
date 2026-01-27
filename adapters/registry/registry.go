@@ -19,6 +19,8 @@ package registry
 import (
 	"fmt"
 	"log"
+	"net"
+	"strconv"
 	"time"
 
 	util "github.com/aldelo/common"
@@ -26,6 +28,8 @@ import (
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"github.com/aws/aws-sdk-go/aws"
 )
+
+const instanceIdMaxLen = 64
 
 type InstanceInfo struct {
 	ServiceId string
@@ -108,12 +112,20 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		return "", "", fmt.Errorf("Instance IP is Required")
 	}
 
+	if net.ParseIP(ip) == nil { // validate IP format early
+		return "", "", fmt.Errorf("Instance IP is invalid")
+	}
+
 	if port == 0 || port > 65535 {
 		return "", "", fmt.Errorf("Instance Port Must Be Between 1 and 65535")
 	}
 
 	// create instance id
 	instanceId = instancePrefix + util.NewUUID()
+
+	if len(instanceId) > instanceIdMaxLen { // enforce AWS length constraint
+		return "", "", fmt.Errorf("InstanceId exceeds maximum length of %d characters", instanceIdMaxLen)
+	}
 
 	health := "UNHEALTHY"
 
@@ -236,6 +248,20 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 				continue
 			}
 
+			ipStr := aws.StringValue(ipPtr) // reuse parsed strings
+			portStr := aws.StringValue(portPtr)
+
+			if net.ParseIP(ipStr) == nil { // skip invalid IPs
+				log.Printf("Discover Instances Skipping invalid IP for instance %s: %s", aws.StringValue(v.InstanceId), ipStr)
+				continue
+			}
+
+			portUint64, parseErr := strconv.ParseUint(portStr, 10, 16) // validate port parse/range
+			if parseErr != nil || portUint64 == 0 {
+				log.Printf("Discover Instances Skipping invalid port for instance %s: %s", aws.StringValue(v.InstanceId), portStr)
+				continue
+			}
+
 			version := ""
 			if verPtr, ok := attrs["INSTANCE_VERSION"]; ok && verPtr != nil {
 				version = *verPtr
@@ -252,7 +278,7 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 				NamespaceName:   *v.NamespaceName,
 				InstanceId:      *v.InstanceId,
 				InstanceIP:      *ipPtr,
-				InstancePort:    util.StrToUint(*portPtr),
+				InstancePort:    uint(portUint64),
 				InstanceVersion: version,
 				InstanceHealthy: healthyStatus,
 			})
