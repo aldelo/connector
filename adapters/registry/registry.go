@@ -214,6 +214,11 @@ func CreateService(sd *cloudmap.CloudMap,
 		return "", err
 	}
 
+	// guard against AWS description size limit to fail fast before API call
+	if len(description) > 1024 {
+		return "", fmt.Errorf("Description exceeds maximum length of 1024 characters")
+	}
+
 	if svc, e := sd.CreateService(name, util.NewUUID(), namespaceId, dnsConf, healthCheckConf, description, nil, timeoutDuration...); e != nil {
 		return "", e
 	} else if svc == nil || svc.Id == nil {
@@ -579,11 +584,14 @@ func DiscoverApiIps(sd *cloudmap.CloudMap, serviceName string, namespaceName str
 // hostName = (required) host name to lookup via dns
 // srv = (required) true: lookup via srv and return srv host and port; false: lookup via A and return ip only
 func DiscoverDnsIps(hostName string, srv bool) (ipList []string, err error) {
+	// ensure non-nil slice for consistent caller experience
+	ipList = []string{}
+
 	// normalize input
 	hostName = strings.TrimSpace(hostName)
 
 	if hostName == "" {
-		return []string{}, fmt.Errorf("HostName is Required")
+		return ipList, fmt.Errorf("HostName is Required")
 	}
 
 	if !srv {
@@ -597,7 +605,7 @@ func DiscoverDnsIps(hostName string, srv bool) (ipList []string, err error) {
 		}
 	} else {
 		// SRV
-		ipList = util.DnsLookupSrvs(hostName)
+		ipList = append(ipList, util.DnsLookupSrvs(hostName)...)
 	}
 
 	return ipList, nil
