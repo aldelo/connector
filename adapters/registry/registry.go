@@ -52,13 +52,13 @@ var serviceIdPattern = regexp.MustCompile(`^srv-[a-z0-9]{17}$`)
 
 // Broaden service name validation to support both DNS and HTTP namespace rules
 var serviceNameDNSPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-var serviceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-_.]{0,61}[A-Za-z0-9])?$`)
+var serviceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 
 // Validate namespace names as dotted DNS labels (public/private DNS namespaces).
 var namespaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
 
 // broaden namespace validation to allow HTTP/custom namespace rules (mixed case, underscores, longer length)
-var namespaceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-_.]{0,1022}[A-Za-z0-9])?$`)
+var namespaceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,1022}[A-Za-z0-9])?$`)
 
 const serviceNameMaxLen = 63
 
