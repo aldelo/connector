@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -30,6 +31,9 @@ import (
 )
 
 const instanceIdMaxLen = 64
+
+// enforce AWS Cloud Map allowed instance id charset.
+var instanceIdPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 type InstanceInfo struct {
 	ServiceId string
@@ -112,8 +116,9 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		return "", "", fmt.Errorf("Instance IP is Required")
 	}
 
-	if net.ParseIP(ip) == nil { // validate IP format early
-		return "", "", fmt.Errorf("Instance IP is invalid")
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil || parsedIP.To4() == nil { // only ipv4 supported by aws cloud map at this time
+		return "", "", fmt.Errorf("Instance IP Must Be A Valid IPv4 Address")
 	}
 
 	if port == 0 || port > 65535 {
@@ -127,6 +132,10 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		return "", "", fmt.Errorf("InstanceId exceeds maximum length of %d characters", instanceIdMaxLen)
 	}
 
+	if !instanceIdPattern.MatchString(instanceId) { // enforce allowed characters
+		return "", "", fmt.Errorf("InstanceId must match pattern %s", instanceIdPattern.String())
+	}
+
 	health := "UNHEALTHY"
 
 	if healthy {
@@ -135,7 +144,7 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 
 	// register instance to cloud map
 	if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, map[string]string{
-		"AWS_INSTANCE_IPV4":      ip,
+		"AWS_INSTANCE_IPV4":      parsedIP.To4().String(),
 		"AWS_INSTANCE_PORT":      fmt.Sprintf("%d", port),
 		"AWS_INIT_HEALTH_STATUS": health,
 		"INSTANCE_VERSION":       version,
@@ -249,15 +258,15 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 			}
 
 			ipStr := aws.StringValue(ipPtr) // reuse parsed strings
-			portStr := aws.StringValue(portPtr)
-
-			if net.ParseIP(ipStr) == nil { // skip invalid IPs
-				log.Printf("Discover Instances Skipping invalid IP for instance %s: %s", aws.StringValue(v.InstanceId), ipStr)
+			ipParsed := net.ParseIP(ipStr)
+			if ipParsed == nil || ipParsed.To4() == nil {
+				log.Printf("Discover Instances Skipping non-ipv4 for instance %s: %s", aws.StringValue(v.InstanceId), ipStr)
 				continue
 			}
 
-			portUint64, parseErr := strconv.ParseUint(portStr, 10, 16) // validate port parse/range
-			if parseErr != nil || portUint64 == 0 {
+			portStr := aws.StringValue(portPtr)
+			portUint64, parsedErr := strconv.ParseUint(portStr, 10, 64)
+			if parsedErr != nil || portUint64 == 0 {
 				log.Printf("Discover Instances Skipping invalid port for instance %s: %s", aws.StringValue(v.InstanceId), portStr)
 				continue
 			}
@@ -277,7 +286,7 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 				ServiceName:     *v.ServiceName,
 				NamespaceName:   *v.NamespaceName,
 				InstanceId:      *v.InstanceId,
-				InstanceIP:      *ipPtr,
+				InstanceIP:      ipParsed.To4().String(),
 				InstancePort:    uint(portUint64),
 				InstanceVersion: version,
 				InstanceHealthy: healthyStatus,
