@@ -37,7 +37,13 @@ const uuidLength = 36
 
 // enforce AWS Cloud Map allowed instance id charset.
 var instanceIdPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-var serviceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// Broaden service name validation to support both DNS and HTTP namespace rules
+var serviceNameDNSPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+var serviceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-_.]{0,61}[A-Za-z0-9])?$`)
+
+// Validate namespace names as dotted DNS labels (public/private DNS namespaces).
+var namespaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`) // NEW
 
 const serviceNameMaxLen = 63
 
@@ -63,8 +69,19 @@ func validateServiceName(name string) error {
 	if len(name) > serviceNameMaxLen {
 		return fmt.Errorf("Service Name exceeds maximum length of %d characters", serviceNameMaxLen)
 	}
-	if !serviceNamePattern.MatchString(name) {
-		return fmt.Errorf("Service Name must match pattern %s", serviceNamePattern.String())
+	if serviceNameDNSPattern.MatchString(name) || serviceNameHTTPPattern.MatchString(name) {
+		return nil
+	}
+	return fmt.Errorf("Service Name must match DNS pattern %s or HTTP pattern %s", serviceNameDNSPattern.String(), serviceNameHTTPPattern.String())
+}
+
+// namespace validation to fail fast on invalid DNS names.
+func validateNamespaceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("Namespace Name is Required")
+	}
+	if !namespaceNamePattern.MatchString(name) {
+		return fmt.Errorf("Namespace Name must match pattern %s", namespaceNamePattern.String())
 	}
 	return nil
 }
@@ -249,6 +266,9 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 			if isHealthStatusError(err) {
 				attrs = buildAttributes(false)
 				if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attrs, timeoutDuration...); err == nil {
+					if strings.TrimSpace(operationId) == "" { // ensure a usable operation id is returned
+						return "", "", fmt.Errorf("RegisterInstance succeeded but no operationId was returned")
+					}
 					break
 				}
 			}
@@ -259,6 +279,11 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 			}
 
 			return "", "", err
+		}
+
+		// ensure a usable operation id is returned
+		if strings.TrimSpace(operationId) == "" {
+			return "", "", fmt.Errorf("RegisterInstance succeeded but no operationId was returned")
 		}
 
 		// success
@@ -357,8 +382,8 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 		return []*InstanceInfo{}, err
 	}
 
-	if namespaceName == "" {
-		return []*InstanceInfo{}, fmt.Errorf("Namespace Name is Required")
+	if err := validateNamespaceName(namespaceName); err != nil { // early validation for namespace name
+		return []*InstanceInfo{}, err
 	}
 
 	if lst, e := sd.DiscoverInstances(namespaceName, serviceName, healthy, customAttributes, maxResults, timeoutDuration...); e != nil {
