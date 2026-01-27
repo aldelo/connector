@@ -160,7 +160,7 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 	if healthy {
 		health = "HEALTHY"
 	}
-	attributes["AWS_INSTANCE_HEALTHY"] = health
+	attributes["AWS_INIT_HEALTH_STATUS"] = health
 
 	// register instance to cloud map
 	if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attributes, timeoutDuration...); err != nil {
