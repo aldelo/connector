@@ -132,7 +132,7 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 	}
 
 	schemeMap[key] = r
-	registeredSchemes[serviceName] = serviceName
+	registeredSchemes[schemeName] = serviceName
 
 	// 1/9/2025 by yao.bin - Caution: There is a global map in "grpc/resolver", so we have to put "resolver.Register" in mutex lock too
 	var builder resolver.Builder
