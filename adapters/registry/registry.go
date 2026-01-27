@@ -36,6 +36,20 @@ const instanceIdMaxLen = 64
 // enforce AWS Cloud Map allowed instance id charset.
 var instanceIdPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
+// centralize instance ID validation for reuse across all call sites.
+func validateInstanceID(id string) error {
+	if len(id) == 0 {
+		return fmt.Errorf("InstanceId is Required")
+	}
+	if len(id) > instanceIdMaxLen {
+		return fmt.Errorf("InstanceId exceeds maximum length of %d characters", instanceIdMaxLen)
+	}
+	if !instanceIdPattern.MatchString(id) {
+		return fmt.Errorf("InstanceId must match pattern %s", instanceIdPattern.String())
+	}
+	return nil
+}
+
 type InstanceInfo struct {
 	ServiceId string
 
@@ -240,8 +254,8 @@ func UpdateHealthStatus(sd *cloudmap.CloudMap,
 	instanceId = strings.TrimSpace(instanceId)
 	serviceId = strings.TrimSpace(serviceId)
 
-	if instanceId == "" {
-		return fmt.Errorf("InstanceId is Required")
+	if err := validateInstanceID(instanceId); err != nil {
+		return err
 	}
 
 	if serviceId == "" {
@@ -359,6 +373,9 @@ func DiscoverApiIps(sd *cloudmap.CloudMap, serviceName string, namespaceName str
 	if maxResult != nil {
 		if *maxResult <= 0 {
 			maxResult = nil
+		} else if *maxResult > 100 {
+			v := int64(100)
+			maxResult = &v
 		}
 	}
 
@@ -433,8 +450,8 @@ func DeregisterInstance(sd *cloudmap.CloudMap,
 	instanceId = strings.TrimSpace(instanceId)
 	serviceId = strings.TrimSpace(serviceId)
 
-	if instanceId == "" {
-		return "", fmt.Errorf("InstanceId is Required")
+	if err := validateInstanceID(instanceId); err != nil {
+		return "", err
 	}
 
 	if serviceId == "" {
