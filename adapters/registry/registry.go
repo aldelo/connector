@@ -28,6 +28,7 @@ import (
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"github.com/aws/aws-sdk-go/aws"
+	"strings"
 )
 
 const instanceIdMaxLen = 64
@@ -68,11 +69,16 @@ func CreateService(sd *cloudmap.CloudMap,
 		return "", fmt.Errorf("SD Client is Required")
 	}
 
-	if util.LenTrim(name) == 0 {
+	// normalize inputs before validation/use
+	name = strings.TrimSpace(name)
+	namespaceId = strings.TrimSpace(namespaceId)
+	description = strings.TrimSpace(description)
+
+	if name == "" {
 		return "", fmt.Errorf("Service Name is Required")
 	}
 
-	if util.LenTrim(namespaceId) == 0 {
+	if namespaceId == "" {
 		return "", fmt.Errorf("NamespaceId is Required")
 	}
 
@@ -108,11 +114,17 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		return "", "", fmt.Errorf("SD Client is Required")
 	}
 
-	if util.LenTrim(serviceId) == 0 {
+	// normalize inputs before validation/use
+	serviceId = strings.TrimSpace(serviceId)
+	instancePrefix = strings.TrimSpace(instancePrefix)
+	ip = strings.TrimSpace(ip)
+	version = strings.TrimSpace(version)
+
+	if serviceId == "" {
 		return "", "", fmt.Errorf("ServiceId is Required")
 	}
 
-	if util.LenTrim(ip) == 0 {
+	if ip == "" {
 		return "", "", fmt.Errorf("Instance IP is Required")
 	}
 
@@ -136,21 +148,31 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		return "", "", fmt.Errorf("InstanceId must match pattern %s", instanceIdPattern.String())
 	}
 
-	health := "UNHEALTHY"
+	// build attributes first
+	attributes := map[string]string{
+		"AWS_INSTANCE_IPV4": parsedIP.To4().String(),
+		"AWS_INSTANCE_PORT": fmt.Sprintf("%d", port),
+		"INSTANCE_VERSION":  version,
+		"SERVICE_ID":        serviceId,
+	}
 
+	health := "UNHEALTHY"
 	if healthy {
 		health = "HEALTHY"
 	}
+	attributes["AWS_INSTANCE_HEALTHY"] = health
 
 	// register instance to cloud map
-	if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, map[string]string{
-		"AWS_INSTANCE_IPV4":      parsedIP.To4().String(),
-		"AWS_INSTANCE_PORT":      fmt.Sprintf("%d", port),
-		"AWS_INIT_HEALTH_STATUS": health,
-		"INSTANCE_VERSION":       version,
-		"SERVICE_ID":             serviceId,
-	}, timeoutDuration...); err != nil {
-		return "", "", err
+	if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attributes, timeoutDuration...); err != nil {
+		// retry without AWS_INIT_HEALTH_STATUS if the service doesn't support custom health checks
+		if strings.Contains(strings.ToLower(err.Error()), "aws_init_health_status") {
+			delete(attributes, "AWS_INIT_HEALTH_STATUS")
+			if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attributes, timeoutDuration...); err != nil {
+				return "", "", err
+			}
+		} else {
+			return "", "", err
+		}
 	}
 
 	// register instance ok, check via operation to see if completed
@@ -166,7 +188,9 @@ func GetOperationStatus(sd *cloudmap.CloudMap,
 		return sdoperationstatus.UNKNOWN, fmt.Errorf("SD Client is Required")
 	}
 
-	if util.LenTrim(operationId) == 0 {
+	// normalize input
+	operationId = strings.TrimSpace(operationId)
+	if operationId == "" {
 		return sdoperationstatus.UNKNOWN, fmt.Errorf("OperationId is Required")
 	}
 
@@ -202,11 +226,15 @@ func UpdateHealthStatus(sd *cloudmap.CloudMap,
 		return fmt.Errorf("SD Client is Required")
 	}
 
-	if util.LenTrim(instanceId) == 0 {
+	// normalize inputs
+	instanceId = strings.TrimSpace(instanceId)
+	serviceId = strings.TrimSpace(serviceId)
+
+	if instanceId == "" {
 		return fmt.Errorf("InstanceId is Required")
 	}
 
-	if util.LenTrim(serviceId) == 0 {
+	if serviceId == "" {
 		return fmt.Errorf("ServiceId is Required")
 	}
 
@@ -226,11 +254,15 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 		return []*InstanceInfo{}, fmt.Errorf("SD Client is Required")
 	}
 
-	if util.LenTrim(serviceName) == 0 {
+	// normalize inputs
+	serviceName = strings.TrimSpace(serviceName)
+	namespaceName = strings.TrimSpace(namespaceName)
+
+	if serviceName == "" {
 		return []*InstanceInfo{}, fmt.Errorf("Service Name is Required")
 	}
 
-	if util.LenTrim(namespaceName) == 0 {
+	if namespaceName == "" {
 		return []*InstanceInfo{}, fmt.Errorf("Namespace Name is Required")
 	}
 
@@ -317,6 +349,11 @@ func DiscoverApiIps(sd *cloudmap.CloudMap, serviceName string, namespaceName str
 		}
 	}
 
+	// normalize inputs
+	serviceName = strings.TrimSpace(serviceName)
+	namespaceName = strings.TrimSpace(namespaceName)
+	version = strings.TrimSpace(version)
+
 	var attributes map[string]string
 
 	if util.LenTrim(version) > 0 {
@@ -344,7 +381,10 @@ func DiscoverApiIps(sd *cloudmap.CloudMap, serviceName string, namespaceName str
 // hostName = (required) host name to lookup via dns
 // srv = (required) true: lookup via srv and return srv host and port; false: lookup via A and return ip only
 func DiscoverDnsIps(hostName string, srv bool) (ipList []string, err error) {
-	if util.LenTrim(hostName) == 0 {
+	// normalize input
+	hostName = strings.TrimSpace(hostName)
+
+	if hostName == "" {
 		return []string{}, fmt.Errorf("HostName is Required")
 	}
 
@@ -376,11 +416,15 @@ func DeregisterInstance(sd *cloudmap.CloudMap,
 		return "", fmt.Errorf("SD Client is Required")
 	}
 
-	if util.LenTrim(instanceId) == 0 {
+	// normalize inputs
+	instanceId = strings.TrimSpace(instanceId)
+	serviceId = strings.TrimSpace(serviceId)
+
+	if instanceId == "" {
 		return "", fmt.Errorf("InstanceId is Required")
 	}
 
-	if util.LenTrim(serviceId) == 0 {
+	if serviceId == "" {
 		return "", fmt.Errorf("ServiceId is Required")
 	}
 
