@@ -327,12 +327,17 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 			return false
 		}
 		msg := strings.ToLower(e.Error())
-		return strings.Contains(msg, "duplicate") || strings.Contains(msg, "already exists")
+		return strings.Contains(msg, "duplicate instance") ||
+			strings.Contains(msg, "instance already exists") ||
+			strings.Contains(msg, "duplicate request") ||
+			strings.Contains(msg, "duplicate resource")
 	}
 
 	const maxAttempts = 3 // bounded retries for rare InstanceId collisions.
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		operationId = ""
+
 		if instanceId == "" || isDuplicateInstanceError(err) { // only regenerate on duplicate collisions
 			if instanceId, err = generateInstanceID(); err != nil {
 				return "", "", err
@@ -343,6 +348,7 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attrs, timeoutDuration...); err != nil {
 			// fallback if service does not support custom health checks
 			if isHealthStatusError(err) {
+				operationId = ""
 				attrs = buildAttributes(false)
 				if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attrs, timeoutDuration...); err == nil {
 					if strings.TrimSpace(operationId) == "" { // ensure a usable operation id is returned
