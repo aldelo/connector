@@ -36,7 +36,7 @@ const instanceIdMaxLen = 64
 const uuidLength = 36
 
 // enforce AWS Cloud Map allowed instance id charset.
-var instanceIdPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+var instanceIdPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // Broaden service name validation to support both DNS and HTTP namespace rules
 var serviceNameDNSPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -134,7 +134,7 @@ func CreateService(sd *cloudmap.CloudMap,
 	}
 
 	// normalize inputs before validation/use
-	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.TrimSpace(name)
 	namespaceId = strings.TrimSpace(namespaceId)
 	description = strings.TrimSpace(description)
 
@@ -374,7 +374,7 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 	}
 
 	// normalize inputs
-	serviceName = strings.ToLower(strings.TrimSpace(serviceName))
+	serviceName = strings.TrimSpace(serviceName)
 	namespaceName = strings.TrimSpace(namespaceName)
 
 	// validate service name to avoid opaque Cloud Map errors during discovery
