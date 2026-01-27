@@ -35,6 +35,10 @@ import (
 const instanceIdMaxLen = 64
 const uuidLength = 36
 
+// explicit max lengths for DNS vs HTTP/custom namespaces
+const namespaceNameDNSMaxLen = 253   // RFC-compliant DNS max
+const namespaceNameHTTPMaxLen = 1024 // Cloud Map HTTP namespace limit
+
 // namespace ID pattern (ns-xxxxxxxxxxxxxxxx)
 var namespaceIdPattern = regexp.MustCompile(`^ns-[a-z0-9]{17}$`)
 
@@ -51,7 +55,10 @@ var serviceNameDNSPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9
 var serviceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-_.]{0,61}[A-Za-z0-9])?$`)
 
 // Validate namespace names as dotted DNS labels (public/private DNS namespaces).
-var namespaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`) // NEW
+var namespaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+
+// broaden namespace validation to allow HTTP/custom namespace rules (mixed case, underscores, longer length)
+var namespaceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-_.]{0,1022}[A-Za-z0-9])?$`)
 
 const serviceNameMaxLen = 63
 
@@ -108,16 +115,26 @@ func validateServiceName(name string) error {
 
 // namespace validation to fail fast on invalid DNS names.
 func validateNamespaceName(name string) error {
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("Namespace Name is Required")
 	}
-	if len(name) > 253 { // enforce RFC-compliant total length
-		return fmt.Errorf("Namespace Name exceeds maximum length of 253 characters")
+
+	// DNS namespace acceptance
+	if len(name) <= namespaceNameDNSMaxLen && namespaceNamePattern.MatchString(name) {
+		return nil
 	}
-	if !namespaceNamePattern.MatchString(name) {
-		return fmt.Errorf("Namespace Name must match pattern %s", namespaceNamePattern.String())
+
+	// HTTP/custom namespace acceptance (Cloud Map HTTP namespaces)
+	if len(name) <= namespaceNameHTTPMaxLen && namespaceNameHTTPPattern.MatchString(name) {
+		return nil
 	}
-	return nil
+
+	if len(name) > namespaceNameHTTPMaxLen {
+		return fmt.Errorf("Namespace Name exceeds maximum length of %d characters", namespaceNameHTTPMaxLen)
+	}
+
+	return fmt.Errorf("Namespace Name must match DNS pattern %s or HTTP pattern %s", namespaceNamePattern.String(), namespaceNameHTTPPattern.String())
 }
 
 // validate instance prefix so generated IDs always meet Cloud Map constraints
