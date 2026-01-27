@@ -52,7 +52,7 @@ var serviceIdPattern = regexp.MustCompile(`^srv-[a-z0-9]{16}$`)
 
 // Broaden service name validation to support both DNS and HTTP namespace rules
 var serviceNameDNSPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-var serviceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+var serviceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?$`)
 
 // Validate namespace names as dotted DNS labels (public/private DNS namespaces).
 var namespaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
@@ -60,7 +60,8 @@ var namespaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9]
 // broaden namespace validation to allow HTTP/custom namespace rules (mixed case, dash, longer length)
 var namespaceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,1022}[A-Za-z0-9])?$`)
 
-const serviceNameMaxLen = 63
+const serviceNameDNSMaxLen = 63
+const serviceNameHTTPMaxLen = 64
 
 // centralize instance ID validation for reuse across all call sites.
 func validateInstanceID(id string) error {
@@ -101,15 +102,25 @@ func validateServiceID(id string) error {
 
 // validate service names against Cloud Map rules (1-63 chars, alnum with single dashes)
 func validateServiceName(name string) error {
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("Service Name is Required")
 	}
-	if len(name) > serviceNameMaxLen {
-		return fmt.Errorf("Service Name exceeds maximum length of %d characters", serviceNameMaxLen)
-	}
-	if serviceNameDNSPattern.MatchString(name) || serviceNameHTTPPattern.MatchString(name) {
+
+	if serviceNameDNSPattern.MatchString(name) {
+		if len(name) > serviceNameDNSMaxLen {
+			return fmt.Errorf("Service Name exceeds maximum length of %d characters for DNS namespaces", serviceNameDNSMaxLen)
+		}
 		return nil
 	}
+
+	if serviceNameHTTPPattern.MatchString(name) {
+		if len(name) > serviceNameHTTPMaxLen {
+			return fmt.Errorf("Service Name exceeds maximum length of %d characters for HTTP namespaces", serviceNameHTTPMaxLen)
+		}
+		return nil
+	}
+
 	return fmt.Errorf("Service Name must match DNS pattern %s or HTTP pattern %s", serviceNameDNSPattern.String(), serviceNameHTTPPattern.String())
 }
 
