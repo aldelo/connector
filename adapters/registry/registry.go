@@ -167,6 +167,7 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		// retry without AWS_INIT_HEALTH_STATUS if the service doesn't support custom health checks
 		if strings.Contains(strings.ToLower(err.Error()), "aws_init_health_status") {
 			delete(attributes, "AWS_INIT_HEALTH_STATUS")
+			instanceId = instancePrefix + util.NewUUID()
 			if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attributes, timeoutDuration...); err != nil {
 				return "", "", err
 			}
@@ -210,7 +211,7 @@ func GetOperationStatus(sd *cloudmap.CloudMap,
 		case sdoperationstatus.Fail.Key():
 			return sdoperationstatus.Fail, fmt.Errorf("%s [%s]", aws.StringValue(op.ErrorMessage), aws.StringValue(op.ErrorCode))
 		default:
-			return sdoperationstatus.UNKNOWN, fmt.Errorf("%s", "Unknown Error")
+			return sdoperationstatus.UNKNOWN, fmt.Errorf("Unknown operation status: %s", aws.StringValue(op.Status))
 		}
 	}
 }
