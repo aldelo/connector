@@ -163,37 +163,71 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		return id, nil
 	}
 
-	if instanceId, err = generateInstanceID(); err != nil {
-		return "", "", err
-	}
-
-	// build attributes first
-	attributes := map[string]string{
-		"AWS_INSTANCE_IPV4": parsedIP.To4().String(),
-		"AWS_INSTANCE_PORT": fmt.Sprintf("%d", port),
-		"SERVICE_ID":        serviceId,
-	}
-	if version != "" { // avoid empty attribute values that Cloud Map rejects
-		attributes["INSTANCE_VERSION"] = version
-	}
-
 	health := "UNHEALTHY"
 	if healthy {
 		health = "HEALTHY"
 	}
-	attributes["AWS_INIT_HEALTH_STATUS"] = health
 
-	// register instance to cloud map
-	if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attributes, timeoutDuration...); err != nil {
-		// retry without AWS_INIT_HEALTH_STATUS if the service doesn't support custom health checks
-		if strings.Contains(strings.ToLower(err.Error()), "aws_init_health_status") {
-			delete(attributes, "AWS_INIT_HEALTH_STATUS")
-			if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attributes, timeoutDuration...); err != nil {
-				return "", "", err
-			}
-		} else {
+	// helper to build a fresh attributes map per attempt to avoid mutation leaks.
+	buildAttributes := func(includeInitHealth bool) map[string]string {
+		attrs := map[string]string{
+			"AWS_INSTANCE_IPV4": parsedIP.To4().String(),
+			"AWS_INSTANCE_PORT": fmt.Sprintf("%d", port),
+			"SERVICE_ID":        serviceId,
+		}
+		if version != "" { // avoid empty attribute values that Cloud Map rejects
+			attrs["INSTANCE_VERSION"] = version
+		}
+		if includeInitHealth {
+			attrs["AWS_INIT_HEALTH_STATUS"] = health
+		}
+		return attrs
+	}
+
+	// helpers to classify retryable errors.
+	isHealthStatusError := func(e error) bool {
+		return e != nil && strings.Contains(strings.ToLower(e.Error()), "aws_init_health_status")
+	}
+
+	isDuplicateInstanceError := func(e error) bool {
+		if e == nil {
+			return false
+		}
+		msg := strings.ToLower(e.Error())
+		return strings.Contains(msg, "duplicate") || strings.Contains(msg, "already exists")
+	}
+
+	const maxAttempts = 3 // bounded retries for rare InstanceId collisions.
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if instanceId, err = generateInstanceID(); err != nil {
 			return "", "", err
 		}
+
+		attrs := buildAttributes(true)
+		if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attrs, timeoutDuration...); err != nil {
+			// fallback if service does not support custom health checks
+			if isHealthStatusError(err) {
+				attrs = buildAttributes(false)
+				if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attrs, timeoutDuration...); err == nil {
+					break
+				}
+			}
+
+			// retry with a new InstanceId on duplicate, up to maxAttempts
+			if isDuplicateInstanceError(err) && attempt < maxAttempts {
+				continue
+			}
+
+			return "", "", err
+		}
+
+		// success
+		break
+	}
+
+	if err != nil {
+		return "", "", err
 	}
 
 	// register instance ok, check via operation to see if completed
@@ -353,6 +387,11 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 			log.Printf("Discover Instances Returned No Results for Service: %s.%s", serviceName, namespaceName)
 		} else {
 			log.Printf("Discover Instances Returned %v for Service: %s.%s", instanceList, serviceName, namespaceName)
+		}
+
+		// ensure a non-nil slice is always returned to avoid caller panics.
+		if instanceList == nil {
+			instanceList = []*InstanceInfo{}
 		}
 
 		return instanceList, nil
