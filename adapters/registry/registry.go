@@ -24,17 +24,22 @@ import (
 	"strconv"
 	"time"
 
+	"strings"
+
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"github.com/aws/aws-sdk-go/aws"
-	"strings"
 )
 
 const instanceIdMaxLen = 64
+const uuidLength = 36
 
 // enforce AWS Cloud Map allowed instance id charset.
 var instanceIdPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+var serviceNamePattern = regexp.MustCompile(`^[0-9A-Za-z]+(-[0-9A-Za-z]+)*$`)
+
+const serviceNameMaxLen = 63
 
 // centralize instance ID validation for reuse across all call sites.
 func validateInstanceID(id string) error {
@@ -46,6 +51,34 @@ func validateInstanceID(id string) error {
 	}
 	if !instanceIdPattern.MatchString(id) {
 		return fmt.Errorf("InstanceId must match pattern %s", instanceIdPattern.String())
+	}
+	return nil
+}
+
+// validate service names against Cloud Map rules (1-63 chars, alnum with single dashes)
+func validateServiceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("Service Name is Required")
+	}
+	if len(name) > serviceNameMaxLen {
+		return fmt.Errorf("Service Name exceeds maximum length of %d characters", serviceNameMaxLen)
+	}
+	if !serviceNamePattern.MatchString(name) {
+		return fmt.Errorf("Service Name must match pattern %s", serviceNamePattern.String())
+	}
+	return nil
+}
+
+// validate instance prefix so generated IDs always meet Cloud Map constraints
+func validateInstancePrefix(prefix string) error {
+	if prefix == "" {
+		return nil
+	}
+	if !instanceIdPattern.MatchString(prefix) {
+		return fmt.Errorf("Instance prefix must match pattern %s", instanceIdPattern.String())
+	}
+	if len(prefix)+uuidLength > instanceIdMaxLen {
+		return fmt.Errorf("Instance prefix too long; maximum prefix length is %d characters", instanceIdMaxLen-uuidLength)
 	}
 	return nil
 }
@@ -88,8 +121,9 @@ func CreateService(sd *cloudmap.CloudMap,
 	namespaceId = strings.TrimSpace(namespaceId)
 	description = strings.TrimSpace(description)
 
-	if name == "" {
-		return "", fmt.Errorf("Service Name is Required")
+	// explicit Cloud Map name validation for clear, early errors
+	if err := validateServiceName(name); err != nil {
+		return "", err
 	}
 
 	if namespaceId == "" {
@@ -136,6 +170,11 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 
 	if serviceId == "" {
 		return "", "", fmt.Errorf("ServiceId is Required")
+	}
+
+	// validate prefix to avoid generating illegal InstanceIds
+	if err := validateInstancePrefix(instancePrefix); err != nil {
+		return "", "", err
 	}
 
 	if ip == "" {
@@ -313,8 +352,9 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 	serviceName = strings.TrimSpace(serviceName)
 	namespaceName = strings.TrimSpace(namespaceName)
 
-	if serviceName == "" {
-		return []*InstanceInfo{}, fmt.Errorf("Service Name is Required")
+	// validate service name to avoid opaque Cloud Map errors during discovery
+	if err := validateServiceName(serviceName); err != nil {
+		return []*InstanceInfo{}, err
 	}
 
 	if namespaceName == "" {
