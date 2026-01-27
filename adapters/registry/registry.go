@@ -38,6 +38,9 @@ const uuidLength = 36
 // enforce AWS Cloud Map allowed instance id charset.
 var instanceIdPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
+// basic Cloud Map service ID guard (srv-xxxxxxxxxxxxxxxx pattern).
+var serviceIdPattern = regexp.MustCompile(`^srv-[a-z0-9]{17}$`)
+
 // Broaden service name validation to support both DNS and HTTP namespace rules
 var serviceNameDNSPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 var serviceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-_.]{0,61}[A-Za-z0-9])?$`)
@@ -49,6 +52,7 @@ const serviceNameMaxLen = 63
 
 // centralize instance ID validation for reuse across all call sites.
 func validateInstanceID(id string) error {
+	id = strings.TrimSpace(id)
 	if len(id) == 0 {
 		return fmt.Errorf("InstanceId is Required")
 	}
@@ -57,6 +61,17 @@ func validateInstanceID(id string) error {
 	}
 	if !instanceIdPattern.MatchString(id) {
 		return fmt.Errorf("InstanceId must match pattern %s", instanceIdPattern.String())
+	}
+	return nil
+}
+
+func validateServiceID(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("ServiceId is Required")
+	}
+	if !serviceIdPattern.MatchString(id) {
+		return fmt.Errorf("ServiceId must match pattern %s", serviceIdPattern.String())
 	}
 	return nil
 }
@@ -185,8 +200,8 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 	ip = strings.TrimSpace(ip)
 	version = strings.TrimSpace(version)
 
-	if serviceId == "" {
-		return "", "", fmt.Errorf("ServiceId is Required")
+	if err := validateServiceID(serviceId); err != nil {
+		return "", "", err
 	}
 
 	// validate prefix to avoid generating illegal InstanceIds
@@ -353,8 +368,8 @@ func UpdateHealthStatus(sd *cloudmap.CloudMap,
 		return err
 	}
 
-	if serviceId == "" {
-		return fmt.Errorf("ServiceId is Required")
+	if err := validateServiceID(serviceId); err != nil {
+		return err
 	}
 
 	return sd.UpdateInstanceCustomHealthStatus(instanceId, serviceId, healthy, timeoutDuration...)
@@ -471,12 +486,14 @@ func DiscoverApiIps(sd *cloudmap.CloudMap, serviceName string, namespaceName str
 		return []string{}, fmt.Errorf("SD Client is Required")
 	}
 
+	var limit *int64
 	if maxResult != nil {
-		if *maxResult <= 0 {
-			maxResult = nil
-		} else if *maxResult > 100 {
-			v := int64(100)
-			maxResult = &v
+		v := *maxResult
+		if v > 0 {
+			if v > 100 {
+				v = 100
+			}
+			limit = aws.Int64(v)
 		}
 	}
 
@@ -492,7 +509,7 @@ func DiscoverApiIps(sd *cloudmap.CloudMap, serviceName string, namespaceName str
 		attributes["INSTANCE_VERSION"] = version
 	}
 
-	if lst, e := DiscoverInstances(sd, serviceName, namespaceName, true, attributes, maxResult); e != nil {
+	if lst, e := DiscoverInstances(sd, serviceName, namespaceName, true, attributes, limit); e != nil {
 		return []string{}, e
 	} else {
 		if len(lst) > 0 {
@@ -555,8 +572,8 @@ func DeregisterInstance(sd *cloudmap.CloudMap,
 		return "", err
 	}
 
-	if serviceId == "" {
-		return "", fmt.Errorf("ServiceId is Required")
+	if err := validateServiceID(serviceId); err != nil {
+		return "", err
 	}
 
 	return sd.DeregisterInstance(instanceId, serviceId, timeoutDuration...)
