@@ -35,6 +35,11 @@ import (
 const instanceIdMaxLen = 64
 const uuidLength = 36
 
+// namespace ID pattern (ns-xxxxxxxxxxxxxxxx)
+var namespaceIdPattern = regexp.MustCompile(`^ns-[a-z0-9]{17}$`)
+
+const instanceVersionMaxLen = 256 // guard attribute length
+
 // enforce AWS Cloud Map allowed instance id charset.
 var instanceIdPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -61,6 +66,17 @@ func validateInstanceID(id string) error {
 	}
 	if !instanceIdPattern.MatchString(id) {
 		return fmt.Errorf("InstanceId must match pattern %s", instanceIdPattern.String())
+	}
+	return nil
+}
+
+func validateNamespaceID(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("NamespaceId is Required")
+	}
+	if !namespaceIdPattern.MatchString(id) {
+		return fmt.Errorf("NamespaceId must match pattern %s", namespaceIdPattern.String())
 	}
 	return nil
 }
@@ -94,6 +110,9 @@ func validateServiceName(name string) error {
 func validateNamespaceName(name string) error {
 	if name == "" {
 		return fmt.Errorf("Namespace Name is Required")
+	}
+	if len(name) > 253 { // enforce RFC-compliant total length
+		return fmt.Errorf("Namespace Name exceeds maximum length of 253 characters")
 	}
 	if !namespaceNamePattern.MatchString(name) {
 		return fmt.Errorf("Namespace Name must match pattern %s", namespaceNamePattern.String())
@@ -158,8 +177,9 @@ func CreateService(sd *cloudmap.CloudMap,
 		return "", err
 	}
 
-	if namespaceId == "" {
-		return "", fmt.Errorf("NamespaceId is Required")
+	// validate namespace ID upfront
+	if err := validateNamespaceID(namespaceId); err != nil {
+		return "", err
 	}
 
 	if svc, e := sd.CreateService(name, util.NewUUID(), namespaceId, dnsConf, healthCheckConf, description, nil, timeoutDuration...); e != nil {
@@ -220,6 +240,11 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 
 	if port == 0 || port > 65535 {
 		return "", "", fmt.Errorf("Instance Port Must Be Between 1 and 65535")
+	}
+
+	// prevent overlong attribute values rejected by Cloud Map
+	if len(version) > instanceVersionMaxLen {
+		return "", "", fmt.Errorf("Instance version exceeds maximum length of %d characters", instanceVersionMaxLen)
 	}
 
 	// centralize ID generation + validation so both initial and retry paths are safe.
