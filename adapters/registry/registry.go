@@ -151,6 +151,21 @@ func validateInstancePrefix(prefix string) error {
 	return nil
 }
 
+// clamp DiscoverInstances maxResults to Cloud Map bounds (1..100) and ignore non-positive values.
+func sanitizeMaxResults(maxResults *int64) *int64 {
+	if maxResults == nil {
+		return nil
+	}
+	v := *maxResults
+	if v <= 0 { // drop non-positive requests to use service default
+		return nil
+	}
+	if v > 100 { // AWS cap
+		v = 100
+	}
+	return aws.Int64(v)
+}
+
 type InstanceInfo struct {
 	ServiceId string
 
@@ -443,7 +458,9 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 		return []*InstanceInfo{}, err
 	}
 
-	if lst, e := sd.DiscoverInstances(namespaceName, serviceName, healthy, customAttributes, maxResults, timeoutDuration...); e != nil {
+	limit := sanitizeMaxResults(maxResults)
+
+	if lst, e := sd.DiscoverInstances(namespaceName, serviceName, healthy, customAttributes, limit, timeoutDuration...); e != nil {
 		log.Printf("Discover Instances Failed for Service: %v, %s.%s", e, serviceName, namespaceName)
 		return []*InstanceInfo{}, e
 	} else {
@@ -528,16 +545,7 @@ func DiscoverApiIps(sd *cloudmap.CloudMap, serviceName string, namespaceName str
 		return []string{}, fmt.Errorf("SD Client is Required")
 	}
 
-	var limit *int64
-	if maxResult != nil {
-		v := *maxResult
-		if v > 0 {
-			if v > 100 {
-				v = 100
-			}
-			limit = aws.Int64(v)
-		}
-	}
+	limit := sanitizeMaxResults(maxResult)
 
 	// normalize inputs
 	serviceName = strings.TrimSpace(serviceName)
@@ -618,5 +626,12 @@ func DeregisterInstance(sd *cloudmap.CloudMap,
 		return "", err
 	}
 
-	return sd.DeregisterInstance(instanceId, serviceId, timeoutDuration...)
+	if operationId, err = sd.DeregisterInstance(instanceId, serviceId, timeoutDuration...); err != nil { // capture opId + err
+		return "", err
+	}
+	if strings.TrimSpace(operationId) == "" { // ensure a usable operation id is returned
+		return "", fmt.Errorf("DeregisterInstance succeeded but no operationId was returned")
+	}
+
+	return operationId, nil
 }
