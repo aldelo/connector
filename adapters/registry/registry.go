@@ -188,9 +188,6 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		// retry without AWS_INIT_HEALTH_STATUS if the service doesn't support custom health checks
 		if strings.Contains(strings.ToLower(err.Error()), "aws_init_health_status") {
 			delete(attributes, "AWS_INIT_HEALTH_STATUS")
-			if instanceId, err = generateInstanceID(); err != nil { // validate retry ID too
-				return "", "", err
-			}
 			if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attributes, timeoutDuration...); err != nil {
 				return "", "", err
 			}
