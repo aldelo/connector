@@ -266,7 +266,7 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 
 			portStr := aws.StringValue(portPtr)
 			portUint64, parsedErr := strconv.ParseUint(portStr, 10, 64)
-			if parsedErr != nil || portUint64 == 0 {
+			if parsedErr != nil || portUint64 == 0 || portUint64 > 65535 {
 				log.Printf("Discover Instances Skipping invalid port for instance %s: %s", aws.StringValue(v.InstanceId), portStr)
 				continue
 			}
@@ -307,6 +307,10 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 // this call can be used outside of vpc for private dns namespaces,
 // this call returns ip address : port (support for dynamic service ports when registered)
 func DiscoverApiIps(sd *cloudmap.CloudMap, serviceName string, namespaceName string, version string, maxResult *int64) (ipList []string, err error) {
+	if sd == nil {
+		return []string{}, fmt.Errorf("SD Client is Required")
+	}
+
 	if maxResult != nil {
 		if *maxResult <= 0 {
 			maxResult = nil
