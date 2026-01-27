@@ -332,9 +332,12 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 
 	const maxAttempts = 3 // bounded retries for rare InstanceId collisions.
 
+	creatorRequestId := util.NewUUID()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if instanceId, err = generateInstanceID(); err != nil {
-			return "", "", err
+		if instanceId == "" || isDuplicateInstanceError(err) { // CHANGED: only regenerate on duplicate collisions
+			if instanceId, err = generateInstanceID(); err != nil {
+				return "", "", err
+			}
 		}
 
 		attrs := buildAttributes(true)
