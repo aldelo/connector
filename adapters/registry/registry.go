@@ -40,7 +40,7 @@ const namespaceNameDNSMaxLen = 253   // RFC-compliant DNS max
 const namespaceNameHTTPMaxLen = 1024 // Cloud Map HTTP namespace limit
 
 // namespace ID pattern (ns-xxxxxxxxxxxxxxxx)
-var namespaceIdPattern = regexp.MustCompile(`^ns-[a-z0-9]{17}$`)
+var namespaceIdPattern = regexp.MustCompile(`^ns-[a-z0-9]{16}$`)
 
 const instanceVersionMaxLen = 256 // guard attribute length
 
@@ -48,7 +48,7 @@ const instanceVersionMaxLen = 256 // guard attribute length
 var instanceIdPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // basic Cloud Map service ID guard (srv-xxxxxxxxxxxxxxxx pattern).
-var serviceIdPattern = regexp.MustCompile(`^srv-[a-z0-9]{17}$`)
+var serviceIdPattern = regexp.MustCompile(`^srv-[a-z0-9]{16}$`)
 
 // Broaden service name validation to support both DNS and HTTP namespace rules
 var serviceNameDNSPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
