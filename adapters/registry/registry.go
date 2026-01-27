@@ -214,7 +214,7 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 	}
 
 	if lst, e := sd.DiscoverInstances(namespaceName, serviceName, healthy, customAttributes, maxResults, timeoutDuration...); e != nil {
-		log.Printf("Discover Instances Failed for Service: %v, %s.%s", err, serviceName, namespaceName)
+		log.Printf("Discover Instances Failed for Service: %v, %s.%s", e, serviceName, namespaceName)
 		return []*InstanceInfo{}, e
 	} else {
 		for _, v := range lst {
