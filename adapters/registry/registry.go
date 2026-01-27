@@ -57,7 +57,7 @@ var serviceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}
 // Validate namespace names as dotted DNS labels (public/private DNS namespaces).
 var namespaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
 
-// broaden namespace validation to allow HTTP/custom namespace rules (mixed case, underscores, longer length)
+// broaden namespace validation to allow HTTP/custom namespace rules (mixed case, dash, longer length)
 var namespaceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,1022}[A-Za-z0-9])?$`)
 
 const serviceNameMaxLen = 63
@@ -332,9 +332,8 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 
 	const maxAttempts = 3 // bounded retries for rare InstanceId collisions.
 
-	creatorRequestId := util.NewUUID()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if instanceId == "" || isDuplicateInstanceError(err) { // CHANGED: only regenerate on duplicate collisions
+		if instanceId == "" || isDuplicateInstanceError(err) { // only regenerate on duplicate collisions
 			if instanceId, err = generateInstanceID(); err != nil {
 				return "", "", err
 			}
