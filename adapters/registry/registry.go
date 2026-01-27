@@ -152,8 +152,10 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 	attributes := map[string]string{
 		"AWS_INSTANCE_IPV4": parsedIP.To4().String(),
 		"AWS_INSTANCE_PORT": fmt.Sprintf("%d", port),
-		"INSTANCE_VERSION":  version,
 		"SERVICE_ID":        serviceId,
+	}
+	if version != "" { // avoid empty attribute values that Cloud Map rejects
+		attributes["INSTANCE_VERSION"] = version
 	}
 
 	health := "UNHEALTHY"
@@ -278,16 +280,19 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 
 			attrs := v.Attributes
 
-			// required fields
-			svcIDPtr, okSvcID := attrs["SERVICE_ID"]
 			ipPtr, okIP := attrs["AWS_INSTANCE_IPV4"]
 			portPtr, okPort := attrs["AWS_INSTANCE_PORT"]
 
-			if !okSvcID || svcIDPtr == nil || !okIP || ipPtr == nil || !okPort || portPtr == nil {
+			if !okIP || ipPtr == nil || !okPort || portPtr == nil {
 				continue
 			}
 			if v.ServiceName == nil || v.NamespaceName == nil || v.InstanceId == nil {
 				continue
+			}
+
+			svcID := ""
+			if svcIDPtr, okSvcID := attrs["SERVICE_ID"]; okSvcID && svcIDPtr != nil {
+				svcID = aws.StringValue(svcIDPtr)
 			}
 
 			ipStr := aws.StringValue(ipPtr) // reuse parsed strings
@@ -311,11 +316,11 @@ func DiscoverInstances(sd *cloudmap.CloudMap,
 
 			healthyStatus := false
 			if v.HealthStatus != nil {
-				healthyStatus = *v.HealthStatus == "HEALTHY"
+				healthyStatus = strings.EqualFold(*v.HealthStatus, "HEALTHY")
 			}
 
 			instanceList = append(instanceList, &InstanceInfo{
-				ServiceId:       *svcIDPtr,
+				ServiceId:       svcID,
 				ServiceName:     *v.ServiceName,
 				NamespaceName:   *v.NamespaceName,
 				InstanceId:      *v.InstanceId,
