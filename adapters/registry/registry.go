@@ -137,15 +137,20 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		return "", "", fmt.Errorf("Instance Port Must Be Between 1 and 65535")
 	}
 
-	// create instance id
-	instanceId = instancePrefix + util.NewUUID()
-
-	if len(instanceId) > instanceIdMaxLen { // enforce AWS length constraint
-		return "", "", fmt.Errorf("InstanceId exceeds maximum length of %d characters", instanceIdMaxLen)
+	// centralize ID generation + validation so both initial and retry paths are safe.
+	generateInstanceID := func() (string, error) {
+		id := instancePrefix + util.NewUUID()
+		if len(id) > instanceIdMaxLen { // enforce AWS length constraint
+			return "", fmt.Errorf("InstanceId exceeds maximum length of %d characters", instanceIdMaxLen)
+		}
+		if !instanceIdPattern.MatchString(id) { // enforce allowed characters
+			return "", fmt.Errorf("InstanceId must match pattern %s", instanceIdPattern.String())
+		}
+		return id, nil
 	}
 
-	if !instanceIdPattern.MatchString(instanceId) { // enforce allowed characters
-		return "", "", fmt.Errorf("InstanceId must match pattern %s", instanceIdPattern.String())
+	if instanceId, err = generateInstanceID(); err != nil {
+		return "", "", err
 	}
 
 	// build attributes first
@@ -169,7 +174,9 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 		// retry without AWS_INIT_HEALTH_STATUS if the service doesn't support custom health checks
 		if strings.Contains(strings.ToLower(err.Error()), "aws_init_health_status") {
 			delete(attributes, "AWS_INIT_HEALTH_STATUS")
-			instanceId = instancePrefix + util.NewUUID()
+			if instanceId, err = generateInstanceID(); err != nil { // validate retry ID too
+				return "", "", err
+			}
 			if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, attributes, timeoutDuration...); err != nil {
 				return "", "", err
 			}
