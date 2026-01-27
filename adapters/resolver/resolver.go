@@ -38,11 +38,26 @@ func composeKey(schemeName string, serviceName string) string {
 	return strings.ToLower(strings.TrimSpace(schemeName)) + ":" + strings.ToLower(strings.TrimSpace(serviceName))
 }
 
-func NewManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
-	schemeName = strings.ToLower(strings.TrimSpace(schemeName))
-	if util.LenTrim(schemeName) == 0 {
-		schemeName = "clb"
+func normalizeSchemeName(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if util.LenTrim(s) == 0 {
+		return "clb"
 	}
+	return s
+}
+
+func safeRegister(builder resolver.Builder) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("failed to register resolver for scheme '%s': %v", builder.Scheme(), rec)
+		}
+	}()
+	resolver.Register(builder)
+	return nil
+}
+
+func NewManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
+	schemeName = normalizeSchemeName(schemeName)
 
 	serviceName = strings.ToLower(strings.TrimSpace(serviceName))
 	if util.LenTrim(serviceName) == 0 {
@@ -50,11 +65,16 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 	}
 
 	addrs := make([]resolver.Address, 0, len(endpointAddrs))
+	seen := make(map[string]struct{})
 	for _, raw := range endpointAddrs {
 		addr := strings.TrimSpace(raw)
 		if len(addr) == 0 {
 			continue
 		}
+		if _, exists := seen[addr]; exists {
+			continue
+		}
+		seen[addr] = struct{}{}
 		addrs = append(addrs, resolver.Address{Addr: addr})
 	}
 
@@ -76,21 +96,23 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 
 func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
 	addrs := make([]resolver.Address, 0, len(endpointAddrs))
+	seen := make(map[string]struct{})
 	for _, raw := range endpointAddrs {
 		addr := strings.TrimSpace(raw)
 		if len(addr) == 0 {
 			continue
 		}
+		if _, exists := seen[addr]; exists {
+			continue
+		}
+		seen[addr] = struct{}{}
 		addrs = append(addrs, resolver.Address{Addr: addr})
 	}
 	if len(addrs) == 0 {
 		return fmt.Errorf("Endpoint Addresses Required")
 	}
 
-	schemeName = strings.ToLower(strings.TrimSpace(schemeName))
-	if util.LenTrim(schemeName) == 0 {
-		return fmt.Errorf("SchemeName is Required")
-	}
+	schemeName = normalizeSchemeName(schemeName)
 
 	serviceName = strings.ToLower(strings.TrimSpace(serviceName))
 	if util.LenTrim(serviceName) == 0 {
@@ -134,11 +156,13 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 	schemeMap[key] = r
 	registeredSchemes[schemeName] = serviceName
 
-	// 1/9/2025 by yao.bin - Caution: There is a global map in "grpc/resolver", so we have to put "resolver.Register" in mutex lock too
-	var builder resolver.Builder
-	builder = r
+	// guard resolver.Register against panic and roll back on failure
+	if err := safeRegister(r); err != nil {
+		delete(schemeMap, key)                // rollback
+		delete(registeredSchemes, schemeName) // rollback
+		return err
+	}
 
-	resolver.Register(builder)
 	//resolver.SetDefaultScheme(r.Scheme()) // optional
 	return nil
 }
