@@ -53,16 +53,70 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 
 func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-		if xray.XRayServiceOn() {
-			log.Println("!!! xray service on and tracing !!! ", info.FullMethod)
-			if info != nil && strings.HasPrefix(info.FullMethod, "/grpc.health") {
-				return handler(ctx, req)
-			}
-			return awsxray.UnaryServerInterceptor(awsxray.WithSegmentNamer(awsxray.NewFixedSegmentNamer(serviceName)))(ctx, req, info, handler)
-		} else {
+		if !xray.XRayServiceOn() {
 			log.Println("!!! xray service off !!!")
 			return handler(ctx, req)
 		}
+
+		fullMethod := ""
+		if info != nil {
+			fullMethod = info.FullMethod
+		}
+		// Skip noisy health checks.
+		if strings.HasPrefix(fullMethod, "/grpc.health") {
+			return handler(ctx, req)
+		}
+
+		// Extract parent IDs from incoming metadata.
+		parentSegID, parentTraceID := "", ""
+		if md, ok := metadata.FromIncomingContext(ctx); ok {
+			if v, ok2 := md["x-amzn-seg-id"]; ok2 && len(v) > 0 {
+				parentSegID = v[0]
+			}
+			if v, ok2 := md["x-amzn-tr-id"]; ok2 && len(v) > 0 {
+				parentTraceID = v[0]
+			}
+		}
+
+		// Create segment with optional parent.
+		var seg *xray.XSegment
+		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
+			seg = xray.NewSegment("GrpcService-UnaryRPC-"+fullMethod, &xray.XRayParentSegment{
+				SegmentID: parentSegID,
+				TraceID:   parentTraceID,
+			})
+		} else {
+			seg = xray.NewSegment("GrpcService-UnaryRPC-" + fullMethod)
+		}
+
+		// Ensure close, panic/error capture.
+		defer func() {
+			if r := recover(); r != nil {
+				_ = seg.Seg.AddError(fmt.Errorf("panic: %v", r))
+				seg.Close()
+				panic(r)
+			}
+		}()
+		defer func() {
+			if err != nil {
+				_ = seg.Seg.AddError(err)
+			}
+			seg.Close()
+		}()
+
+		// CHANGED: Bind segment to context for downstream code.
+		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
+
+		// CHANGED: Propagate tracing headers back to caller.
+		outgoingMD := metadata.New(nil)
+		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
+		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
+		if hdrErr := grpc.SendHeader(segCtx, outgoingMD); hdrErr != nil {
+			_ = seg.Seg.AddError(hdrErr)
+			return nil, hdrErr
+		}
+
+		return handler(segCtx, req)
 	}
 }
 
@@ -155,7 +209,11 @@ func (w *contextServerStream) Context() context.Context {
 func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 	if xray.XRayServiceOn() {
 		// skip health check calls from tracing noise
-		if info != nil && strings.HasPrefix(info.FullMethod, "/grpc.health") {
+		fullMethod := ""
+		if info != nil {
+			fullMethod = info.FullMethod
+		}
+		if strings.HasPrefix(fullMethod, "/grpc.health") {
 			return handler(srv, ss)
 		}
 
@@ -167,10 +225,13 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 
 		ctx := ss.Context()
 		streamType := "StreamRPC"
-		if info.IsClientStream {
-			streamType = "Client" + streamType
-		} else if info.IsServerStream {
-			streamType = "Server" + streamType
+		if info != nil {
+			// Guard against nil info before deref.
+			if info.IsClientStream {
+				streamType = "Client" + streamType
+			} else if info.IsServerStream {
+				streamType = "Server" + streamType
+			}
 		}
 
 		if incomingMD, ok = metadata.FromIncomingContext(ctx); ok {
