@@ -1,7 +1,7 @@
 package tracer
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,13 +18,15 @@ package tracer
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"strings"
+
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/xray"
 	awsxray "github.com/aws/aws-xray-sdk-go/xray"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
-	"log"
-	"strings"
 )
 
 func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientInterceptor {
@@ -142,10 +144,15 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 //	ctx = metadata.NewOutgoingContext(ctx, md)
 func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 	if xray.XRayServiceOn() {
+		// skip health check calls from tracing noise
+		if info != nil && strings.HasPrefix(info.FullMethod, "/grpc.health") {
+			return handler(srv, ss)
+		}
+
 		parentSegID := ""
 		parentTraceID := ""
 
-		var md metadata.MD
+		var incomingMD metadata.MD
 		var ok bool
 
 		ctx := ss.Context()
@@ -156,18 +163,17 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			streamType = "Server" + streamType
 		}
 
-		if md, ok = metadata.FromIncomingContext(ctx); ok {
-			if v, ok2 := md["x-amzn-seg-id"]; ok2 && len(v) > 0 {
+		if incomingMD, ok = metadata.FromIncomingContext(ctx); ok {
+			if v, ok2 := incomingMD["x-amzn-seg-id"]; ok2 && len(v) > 0 {
 				parentSegID = v[0]
 			}
 
-			if v, ok2 := md["x-amzn-tr-id"]; ok2 && len(v) > 0 {
+			if v, ok2 := incomingMD["x-amzn-tr-id"]; ok2 && len(v) > 0 {
 				parentTraceID = v[0]
 			}
 		}
 
 		var seg *xray.XSegment
-
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
 			seg = xray.NewSegment("GrpcService-"+streamType+"-"+info.FullMethod, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
@@ -176,6 +182,14 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		} else {
 			seg = xray.NewSegment("GrpcService-" + streamType + "-" + info.FullMethod)
 		}
+
+		// mark panics as errors in X-Ray while rethrowing
+		defer func() {
+			if r := recover(); r != nil {
+				_ = seg.Seg.AddError(fmt.Errorf("panic: %v", r))
+				panic(r)
+			}
+		}()
 		defer seg.Close()
 		defer func() {
 			if err != nil {
@@ -183,18 +197,25 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			}
 		}()
 
-		if md == nil {
-			md = make(metadata.MD)
+		// avoid mutating incoming metadata; build an outgoing copy
+		outgoingMD := metadata.New(nil)
+		if incomingMD != nil {
+			for k, v := range incomingMD {
+				outgoingMD[k] = append([]string(nil), v...)
+			}
 		}
+		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
+		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
-		md.Set("x-amzn-seg-id", seg.Seg.ID)
-		md.Set("x-amzn-tr-id", seg.Seg.TraceID)
-
-		_ = ss.SendHeader(md)
+		// surface header send failures to the caller and trace
+		if hdrErr := ss.SendHeader(outgoingMD); hdrErr != nil {
+			_ = seg.Seg.AddError(hdrErr)
+			return hdrErr
+		}
 
 		err = handler(srv, ss)
 		return err
-	} else {
-		return handler(srv, ss)
 	}
+
+	return handler(srv, ss)
 }
