@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
+	"strconv"
 	"strings"
 
 	util "github.com/aldelo/common"
@@ -129,7 +130,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		parentSegID, parentTraceID := "", ""
 		if md, ok := metadata.FromIncomingContext(ctx); ok {
 			// accept both canonical X-Ray header and legacy short key
-			parentSegID, parentTraceID = extractParentIDs(md)
+			parentSegID, parentTraceID, _ = extractParentIDs(md)
 		}
 
 		// Create segment with optional parent.
@@ -154,6 +155,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		// Propagate tracing headers back to caller.
 		outgoingMD := metadata.New(nil)
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
+		traceHeader := formatTraceHeader(seg.Seg.TraceID, seg.Seg.ID, seg.Seg.Sampled)
 		outgoingMD.Set("x-amzn-trace-id", seg.Seg.TraceID)
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
@@ -179,16 +181,56 @@ func (w *contextServerStream) Context() context.Context {
 
 // helper to extract parent IDs from metadata with both canonical and legacy keys
 func extractParentIDs(md metadata.MD) (segID, traceID string) {
-	if v, ok := md["x-amzn-seg-id"]; ok && len(v) > 0 {
-		segID = v[0]
-	}
-	// prefer canonical x-amzn-trace-id, fall back to legacy x-amzn-tr-id
+	// 1) canonical AWS header: "Root=1-...;Parent=...;Sampled=1"
 	if v, ok := md["x-amzn-trace-id"]; ok && len(v) > 0 {
-		traceID = v[0]
-	} else if v, ok := md["x-amzn-tr-id"]; ok && len(v) > 0 {
-		traceID = v[0]
+		hdr := v[0]
+		for _, part := range strings.Split(hdr, ";") {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			switch strings.ToLower(kv[0]) {
+			case "root":
+				traceID = kv[1]
+			case "parent":
+				segID = kv[1]
+			case "sampled":
+				// tolerate "1/0", "true/false"
+				if b, err := strconv.ParseBool(kv[1]); err == nil {
+					sampled = &b
+				} else if kv[1] == "1" {
+					t := true
+					sampled = &t
+				} else if kv[1] == "0" {
+					f := false
+					sampled = &f
+				}
+			}
+		}
 	}
+
+	// 2) legacy split headers
+	if segID == "" {
+		if v, ok := md["x-amzn-seg-id"]; ok && len(v) > 0 {
+			segID = v[0]
+		}
+	}
+	if traceID == "" {
+		if v, ok := md["x-amzn-tr-id"]; ok && len(v) > 0 {
+			traceID = v[0]
+		}
+	}
+
 	return
+}
+
+// formatTraceHeader builds the canonical AWS X-Ray header value. // NEW
+func formatTraceHeader(traceID, parentID string, sampled bool) string {
+	sampledVal := "0"
+	if sampled {
+		sampledVal = "1"
+	}
+	return fmt.Sprintf("Root=%s;Parent=%s;Sampled=%s", traceID, parentID, sampledVal)
 }
 
 // TracerUnaryServerInterceptor will perform xray tracing for each unary RPC call
@@ -320,7 +362,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 
 		if incomingMD, ok = metadata.FromIncomingContext(ctx); ok {
 			// accept both canonical X-Ray header and legacy short key
-			parentSegID, parentTraceID = extractParentIDs(incomingMD)
+			parentSegID, parentTraceID, _ = extractParentIDs(incomingMD)
 		}
 
 		// use fullMethod (with safe fallback) instead of directly dereferencing info
@@ -354,6 +396,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		}
 		// write both AWS standard and legacy header names
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
+		traceHeader := formatTraceHeader(seg.Seg.TraceID, seg.Seg.ID, seg.Seg.Sampled)
 		outgoingMD.Set("x-amzn-trace-id", seg.Seg.TraceID)
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
