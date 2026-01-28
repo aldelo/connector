@@ -20,14 +20,22 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strings"
 
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/xray"
 	awsxray "github.com/aws/aws-xray-sdk-go/xray"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
+
+// enrich panic errors with stack traces for X-Ray and gRPC status propagation.
+func panicError(r interface{}) error {
+	return fmt.Errorf("panic: %v\n%s", r, debug.Stack())
+}
 
 func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
@@ -58,12 +66,12 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		// global panic guard even when X-Ray is disabled, to avoid crashing the server
 		defer func() {
 			if r := recover(); r != nil {
-				recErr := fmt.Errorf("panic: %v", r)
+				recErr := panicError(r)
 				if seg != nil && seg.Seg != nil {
 					_ = seg.Seg.AddError(recErr)
 					seg.Close()
 				}
-				err = recErr
+				err = status.Error(codes.Internal, recErr.Error())
 				return
 			}
 			if seg != nil && seg.Seg != nil {
@@ -123,7 +131,8 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 
 		if hdrErr := grpc.SendHeader(segCtx, outgoingMD); hdrErr != nil {
 			_ = seg.Seg.AddError(hdrErr)
-			return nil, hdrErr
+			err = status.Error(codes.Internal, hdrErr.Error())
+			return nil, err
 		}
 
 		return handler(segCtx, req)
@@ -146,10 +155,10 @@ func extractParentIDs(md metadata.MD) (segID, traceID string) {
 		segID = v[0]
 	}
 	// prefer canonical x-amzn-trace-id, fall back to legacy x-amzn-tr-id
-	if v, ok := md["x-amzn-trace-id"]; ok && len(v) > 0 { // NEW
-		traceID = v[0] // NEW
-	} else if v, ok := md["x-amzn-tr-id"]; ok && len(v) > 0 { // NEW
-		traceID = v[0] // NEW
+	if v, ok := md["x-amzn-trace-id"]; ok && len(v) > 0 {
+		traceID = v[0]
+	} else if v, ok := md["x-amzn-tr-id"]; ok && len(v) > 0 {
+		traceID = v[0]
 	}
 	return
 }
@@ -236,12 +245,12 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 	// global panic guard even when X-Ray is disabled
 	defer func() {
 		if r := recover(); r != nil {
-			recErr := fmt.Errorf("panic: %v", r)
+			recErr := panicError(r)
 			if seg != nil && seg.Seg != nil {
 				_ = seg.Seg.AddError(recErr)
 				seg.Close()
 			}
-			err = recErr
+			err = status.Error(codes.Internal, recErr.Error())
 			return
 		}
 		if seg != nil && seg.Seg != nil {
@@ -299,9 +308,9 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		}
 
 		// guard segment before binding/propagation
-		if seg == nil || seg.Seg == nil { // CHANGED
+		if seg == nil || seg.Seg == nil {
 			seg = nil
-			return handler(srv, ss) // CHANGED
+			return handler(srv, ss)
 		}
 
 		// bind the segment into the stream context so downstream code can see it
@@ -325,8 +334,8 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			if seg != nil && seg.Seg != nil { // guard segment before use
 				_ = seg.Seg.AddError(hdrErr)
 			}
-			err = hdrErr
-			return hdrErr
+			err = status.Error(codes.Internal, hdrErr.Error())
+			return err
 		}
 
 		err = handler(srv, wrappedStream)
