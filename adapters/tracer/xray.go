@@ -89,25 +89,23 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 			seg = xray.NewSegment("GrpcService-UnaryRPC-" + fullMethod)
 		}
 
-		// Ensure close, panic/error capture.
+		// single defer to capture panic/error before closing segment.
 		defer func() {
 			if r := recover(); r != nil {
 				_ = seg.Seg.AddError(fmt.Errorf("panic: %v", r))
 				seg.Close()
 				panic(r)
 			}
-		}()
-		defer func() {
 			if err != nil {
 				_ = seg.Seg.AddError(err)
 			}
 			seg.Close()
 		}()
 
-		// CHANGED: Bind segment to context for downstream code.
+		// Bind segment to context for downstream code.
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
 
-		// CHANGED: Propagate tracing headers back to caller.
+		// Propagate tracing headers back to caller.
 		outgoingMD := metadata.New(nil)
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
@@ -209,7 +207,7 @@ func (w *contextServerStream) Context() context.Context {
 func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 	if xray.XRayServiceOn() {
 		// skip health check calls from tracing noise
-		fullMethod := ""
+		fullMethod := "unknown"
 		if info != nil {
 			fullMethod = info.FullMethod
 		}
@@ -258,18 +256,17 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
 		wrappedStream := &contextServerStream{ServerStream: ss, ctx: segCtx}
 
-		// mark panics as errors in X-Ray while rethrowing
+		// single defer to record panic/error before closing.
 		defer func() {
 			if r := recover(); r != nil {
 				_ = seg.Seg.AddError(fmt.Errorf("panic: %v", r))
+				seg.Close()
 				panic(r)
 			}
-		}()
-		defer seg.Close()
-		defer func() {
 			if err != nil {
 				_ = seg.Seg.AddError(err)
 			}
+			seg.Close()
 		}()
 
 		// avoid mutating incoming metadata; build an outgoing copy
@@ -285,6 +282,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		// surface header send failures to the caller and trace
 		if hdrErr := wrappedStream.SendHeader(outgoingMD); hdrErr != nil {
 			_ = seg.Seg.AddError(hdrErr)
+			err = hdrErr
 			return hdrErr
 		}
 
