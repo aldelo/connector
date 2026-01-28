@@ -252,11 +252,13 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		ctx := ss.Context()
 		streamType := "StreamRPC"
 		if info != nil {
-			// Guard against nil info before deref.
-			if info.IsClientStream {
-				streamType = "Client" + streamType
-			} else if info.IsServerStream {
-				streamType = "Server" + streamType
+			switch {
+			case info.IsClientStream && info.IsServerStream:
+				streamType = "BidiStreamRPC"
+			case info.IsClientStream:
+				streamType = "ClientStreamRPC"
+			case info.IsServerStream:
+				streamType = "ServerStreamRPC"
 			}
 		}
 
