@@ -46,6 +46,15 @@ func normalizeSchemeName(raw string) string {
 	return s
 }
 
+// normalize and validate service names in one place.
+func normalizeServiceName(raw string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if util.LenTrim(s) == 0 {
+		return "", fmt.Errorf("ServiceName is Required")
+	}
+	return s, nil
+}
+
 func safeRegister(builder resolver.Builder) (err error) {
 	if builder == nil {
 		return fmt.Errorf("resolver builder is nil")
@@ -90,9 +99,10 @@ func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Addre
 func NewManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
 	schemeName = normalizeSchemeName(schemeName)
 
-	serviceName = strings.ToLower(strings.TrimSpace(serviceName))
-	if util.LenTrim(serviceName) == 0 {
-		return fmt.Errorf("ServiceName is Required")
+	// centralized service-name validation to avoid inconsistent checks.
+	svc, err := normalizeServiceName(serviceName)
+	if err != nil {
+		return err
 	}
 
 	addrs, err := normalizeAddresses(endpointAddrs, nil)
@@ -105,8 +115,9 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 		Addresses: addrs,
 	})
 
-	if err := setResolver(schemeName, serviceName, r); err != nil {
-		return err
+	// wrap for clearer context when registration fails.
+	if err := setResolver(schemeName, svc, r); err != nil {
+		return fmt.Errorf("register manual resolver: %w", err)
 	}
 
 	return nil
@@ -120,12 +131,13 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 
 	schemeName = normalizeSchemeName(schemeName)
 
-	serviceName = strings.ToLower(strings.TrimSpace(serviceName))
-	if util.LenTrim(serviceName) == 0 {
-		return fmt.Errorf("ServiceName is Required")
+	// centralized service-name validation to avoid inconsistent checks.
+	svc, err := normalizeServiceName(serviceName)
+	if err != nil {
+		return err
 	}
 
-	r, err := getResolver(schemeName, serviceName)
+	r, err := getResolver(schemeName, svc)
 	if err != nil {
 		return err
 	}
@@ -143,6 +155,14 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 	if r == nil {
 		return fmt.Errorf("Resolver is nil; cannot register")
 	}
+
+	// enforce normalization inside the setter to avoid caller mistakes.
+	schemeName = normalizeSchemeName(schemeName)
+	svc, err := normalizeServiceName(serviceName)
+	if err != nil {
+		return err
+	}
+
 	if strings.ToLower(strings.TrimSpace(r.Scheme())) != schemeName {
 		return fmt.Errorf("Resolver scheme '%s' does not match normalized scheme '%s'", r.Scheme(), schemeName)
 	}
@@ -157,18 +177,18 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 		registeredSchemes = make(map[string]string)
 	}
 
-	key := composeKey(schemeName, serviceName)
+	key := composeKey(schemeName, svc)
 
 	if _, exists := schemeMap[key]; exists {
-		return fmt.Errorf("Resolver already registered for scheme '%s' and service '%s'", schemeName, serviceName)
+		return fmt.Errorf("Resolver already registered for scheme '%s' and service '%s'", schemeName, svc)
 	}
 
-	if existingService, taken := registeredSchemes[schemeName]; taken && existingService != serviceName {
+	if existingService, taken := registeredSchemes[schemeName]; taken && existingService != svc {
 		return fmt.Errorf("Scheme '%s' already registered for service '%s'; use a unique scheme per service", schemeName, existingService)
 	}
 
 	schemeMap[key] = r
-	registeredSchemes[schemeName] = serviceName
+	registeredSchemes[schemeName] = svc
 
 	// guard resolver.Register against panic and roll back on failure
 	if err := safeRegister(r); err != nil {
@@ -182,6 +202,13 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 }
 
 func getResolver(schemeName string, serviceName string) (*manual.Resolver, error) {
+	// normalize inside getter to ensure consistent map keying.
+	schemeName = normalizeSchemeName(schemeName)
+	svc, err := normalizeServiceName(serviceName)
+	if err != nil {
+		return nil, err
+	}
+
 	_mux.Lock()
 	defer _mux.Unlock()
 
@@ -189,10 +216,10 @@ func getResolver(schemeName string, serviceName string) (*manual.Resolver, error
 		return nil, fmt.Errorf("Resolver SchemeMap Nil")
 	}
 
-	key := composeKey(schemeName, serviceName)
+	key := composeKey(schemeName, svc)
 	if r := schemeMap[key]; r != nil {
 		return r, nil
 	}
 
-	return nil, fmt.Errorf("No Resolver Found for SchemeName '%s' and ServiceName '%s' in SchemeMap", schemeName, serviceName)
+	return nil, fmt.Errorf("No Resolver Found for SchemeName '%s' and ServiceName '%s' in SchemeMap", schemeName, svc)
 }
