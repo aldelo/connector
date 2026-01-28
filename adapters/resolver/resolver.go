@@ -19,6 +19,7 @@ package resolver
 import (
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 
@@ -78,23 +79,34 @@ func safeRegister(builder resolver.Builder) (err error) {
 func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Address, error) {
 	addrs := make([]resolver.Address, 0, len(endpointAddrs))
 	seen := make(map[string]struct{})
+
 	for _, raw := range endpointAddrs {
 		addr := strings.TrimSpace(raw)
 		if len(addr) == 0 {
 			continue
 		}
-		if _, exists := seen[addr]; exists {
+
+		canonical := strings.ToLower(addr)
+
+		if host, port, err := net.SplitHostPort(addr); err == nil && len(host) != 0 {
+			canonical = net.JoinHostPort(strings.ToLower(host), strings.TrimSpace(port))
+		}
+
+		if _, exists := seen[canonical]; exists {
 			continue
 		}
-		seen[addr] = struct{}{}
-		addrs = append(addrs, resolver.Address{Addr: addr})
+
+		seen[canonical] = struct{}{}
+		addrs = append(addrs, resolver.Address{Addr: canonical})
 	}
+
 	if len(addrs) == 0 {
 		if onEmpty != nil {
 			return nil, onEmpty
 		}
 		return nil, fmt.Errorf("No Valid Endpoint Address Found")
 	}
+
 	return addrs, nil
 }
 
