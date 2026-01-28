@@ -45,6 +45,7 @@ type RpcErrorDetails struct {
 	Help_Link *epb.Help_Link
 }
 
+// return []proto.Message so it is directly compatible with status.WithDetails
 func (d RpcErrorDetails) list() (lst []protoiface.MessageV1) {
 	if d.RequestInfo != nil {
 		lst = append(lst, d.RequestInfo)
