@@ -113,31 +113,53 @@ func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Addre
 			continue
 		}
 
+		// Treat scheme-prefixed / opaque addresses early so colons in them don't
+		// get misclassified as host:port.
+		if strings.Contains(addr, "://") || strings.HasPrefix(addr, "unix:") {
+			if _, exists := seen[addr]; exists {
+				continue
+			}
+			seen[addr] = struct{}{}
+			addrs = append(addrs, resolver.Address{Addr: addr})
+			continue
+		}
+
+		// Heuristic: only treat as host:port when it looks like one.
+		likelyHostPort := strings.Count(addr, ":") == 1 || strings.HasPrefix(addr, "[")
 		if host, port, err := net.SplitHostPort(addr); err == nil && len(host) != 0 {
 			if err := validatePort(port); err != nil {
 				return nil, fmt.Errorf("endpoint address '%s': %w", addr, err)
 			}
-			// For host:port, host is case-insensitive; port already validated.
-			canonicalKey := strings.ToLower(host) + ":" + strings.TrimSpace(port)
+
+			trimmedPort := strings.TrimSpace(port)
+
+			// Preserve IPv6 zone casing; only lowercase when no zone is present.
+			hostKey := host
+			hostOut := host
+			if !strings.Contains(host, "%") {
+				hostKey = strings.ToLower(host)
+				hostOut = hostKey
+			}
+
+			canonicalKey := hostKey + ":" + trimmedPort
 			if _, exists := seen[canonicalKey]; exists {
 				continue
 			}
 			seen[canonicalKey] = struct{}{}
 			addrs = append(addrs, resolver.Address{
-				Addr: net.JoinHostPort(strings.ToLower(host), strings.TrimSpace(port)),
+				Addr: net.JoinHostPort(hostOut, trimmedPort),
 			})
 			continue
-		} else if err != nil && strings.Contains(addr, ":") {
+		} else if err != nil && likelyHostPort {
 			// Likely malformed host:port (e.g., missing port or bad IPv6 bracket)
 			return nil, fmt.Errorf("invalid endpoint address '%s': %v", addr, err)
 		}
 
-		// Opaque / non-host:port address (e.g., unix:///path); keep case as-is.
-		canonicalKey := addr
-		if _, exists := seen[canonicalKey]; exists {
+		// Fallback: treat as opaque (non-host:port).
+		if _, exists := seen[addr]; exists {
 			continue
 		}
-		seen[canonicalKey] = struct{}{}
+		seen[addr] = struct{}{}
 		addrs = append(addrs, resolver.Address{Addr: addr})
 	}
 
