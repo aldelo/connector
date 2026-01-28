@@ -17,10 +17,10 @@ package rpcerror
  */
 
 import (
+	proto "github.com/golang/protobuf/proto"
 	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 // allow multiple instances of each detail type to avoid data loss
@@ -50,7 +50,7 @@ type RpcErrorDetails struct {
 
 // return []proto.Message so it is directly compatible with status.WithDetails
 func (d RpcErrorDetails) list() (lst []proto.Message) {
-	// CHANGED: append all instances instead of only one.
+	// append all instances instead of only one.
 	appendAll := func(ms []proto.Message) {
 		for _, m := range ms {
 			if m != nil {
@@ -96,17 +96,18 @@ func sliceToProto[T proto.Message](in []T) []proto.Message { // use proto.Messag
 func NewRpcError(code codes.Code, message string, details RpcErrorDetails) error {
 	s := status.New(code, message)
 
-	dlist := details.list()
+	detailsList := details.list() // clarify name and ensure we pass the exact proto.Message slice
 
-	if len(dlist) > 0 {
-		if d, e := s.WithDetails(dlist...); e != nil {
-			return status.Errorf(codes.Internal, "failed to attach rpc error details: %v", e)
-		} else {
-			return d.Err()
-		}
-	} else {
+	if len(detailsList) == 0 { // early return for no details
 		return s.Err()
 	}
+
+	st, err := s.WithDetails(detailsList...) // straight-line handling
+	if err != nil {
+		return status.Errorf(codes.Internal, "failed to attach rpc error details: %v", err)
+	}
+
+	return st.Err()
 }
 
 // ConvertToRpcError will convert error object into rpc status and error details
