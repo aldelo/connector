@@ -23,87 +23,70 @@ import (
 	"google.golang.org/protobuf/runtime/protoiface"
 )
 
+// allow multiple instances of each detail type to avoid data loss
 type RpcErrorDetails struct {
-	RequestInfo      *epb.RequestInfo
-	LocalizedMessage *epb.LocalizedMessage
-	ResourceInfo     *epb.ResourceInfo
-	RetryInfo        *epb.RetryInfo
+	RequestInfo      []*epb.RequestInfo
+	LocalizedMessage []*epb.LocalizedMessage
+	ResourceInfo     []*epb.ResourceInfo
+	RetryInfo        []*epb.RetryInfo
 
-	DebugInfo *epb.DebugInfo
-	ErrorInfo *epb.ErrorInfo
+	DebugInfo []*epb.DebugInfo
+	ErrorInfo []*epb.ErrorInfo
 
-	PreconditionFailure           *epb.PreconditionFailure
-	PreconditionFailure_Violation *epb.PreconditionFailure_Violation
+	PreconditionFailure           []*epb.PreconditionFailure
+	PreconditionFailure_Violation []*epb.PreconditionFailure_Violation
 
-	BadRequest                *epb.BadRequest
-	BadRequest_FieldViolation *epb.BadRequest_FieldViolation
+	BadRequest                []*epb.BadRequest
+	BadRequest_FieldViolation []*epb.BadRequest_FieldViolation
 
-	QuotaFailure           *epb.QuotaFailure
-	QuotaFailure_Violation *epb.QuotaFailure_Violation
+	QuotaFailure           []*epb.QuotaFailure
+	QuotaFailure_Violation []*epb.QuotaFailure_Violation
 
-	Help      *epb.Help
-	Help_Link *epb.Help_Link
+	Help      []*epb.Help
+	Help_Link []*epb.Help_Link
+
+	Unknown []protoiface.MessageV1
 }
 
 // return []proto.Message so it is directly compatible with status.WithDetails
 func (d RpcErrorDetails) list() (lst []protoiface.MessageV1) {
-	if d.RequestInfo != nil {
-		lst = append(lst, d.RequestInfo)
+	// CHANGED: append all instances instead of only one.
+	appendAll := func(ms []protoiface.MessageV1) {
+		for _, m := range ms {
+			if m != nil {
+				lst = append(lst, m)
+			}
+		}
 	}
 
-	if d.LocalizedMessage != nil {
-		lst = append(lst, d.LocalizedMessage)
-	}
-
-	if d.ResourceInfo != nil {
-		lst = append(lst, d.ResourceInfo)
-	}
-
-	if d.RetryInfo != nil {
-		lst = append(lst, d.RetryInfo)
-	}
-
-	if d.DebugInfo != nil {
-		lst = append(lst, d.DebugInfo)
-	}
-
-	if d.ErrorInfo != nil {
-		lst = append(lst, d.ErrorInfo)
-	}
-
-	if d.PreconditionFailure != nil {
-		lst = append(lst, d.PreconditionFailure)
-	}
-
-	if d.PreconditionFailure_Violation != nil {
-		lst = append(lst, d.PreconditionFailure_Violation)
-	}
-
-	if d.BadRequest != nil {
-		lst = append(lst, d.BadRequest)
-	}
-
-	if d.BadRequest_FieldViolation != nil {
-		lst = append(lst, d.BadRequest_FieldViolation)
-	}
-
-	if d.QuotaFailure != nil {
-		lst = append(lst, d.QuotaFailure)
-	}
-
-	if d.QuotaFailure_Violation != nil {
-		lst = append(lst, d.QuotaFailure_Violation)
-	}
-
-	if d.Help != nil {
-		lst = append(lst, d.Help)
-	}
-
-	if d.Help_Link != nil {
-		lst = append(lst, d.Help_Link)
-	}
+	appendAll(sliceToV1(d.RequestInfo))
+	appendAll(sliceToV1(d.LocalizedMessage))
+	appendAll(sliceToV1(d.ResourceInfo))
+	appendAll(sliceToV1(d.RetryInfo))
+	appendAll(sliceToV1(d.DebugInfo))
+	appendAll(sliceToV1(d.ErrorInfo))
+	appendAll(sliceToV1(d.PreconditionFailure))
+	appendAll(sliceToV1(d.PreconditionFailure_Violation))
+	appendAll(sliceToV1(d.BadRequest))
+	appendAll(sliceToV1(d.BadRequest_FieldViolation))
+	appendAll(sliceToV1(d.QuotaFailure))
+	appendAll(sliceToV1(d.QuotaFailure_Violation))
+	appendAll(sliceToV1(d.Help))
+	appendAll(sliceToV1(d.Help_Link))
+	appendAll(d.Unknown)
 
 	return
+}
+
+// helper to convert typed slices to []protoiface.MessageV1 without allocations for each element.
+func sliceToV1[T protoiface.MessageV1](in []*T) []protoiface.MessageV1 {
+	out := make([]protoiface.MessageV1, 0, len(in))
+	for _, v := range in {
+		if v != nil {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // NewRpcError creates an error with rpc error detail data, to be returned via rpc method call's error field,
@@ -117,7 +100,7 @@ func NewRpcError(code codes.Code, message string, details RpcErrorDetails) error
 
 	if len(dlist) > 0 {
 		if d, e := s.WithDetails(dlist...); e != nil {
-			return s.Err()
+			return status.Errorf(codes.Internal, "failed to attach rpc error details: %v", e)
 		} else {
 			return d.Err()
 		}
@@ -138,33 +121,35 @@ func ConvertToRpcError(err error) (*status.Status, RpcErrorDetails) {
 	for _, d := range s.Details() {
 		switch info := d.(type) {
 		case *epb.ErrorInfo:
-			details.ErrorInfo = info
+			details.ErrorInfo = append(details.ErrorInfo, info)
 		case *epb.BadRequest:
-			details.BadRequest = info
+			details.BadRequest = append(details.BadRequest, info)
 		case *epb.PreconditionFailure:
-			details.PreconditionFailure = info
+			details.PreconditionFailure = append(details.PreconditionFailure, info)
 		case *epb.BadRequest_FieldViolation:
-			details.BadRequest_FieldViolation = info
+			details.BadRequest_FieldViolation = append(details.BadRequest_FieldViolation, info)
 		case *epb.DebugInfo:
-			details.DebugInfo = info
+			details.DebugInfo = append(details.DebugInfo, info)
 		case *epb.Help:
-			details.Help = info
+			details.Help = append(details.Help, info)
 		case *epb.Help_Link:
-			details.Help_Link = info
+			details.Help_Link = append(details.Help_Link, info)
 		case *epb.LocalizedMessage:
-			details.LocalizedMessage = info
+			details.LocalizedMessage = append(details.LocalizedMessage, info)
 		case *epb.PreconditionFailure_Violation:
-			details.PreconditionFailure_Violation = info
+			details.PreconditionFailure_Violation = append(details.PreconditionFailure_Violation, info)
 		case *epb.QuotaFailure:
-			details.QuotaFailure = info
+			details.QuotaFailure = append(details.QuotaFailure, info)
 		case *epb.QuotaFailure_Violation:
-			details.QuotaFailure_Violation = info
+			details.QuotaFailure_Violation = append(details.QuotaFailure_Violation, info)
 		case *epb.RequestInfo:
-			details.RequestInfo = info
+			details.RequestInfo = append(details.RequestInfo, info)
 		case *epb.ResourceInfo:
-			details.ResourceInfo = info
+			details.ResourceInfo = append(details.ResourceInfo, info)
 		case *epb.RetryInfo:
-			details.RetryInfo = info
+			details.RetryInfo = append(details.RetryInfo, info)
+		default:
+			details.Unknown = append(details.Unknown, info)
 		}
 	}
 
