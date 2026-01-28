@@ -95,6 +95,10 @@ func sliceToProto[T proto.Message](in []T) []proto.Message { // use proto.Messag
 //
 // withDetail = one or more detail proto error types from google.golang.org/genproto/googleapis/rpc/errdetails
 func NewRpcError(code codes.Code, message string, details RpcErrorDetails) error {
+	if code == codes.OK { // =prevent nil-error result for OK code
+		return status.Error(codes.InvalidArgument, "rpc error code cannot be OK")
+	}
+
 	s := status.New(code, message)
 
 	detailsList := details.list() // clarify name and ensure we pass the exact proto.Message slice
@@ -115,6 +119,11 @@ func NewRpcError(code codes.Code, message string, details RpcErrorDetails) error
 func ConvertToRpcError(err error) (*status.Status, RpcErrorDetails) {
 	if err == nil {
 		return nil, RpcErrorDetails{}
+	}
+
+	// Preserve correct gRPC codes for context errors instead of degrading to Unknown.
+	if ctxStatus := status.FromContextError(err); ctxStatus.Code() != codes.Unknown {
+		return ctxStatus, RpcErrorDetails{}
 	}
 
 	s := status.Convert(err)
