@@ -47,9 +47,15 @@ func normalizeSchemeName(raw string) string {
 }
 
 func safeRegister(builder resolver.Builder) (err error) {
+	if builder == nil {
+		return fmt.Errorf("resolver builder is nil")
+	}
+
+	scheme := builder.Scheme()
+
 	defer func() {
 		if rec := recover(); rec != nil {
-			err = fmt.Errorf("failed to register resolver for scheme '%s': %v", builder.Scheme(), rec)
+			err = fmt.Errorf("failed to register resolver for scheme '%s': %v", scheme, rec)
 		}
 	}()
 	resolver.Register(builder)
@@ -134,6 +140,13 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 }
 
 func setResolver(schemeName string, serviceName string, r *manual.Resolver) error {
+	if r == nil {
+		return fmt.Errorf("Resolver is nil; cannot register")
+	}
+	if strings.ToLower(strings.TrimSpace(r.Scheme())) != schemeName {
+		return fmt.Errorf("Resolver scheme '%s' does not match normalized scheme '%s'", r.Scheme(), schemeName)
+	}
+
 	_mux.Lock()
 	defer _mux.Unlock()
 
