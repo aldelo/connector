@@ -270,13 +270,16 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			}
 		}
 
+		// use fullMethod (with safe fallback) instead of directly dereferencing info
+		segmentName := "GrpcService-" + streamType + "-" + fullMethod
+
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
 			seg = xray.NewSegment("GrpcService-"+streamType+"-"+info.FullMethod, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
 				TraceID:   parentTraceID,
 			})
 		} else {
-			seg = xray.NewSegment("GrpcService-" + streamType + "-" + info.FullMethod)
+			seg = xray.NewSegment(segmentName)
 		}
 
 		// bind the segment into the stream context so downstream code can see it
