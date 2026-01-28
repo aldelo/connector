@@ -67,7 +67,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 				return
 			}
 			if seg != nil {
-				if err != nil {
+				if err != nil && seg.Seg != nil {
 					_ = seg.Seg.AddError(err)
 				}
 				seg.Close()
@@ -83,6 +83,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		if info != nil {
 			fullMethod = info.FullMethod
 		}
+
 		// Skip noisy health checks.
 		if strings.HasPrefix(fullMethod, "/grpc.health") {
 			return handler(ctx, req)
@@ -114,10 +115,14 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 
 		// Propagate tracing headers back to caller.
 		outgoingMD := metadata.New(nil)
-		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
-		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
+		if seg != nil && seg.Seg != nil { // guard segment before use
+			outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
+			outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
+		}
 		if hdrErr := grpc.SendHeader(segCtx, outgoingMD); hdrErr != nil {
-			_ = seg.Seg.AddError(hdrErr)
+			if seg != nil && seg.Seg != nil { // guard segment before use
+				_ = seg.Seg.AddError(hdrErr)
+			}
 			return nil, hdrErr
 		}
 
@@ -226,7 +231,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			return
 		}
 		if seg != nil {
-			if err != nil {
+			if err != nil && seg.Seg != nil {
 				_ = seg.Seg.AddError(err)
 			}
 			seg.Close()
@@ -276,7 +281,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		segmentName := "GrpcService-" + streamType + "-" + fullMethod
 
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcService-"+streamType+"-"+info.FullMethod, &xray.XRayParentSegment{
+			seg = xray.NewSegment(segmentName, &xray.XRayParentSegment{ // use safe segmentName instead of info.FullMethod
 				SegmentID: parentSegID,
 				TraceID:   parentTraceID,
 			})
@@ -295,12 +300,16 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 				outgoingMD[k] = append([]string(nil), v...)
 			}
 		}
-		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
-		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
+		if seg != nil && seg.Seg != nil {
+			outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
+			outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
+		}
 
 		// surface header send failures to the caller and trace
 		if hdrErr := wrappedStream.SendHeader(outgoingMD); hdrErr != nil {
-			_ = seg.Seg.AddError(hdrErr)
+			if seg != nil && seg.Seg != nil { // CHANGED: guard segment before use
+				_ = seg.Seg.AddError(hdrErr)
+			}
 			err = hdrErr
 			return hdrErr
 		}
