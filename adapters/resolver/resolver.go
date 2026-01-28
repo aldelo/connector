@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -32,6 +34,7 @@ var (
 	schemeMap         map[string]*manual.Resolver
 	registeredSchemes map[string]string // track which service owns a registered scheme
 	_mux              sync.Mutex        // thread-safety for accessing and modifying schemeMap
+	schemePattern     = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
 )
 
 // collision-safe map key builder
@@ -47,11 +50,23 @@ func normalizeSchemeName(raw string) string {
 	return s
 }
 
+// enforce RFC-ish scheme validity to avoid resolver.Register panics.
+func normalizeAndValidateSchemeName(raw string) (string, error) {
+	s := normalizeSchemeName(raw)
+	if !schemePattern.MatchString(s) {
+		return "", fmt.Errorf("invalid resolver scheme '%s'; must match %s", s, schemePattern.String())
+	}
+	return s, nil
+}
+
 // normalize and validate service names in one place.
 func normalizeServiceName(raw string) (string, error) {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	if util.LenTrim(s) == 0 {
 		return "", fmt.Errorf("ServiceName is Required")
+	}
+	if strings.ContainsAny(s, " :") {
+		return "", fmt.Errorf("ServiceName must not contain ':' or spaces")
 	}
 	return s, nil
 }
@@ -75,6 +90,18 @@ func safeRegister(builder resolver.Builder) (err error) {
 	return nil
 }
 
+// explicit port validation with range check.
+func validatePort(port string) error {
+	if util.LenTrim(port) == 0 {
+		return fmt.Errorf("missing port")
+	}
+	p, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil || p <= 0 || p > 65535 {
+		return fmt.Errorf("invalid port '%s'", port)
+	}
+	return nil
+}
+
 // centralized, case-insensitive address normalization and de-duplication.
 func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Address, error) {
 	addrs := make([]resolver.Address, 0, len(endpointAddrs))
@@ -86,18 +113,32 @@ func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Addre
 			continue
 		}
 
-		canonical := strings.ToLower(addr)
-
 		if host, port, err := net.SplitHostPort(addr); err == nil && len(host) != 0 {
-			canonical = net.JoinHostPort(strings.ToLower(host), strings.TrimSpace(port))
+			if err := validatePort(port); err != nil {
+				return nil, fmt.Errorf("endpoint address '%s': %w", addr, err)
+			}
+			// For host:port, host is case-insensitive; port already validated.
+			canonicalKey := strings.ToLower(host) + ":" + strings.TrimSpace(port)
+			if _, exists := seen[canonicalKey]; exists {
+				continue
+			}
+			seen[canonicalKey] = struct{}{}
+			addrs = append(addrs, resolver.Address{
+				Addr: net.JoinHostPort(strings.ToLower(host), strings.TrimSpace(port)),
+			})
+			continue
+		} else if err != nil && strings.Contains(addr, ":") {
+			// Likely malformed host:port (e.g., missing port or bad IPv6 bracket)
+			return nil, fmt.Errorf("invalid endpoint address '%s': %v", addr, err)
 		}
 
-		if _, exists := seen[canonical]; exists {
+		// Opaque / non-host:port address (e.g., unix:///path); keep case as-is.
+		canonicalKey := addr
+		if _, exists := seen[canonicalKey]; exists {
 			continue
 		}
-
-		seen[canonical] = struct{}{}
-		addrs = append(addrs, resolver.Address{Addr: canonical})
+		seen[canonicalKey] = struct{}{}
+		addrs = append(addrs, resolver.Address{Addr: addr})
 	}
 
 	if len(addrs) == 0 {
@@ -111,7 +152,10 @@ func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Addre
 }
 
 func NewManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
-	schemeName = normalizeSchemeName(schemeName)
+	schemeName, err := normalizeAndValidateSchemeName(schemeName)
+	if err != nil {
+		return err
+	}
 
 	// centralized service-name validation to avoid inconsistent checks.
 	svc, err := normalizeServiceName(serviceName)
@@ -143,7 +187,10 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		return err
 	}
 
-	schemeName = normalizeSchemeName(schemeName)
+	schemeName, err = normalizeAndValidateSchemeName(schemeName)
+	if err != nil {
+		return err
+	}
 
 	// centralized service-name validation to avoid inconsistent checks.
 	svc, err := normalizeServiceName(serviceName)
@@ -171,7 +218,10 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 	}
 
 	// enforce normalization inside the setter to avoid caller mistakes.
-	schemeName = normalizeSchemeName(schemeName)
+	schemeName, err := normalizeAndValidateSchemeName(schemeName)
+	if err != nil {
+		return err
+	}
 	svc, err := normalizeServiceName(serviceName)
 	if err != nil {
 		return err
@@ -217,7 +267,10 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 
 func getResolver(schemeName string, serviceName string) (*manual.Resolver, error) {
 	// normalize inside getter to ensure consistent map keying.
-	schemeName = normalizeSchemeName(schemeName)
+	schemeName, err := normalizeAndValidateSchemeName(schemeName)
+	if err != nil {
+		return nil, err
+	}
 	svc, err := normalizeServiceName(serviceName)
 	if err != nil {
 		return nil, err
