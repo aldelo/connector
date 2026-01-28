@@ -124,8 +124,16 @@ func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Addre
 			continue
 		}
 
+		// reject bracketless IPv6 with a numeric tail that looks like a port.
+		if strings.Count(addr, ":") > 1 && !strings.HasPrefix(addr, "[") {
+			tail := addr[strings.LastIndex(addr, ":")+1:]
+			if _, err := strconv.Atoi(tail); err == nil {
+				return nil, fmt.Errorf("invalid endpoint address '%s': IPv6 addresses with ports must be bracketed, e.g. [addr]:port", addr)
+			}
+		}
+
 		// Heuristic: only treat as host:port when it looks like one.
-		likelyHostPort := strings.Count(addr, ":") == 1 || strings.HasPrefix(addr, "[")
+		likelyHostPort := strings.Count(addr, ":") >= 1 || strings.HasPrefix(addr, "[")
 		if host, port, err := net.SplitHostPort(addr); err == nil && len(host) != 0 {
 			if err := validatePort(port); err != nil {
 				return nil, fmt.Errorf("endpoint address '%s': %w", addr, err)
@@ -153,6 +161,11 @@ func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Addre
 		} else if err != nil && likelyHostPort {
 			// Likely malformed host:port (e.g., missing port or bad IPv6 bracket)
 			return nil, fmt.Errorf("invalid endpoint address '%s': %v", addr, err)
+		}
+
+		// fail fast on bare IP literals that are missing a port.
+		if net.ParseIP(addr) != nil {
+			return nil, fmt.Errorf("invalid endpoint address '%s': missing port", addr)
 		}
 
 		// Fallback: treat as opaque (non-host:port).
