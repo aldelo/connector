@@ -56,6 +56,31 @@ func safeRegister(builder resolver.Builder) (err error) {
 	return nil
 }
 
+// centralized, case-insensitive address normalization and de-duplication.
+func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Address, error) {
+	addrs := make([]resolver.Address, 0, len(endpointAddrs))
+	seen := make(map[string]struct{})
+	for _, raw := range endpointAddrs {
+		addr := strings.TrimSpace(raw)
+		if len(addr) == 0 {
+			continue
+		}
+		key := strings.ToLower(addr)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		addrs = append(addrs, resolver.Address{Addr: addr})
+	}
+	if len(addrs) == 0 {
+		if onEmpty != nil {
+			return nil, onEmpty
+		}
+		return nil, fmt.Errorf("No Valid Endpoint Address Found")
+	}
+	return addrs, nil
+}
+
 func NewManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
 	schemeName = normalizeSchemeName(schemeName)
 
@@ -64,22 +89,9 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 		return fmt.Errorf("ServiceName is Required")
 	}
 
-	addrs := make([]resolver.Address, 0, len(endpointAddrs))
-	seen := make(map[string]struct{})
-	for _, raw := range endpointAddrs {
-		addr := strings.TrimSpace(raw)
-		if len(addr) == 0 {
-			continue
-		}
-		if _, exists := seen[addr]; exists {
-			continue
-		}
-		seen[addr] = struct{}{}
-		addrs = append(addrs, resolver.Address{Addr: addr})
-	}
-
-	if len(addrs) == 0 {
-		return fmt.Errorf("No Valid Endpoint Address Found")
+	addrs, err := normalizeAddresses(endpointAddrs, nil)
+	if err != nil {
+		return err
 	}
 
 	r := manual.NewBuilderWithScheme(schemeName)
@@ -95,21 +107,9 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 }
 
 func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
-	addrs := make([]resolver.Address, 0, len(endpointAddrs))
-	seen := make(map[string]struct{})
-	for _, raw := range endpointAddrs {
-		addr := strings.TrimSpace(raw)
-		if len(addr) == 0 {
-			continue
-		}
-		if _, exists := seen[addr]; exists {
-			continue
-		}
-		seen[addr] = struct{}{}
-		addrs = append(addrs, resolver.Address{Addr: addr})
-	}
-	if len(addrs) == 0 {
-		return fmt.Errorf("Endpoint Addresses Required")
+	addrs, err := normalizeAddresses(endpointAddrs, fmt.Errorf("Endpoint Addresses Required"))
+	if err != nil {
+		return err
 	}
 
 	schemeName = normalizeSchemeName(schemeName)
@@ -124,6 +124,7 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		return err
 	}
 
+	// manual.Resolver.UpdateState does not return an error.
 	r.UpdateState(resolver.State{
 		Addresses: addrs,
 	})
