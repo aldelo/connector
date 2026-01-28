@@ -20,7 +20,7 @@ import (
 	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/runtime/protoiface"
+	"google.golang.org/protobuf/proto"
 )
 
 // allow multiple instances of each detail type to avoid data loss
@@ -45,13 +45,13 @@ type RpcErrorDetails struct {
 	Help      []*epb.Help
 	Help_Link []*epb.Help_Link
 
-	Unknown []protoiface.MessageV1
+	Unknown []proto.Message
 }
 
 // return []proto.Message so it is directly compatible with status.WithDetails
-func (d RpcErrorDetails) list() (lst []protoiface.MessageV1) {
+func (d RpcErrorDetails) list() (lst []proto.Message) {
 	// CHANGED: append all instances instead of only one.
-	appendAll := func(ms []protoiface.MessageV1) {
+	appendAll := func(ms []proto.Message) {
 		for _, m := range ms {
 			if m != nil {
 				lst = append(lst, m)
@@ -59,28 +59,28 @@ func (d RpcErrorDetails) list() (lst []protoiface.MessageV1) {
 		}
 	}
 
-	appendAll(sliceToV1(d.RequestInfo))
-	appendAll(sliceToV1(d.LocalizedMessage))
-	appendAll(sliceToV1(d.ResourceInfo))
-	appendAll(sliceToV1(d.RetryInfo))
-	appendAll(sliceToV1(d.DebugInfo))
-	appendAll(sliceToV1(d.ErrorInfo))
-	appendAll(sliceToV1(d.PreconditionFailure))
-	appendAll(sliceToV1(d.PreconditionFailure_Violation))
-	appendAll(sliceToV1(d.BadRequest))
-	appendAll(sliceToV1(d.BadRequest_FieldViolation))
-	appendAll(sliceToV1(d.QuotaFailure))
-	appendAll(sliceToV1(d.QuotaFailure_Violation))
-	appendAll(sliceToV1(d.Help))
-	appendAll(sliceToV1(d.Help_Link))
+	appendAll(sliceToProto(d.RequestInfo))
+	appendAll(sliceToProto(d.LocalizedMessage))
+	appendAll(sliceToProto(d.ResourceInfo))
+	appendAll(sliceToProto(d.RetryInfo))
+	appendAll(sliceToProto(d.DebugInfo))
+	appendAll(sliceToProto(d.ErrorInfo))
+	appendAll(sliceToProto(d.PreconditionFailure))
+	appendAll(sliceToProto(d.PreconditionFailure_Violation))
+	appendAll(sliceToProto(d.BadRequest))
+	appendAll(sliceToProto(d.BadRequest_FieldViolation))
+	appendAll(sliceToProto(d.QuotaFailure))
+	appendAll(sliceToProto(d.QuotaFailure_Violation))
+	appendAll(sliceToProto(d.Help))
+	appendAll(sliceToProto(d.Help_Link))
 	appendAll(d.Unknown)
 
 	return
 }
 
-// helper to convert typed slices to []protoiface.MessageV1 without allocations for each element.
-func sliceToV1[T protoiface.MessageV1](in []*T) []protoiface.MessageV1 {
-	out := make([]protoiface.MessageV1, 0, len(in))
+// helper to convert typed slices to []proto.Message without allocations for each element.
+func sliceToProto[T proto.Message](in []T) []proto.Message { // use proto.Message
+	out := make([]proto.Message, 0, len(in))
 	for _, v := range in {
 		if v != nil {
 			out = append(out, v)
@@ -149,7 +149,9 @@ func ConvertToRpcError(err error) (*status.Status, RpcErrorDetails) {
 		case *epb.RetryInfo:
 			details.RetryInfo = append(details.RetryInfo, info)
 		default:
-			details.Unknown = append(details.Unknown, info)
+			if m, ok := info.(proto.Message); ok { // only keep details that satisfy proto.Message
+				details.Unknown = append(details.Unknown, m)
+			}
 		}
 	}
 
