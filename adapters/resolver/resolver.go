@@ -61,6 +61,9 @@ func safeRegister(builder resolver.Builder) (err error) {
 	}
 
 	scheme := builder.Scheme()
+	if util.LenTrim(scheme) == 0 { // guard against empty scheme; resolver.Register would panic
+		return fmt.Errorf("resolver scheme is empty")
+	}
 
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -80,11 +83,10 @@ func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Addre
 		if len(addr) == 0 {
 			continue
 		}
-		key := strings.ToLower(addr)
-		if _, exists := seen[key]; exists {
+		if _, exists := seen[addr]; exists {
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[addr] = struct{}{}
 		addrs = append(addrs, resolver.Address{Addr: addr})
 	}
 	if len(addrs) == 0 {
