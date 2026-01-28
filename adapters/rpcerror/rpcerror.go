@@ -121,6 +121,11 @@ func ConvertToRpcError(err error) (*status.Status, RpcErrorDetails) {
 		return status.New(codes.OK, ""), RpcErrorDetails{}
 	}
 
+	// normalize context errors (including wrapped) to their canonical gRPC statuses.
+	if ctxStatus := status.FromContextError(err); ctxStatus.Code() == codes.Canceled || ctxStatus.Code() == codes.DeadlineExceeded {
+		return ctxStatus, RpcErrorDetails{}
+	}
+
 	s := status.Convert(err)
 	details := RpcErrorDetails{}
 
