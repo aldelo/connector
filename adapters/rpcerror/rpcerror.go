@@ -22,6 +22,7 @@ import (
 	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // allow multiple instances of each detail type to avoid data loss
@@ -95,7 +96,7 @@ func sliceToProto[T proto.Message](in []T) []proto.Message { // use proto.Messag
 //
 // withDetail = one or more detail proto error types from google.golang.org/genproto/googleapis/rpc/errdetails
 func NewRpcError(code codes.Code, message string, details RpcErrorDetails) error {
-	if code == codes.OK { // =prevent nil-error result for OK code
+	if code == codes.OK { // prevent nil-error result for OK code
 		return nil
 	}
 
@@ -107,12 +108,18 @@ func NewRpcError(code codes.Code, message string, details RpcErrorDetails) error
 		return s.Err()
 	}
 
-	st, err := s.WithDetails(detailsList...) // straight-line handling
-	if err != nil {
-		return status.Errorf(codes.Internal, "failed to attach rpc error details: %v", err)
+	p := s.Proto() // manually attach details to avoid protoadapter mismatch
+	p.Details = make([]*anypb.Any, 0, len(detailsList))
+
+	for _, d := range detailsList {
+		anyObj, err := anypb.New(d) // marshals proto.Message
+		if err != nil {
+			return status.Errorf(codes.Internal, "failed to attach rpc error details: %v", err)
+		}
+		p.Details = append(p.Details, anyObj)
 	}
 
-	return st.Err()
+	return status.FromProto(p).Err() // rebuild status with details
 }
 
 // ConvertToRpcError will convert error object into rpc status and error details
