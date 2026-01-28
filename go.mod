@@ -8,9 +8,9 @@ require (
 	github.com/aws/aws-xray-sdk-go v1.8.5
 	github.com/gin-contrib/cors v1.7.6
 	github.com/gin-gonic/gin v1.11.0
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20251124214823-79d6a2a48846
-	google.golang.org/grpc v1.77.0
-	google.golang.org/protobuf v1.36.10
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260128011058-8636f8732409
+	google.golang.org/grpc v1.78.0
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
