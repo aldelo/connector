@@ -66,6 +66,16 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 	}
 }
 
+// bind the created segment into the stream context and use the wrapped stream for SendHeader and handler.
+type contextServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (w *contextServerStream) Context() context.Context {
+	return w.ctx
+}
+
 // TracerUnaryServerInterceptor will perform xray tracing for each unary RPC call
 //
 // to pass in parent xray segment id and trace id, set the metadata keys with:
@@ -183,6 +193,10 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			seg = xray.NewSegment("GrpcService-" + streamType + "-" + info.FullMethod)
 		}
 
+		// bind the segment into the stream context so downstream code can see it
+		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
+		wrappedStream := &contextServerStream{ServerStream: ss, ctx: segCtx}
+
 		// mark panics as errors in X-Ray while rethrowing
 		defer func() {
 			if r := recover(); r != nil {
@@ -208,12 +222,12 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 		// surface header send failures to the caller and trace
-		if hdrErr := ss.SendHeader(outgoingMD); hdrErr != nil {
+		if hdrErr := wrappedStream.SendHeader(outgoingMD); hdrErr != nil {
 			_ = seg.Seg.AddError(hdrErr)
 			return hdrErr
 		}
 
-		err = handler(srv, ss)
+		err = handler(srv, wrappedStream)
 		return err
 	}
 
