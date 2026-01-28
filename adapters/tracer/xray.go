@@ -92,12 +92,8 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		// Extract parent IDs from incoming metadata.
 		parentSegID, parentTraceID := "", ""
 		if md, ok := metadata.FromIncomingContext(ctx); ok {
-			if v, ok2 := md["x-amzn-seg-id"]; ok2 && len(v) > 0 {
-				parentSegID = v[0]
-			}
-			if v, ok2 := md["x-amzn-tr-id"]; ok2 && len(v) > 0 {
-				parentTraceID = v[0]
-			}
+			// accept both canonical X-Ray header and legacy short key
+			parentSegID, parentTraceID = extractParentIDs(md)
 		}
 
 		// Create segment with optional parent.
@@ -110,19 +106,22 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 			seg = xray.NewSegment("GrpcService-UnaryRPC-" + fullMethod)
 		}
 
+		// guard segment creation to avoid panics
+		if seg == nil || seg.Seg == nil {
+			return handler(ctx, req)
+		}
+
 		// Bind segment to context for downstream code.
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
 
 		// Propagate tracing headers back to caller.
 		outgoingMD := metadata.New(nil)
-		if seg != nil && seg.Seg != nil { // guard segment before use
-			outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
-			outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
-		}
+		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
+		outgoingMD.Set("x-amzn-trace-id", seg.Seg.TraceID)
+		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
+
 		if hdrErr := grpc.SendHeader(segCtx, outgoingMD); hdrErr != nil {
-			if seg != nil && seg.Seg != nil { // guard segment before use
-				_ = seg.Seg.AddError(hdrErr)
-			}
+			_ = seg.Seg.AddError(hdrErr)
 			return nil, hdrErr
 		}
 
@@ -138,6 +137,20 @@ type contextServerStream struct {
 
 func (w *contextServerStream) Context() context.Context {
 	return w.ctx
+}
+
+// helper to extract parent IDs from metadata with both canonical and legacy keys
+func extractParentIDs(md metadata.MD) (segID, traceID string) {
+	if v, ok := md["x-amzn-seg-id"]; ok && len(v) > 0 {
+		segID = v[0]
+	}
+	// prefer canonical x-amzn-trace-id, fall back to legacy x-amzn-tr-id
+	if v, ok := md["x-amzn-trace-id"]; ok && len(v) > 0 { // NEW
+		traceID = v[0] // NEW
+	} else if v, ok := md["x-amzn-tr-id"]; ok && len(v) > 0 { // NEW
+		traceID = v[0] // NEW
+	}
+	return
 }
 
 // TracerUnaryServerInterceptor will perform xray tracing for each unary RPC call
@@ -268,13 +281,8 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		}
 
 		if incomingMD, ok = metadata.FromIncomingContext(ctx); ok {
-			if v, ok2 := incomingMD["x-amzn-seg-id"]; ok2 && len(v) > 0 {
-				parentSegID = v[0]
-			}
-
-			if v, ok2 := incomingMD["x-amzn-tr-id"]; ok2 && len(v) > 0 {
-				parentTraceID = v[0]
-			}
+			// accept both canonical X-Ray header and legacy short key
+			parentSegID, parentTraceID = extractParentIDs(incomingMD)
 		}
 
 		// use fullMethod (with safe fallback) instead of directly dereferencing info
@@ -289,6 +297,11 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			seg = xray.NewSegment(segmentName)
 		}
 
+		// guard segment before binding/propagation
+		if seg == nil || seg.Seg == nil { // CHANGED
+			return handler(srv, ss) // CHANGED
+		}
+
 		// bind the segment into the stream context so downstream code can see it
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
 		wrappedStream := &contextServerStream{ServerStream: ss, ctx: segCtx}
@@ -300,14 +313,14 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 				outgoingMD[k] = append([]string(nil), v...)
 			}
 		}
-		if seg != nil && seg.Seg != nil {
-			outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
-			outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
-		}
+		// write both AWS standard and legacy header names
+		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
+		outgoingMD.Set("x-amzn-trace-id", seg.Seg.TraceID)
+		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 		// surface header send failures to the caller and trace
 		if hdrErr := wrappedStream.SendHeader(outgoingMD); hdrErr != nil {
-			if seg != nil && seg.Seg != nil { // CHANGED: guard segment before use
+			if seg != nil && seg.Seg != nil { // guard segment before use
 				_ = seg.Seg.AddError(hdrErr)
 			}
 			err = hdrErr
