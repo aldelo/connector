@@ -38,24 +38,50 @@ func panicError(r interface{}) error {
 }
 
 func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientInterceptor {
-	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		if xray.XRayServiceOn() {
-			log.Println("!!! xray is on")
-			// bypass health check
-			if strings.HasPrefix(method, "/grpc.health") {
-				return invoker(ctx, method, req, reply, cc, opts...)
-			}
-			// bypass xray tracer if no segment exists
-			if awsxray.GetSegment(ctx) == nil {
-				log.Println("!!! segment context is nil")
-				return invoker(ctx, method, req, reply, cc, opts...)
-			}
-			log.Println("!!! all ready, trace it. ")
-			return awsxray.UnaryClientInterceptor(awsxray.WithSegmentNamer(awsxray.NewFixedSegmentNamer(serviceName)))(ctx, method, req, reply, cc, invoker, opts...)
-		} else {
-			log.Println("!!! xray is off")
+	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
+		if !xray.XRayServiceOn() {
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
+
+		// bypass health check
+		if strings.HasPrefix(method, "/grpc.health") {
+			return invoker(ctx, method, req, reply, cc, opts...)
+		}
+
+		var seg *xray.XSegment // optional segment if none is present
+		defer func() {
+			if r := recover(); r != nil {
+				recErr := panicError(r)
+				if seg != nil && seg.Seg != nil {
+					_ = seg.Seg.AddError(recErr)
+					seg.Close()
+				}
+				err = recErr
+				return
+			}
+			if seg != nil && seg.Seg != nil {
+				if err != nil {
+					_ = seg.Seg.AddError(err)
+				}
+				seg.Close()
+			}
+		}()
+
+		// If there is no current segment, create a temporary one to ensure trace propagation.
+		if awsxray.GetSegment(ctx) == nil {
+			seg = xray.NewSegment("GrpcClient-UnaryRPC-" + method)
+			if seg != nil && seg.Seg != nil {
+				ctx = context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
+			} else {
+				// fallback: run without tracing if segment creation failed
+				seg = nil
+				return invoker(ctx, method, req, reply, cc, opts...)
+			}
+		}
+
+		return awsxray.UnaryClientInterceptor(
+			awsxray.WithSegmentNamer(awsxray.NewFixedSegmentNamer(serviceName)),
+		)(ctx, method, req, reply, cc, invoker, opts...)
 	}
 }
 
