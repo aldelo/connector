@@ -53,6 +53,27 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 
 func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+		var seg *xray.XSegment // keep segment in outer scope for deferred recovery/close
+
+		// global panic guard even when X-Ray is disabled, to avoid crashing the server
+		defer func() {
+			if r := recover(); r != nil {
+				recErr := fmt.Errorf("panic: %v", r)
+				if seg != nil && seg.Seg != nil {
+					_ = seg.Seg.AddError(recErr)
+					seg.Close()
+				}
+				err = recErr
+				return
+			}
+			if seg != nil {
+				if err != nil {
+					_ = seg.Seg.AddError(err)
+				}
+				seg.Close()
+			}
+		}()
+
 		if !xray.XRayServiceOn() {
 			log.Println("!!! xray service off !!!")
 			return handler(ctx, req)
@@ -79,7 +100,6 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		}
 
 		// Create segment with optional parent.
-		var seg *xray.XSegment
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
 			seg = xray.NewSegment("GrpcService-UnaryRPC-"+fullMethod, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
@@ -88,19 +108,6 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		} else {
 			seg = xray.NewSegment("GrpcService-UnaryRPC-" + fullMethod)
 		}
-
-		// single defer to capture panic/error before closing segment.
-		defer func() {
-			if r := recover(); r != nil {
-				_ = seg.Seg.AddError(fmt.Errorf("panic: %v", r))
-				seg.Close()
-				panic(r)
-			}
-			if err != nil {
-				_ = seg.Seg.AddError(err)
-			}
-			seg.Close()
-		}()
 
 		// Bind segment to context for downstream code.
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
@@ -205,6 +212,27 @@ func (w *contextServerStream) Context() context.Context {
 //	md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
 //	ctx = metadata.NewOutgoingContext(ctx, md)
 func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	var seg *xray.XSegment // outer-scope segment for recovery/close
+
+	// global panic guard even when X-Ray is disabled
+	defer func() {
+		if r := recover(); r != nil {
+			recErr := fmt.Errorf("panic: %v", r)
+			if seg != nil && seg.Seg != nil {
+				_ = seg.Seg.AddError(recErr)
+				seg.Close()
+			}
+			err = recErr
+			return
+		}
+		if seg != nil {
+			if err != nil {
+				_ = seg.Seg.AddError(err)
+			}
+			seg.Close()
+		}
+	}()
+
 	if xray.XRayServiceOn() {
 		// skip health check calls from tracing noise
 		fullMethod := "unknown"
@@ -242,7 +270,6 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			}
 		}
 
-		var seg *xray.XSegment
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
 			seg = xray.NewSegment("GrpcService-"+streamType+"-"+info.FullMethod, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
@@ -255,19 +282,6 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		// bind the segment into the stream context so downstream code can see it
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
 		wrappedStream := &contextServerStream{ServerStream: ss, ctx: segCtx}
-
-		// single defer to record panic/error before closing.
-		defer func() {
-			if r := recover(); r != nil {
-				_ = seg.Seg.AddError(fmt.Errorf("panic: %v", r))
-				seg.Close()
-				panic(r)
-			}
-			if err != nil {
-				_ = seg.Seg.AddError(err)
-			}
-			seg.Close()
-		}()
 
 		// avoid mutating incoming metadata; build an outgoing copy
 		outgoingMD := metadata.New(nil)
