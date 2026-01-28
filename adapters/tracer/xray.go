@@ -66,8 +66,8 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 				err = recErr
 				return
 			}
-			if seg != nil {
-				if err != nil && seg.Seg != nil {
+			if seg != nil && seg.Seg != nil {
+				if err != nil {
 					_ = seg.Seg.AddError(err)
 				}
 				seg.Close()
@@ -108,6 +108,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 
 		// guard segment creation to avoid panics
 		if seg == nil || seg.Seg == nil {
+			seg = nil
 			return handler(ctx, req)
 		}
 
@@ -243,8 +244,8 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			err = recErr
 			return
 		}
-		if seg != nil {
-			if err != nil && seg.Seg != nil {
+		if seg != nil && seg.Seg != nil {
+			if err != nil {
 				_ = seg.Seg.AddError(err)
 			}
 			seg.Close()
@@ -299,6 +300,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 
 		// guard segment before binding/propagation
 		if seg == nil || seg.Seg == nil { // CHANGED
+			seg = nil
 			return handler(srv, ss) // CHANGED
 		}
 
