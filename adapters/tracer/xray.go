@@ -47,6 +47,33 @@ func panicClientError(r interface{}) error {
 	return fmt.Errorf("panic: %v", r)
 }
 
+// sanitize segment names to be AWS X-Ray–compatible (DNS-safe and length-bounded).
+func sanitizeSegmentName(prefix, method string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			return r
+		default:
+			return '-'
+		}
+	}, method)
+
+	safe = strings.Trim(safe, "-")
+	if safe == "" {
+		safe = "unknown"
+	}
+
+	name := prefix + safe
+	if len(name) > 200 {
+		name = name[:200]
+	}
+
+	return name
+}
+
 func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
 		var seg *xray.XSegment
@@ -85,7 +112,7 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 
 		// If there is no current segment, create a temporary one to ensure trace propagation.
 		if awsxray.GetSegment(ctx) == nil {
-			seg = xray.NewSegment("GrpcClient-UnaryRPC-" + method)
+			seg = xray.NewSegment(sanitizeSegmentName("GrpcClient-UnaryRPC-", method))
 			if seg != nil && seg.Seg != nil {
 				createdSeg = true
 				ctx = context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
@@ -141,20 +168,40 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		}
 
 		// Extract parent IDs from incoming metadata.
-		parentSegID, parentTraceID := "", ""
+		parentSegID, parentTraceID, sampled, rawHeader := "", "", (*bool)(nil), ""
 		if md, ok := metadata.FromIncomingContext(ctx); ok {
-			// accept both canonical X-Ray header and legacy short key
-			parentSegID, parentTraceID = extractParentIDs(md)
+			parentSegID, parentTraceID, sampled, rawHeader = extractParentIDs(md)
 		}
 
-		// Create segment with optional parent.
+		// If parent said Sampled=0, propagate headers without creating a segment.
+		if sampled != nil && !*sampled {
+			outgoingMD := metadata.New(nil)
+			if rawHeader != "" {
+				outgoingMD.Set("x-amzn-trace-id", rawHeader)
+			} else if parentTraceID != "" {
+				outgoingMD.Set("x-amzn-trace-id", formatTraceHeader(parentTraceID, parentSegID, false))
+			}
+			if parentSegID != "" {
+				outgoingMD.Set("x-amzn-seg-id", parentSegID)
+			}
+			if parentTraceID != "" {
+				outgoingMD.Set("x-amzn-tr-id", parentTraceID)
+			}
+			if hdrErr := grpc.SetHeader(ctx, outgoingMD); hdrErr != nil {
+				err = status.Error(codes.Internal, hdrErr.Error())
+				return nil, err
+			}
+			return handler(ctx, req)
+		}
+
+		segName := sanitizeSegmentName("GrpcService-UnaryRPC-", fullMethod)
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcService-UnaryRPC-"+fullMethod, &xray.XRayParentSegment{
+			seg = xray.NewSegment(segName, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
 				TraceID:   parentTraceID,
 			})
 		} else {
-			seg = xray.NewSegment("GrpcService-UnaryRPC-" + fullMethod)
+			seg = xray.NewSegment(segName)
 		}
 
 		// guard segment creation to avoid panics
@@ -208,11 +255,11 @@ func (w *contextServerStream) SendMsg(m interface{}) error {
 }
 
 // helper to extract parent IDs from metadata with both canonical and legacy keys
-func extractParentIDs(md metadata.MD) (segID, traceID string) {
+func extractParentIDs(md metadata.MD) (segID, traceID string, sampled *bool, rawHeader string) {
 	// 1) canonical AWS header: "Root=1-...;Parent=...;Sampled=1"
 	if v, ok := md["x-amzn-trace-id"]; ok && len(v) > 0 {
-		hdr := v[0]
-		for _, part := range strings.Split(hdr, ";") {
+		rawHeader = v[0]
+		for _, part := range strings.Split(rawHeader, ";") {
 			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
 			if len(kv) != 2 {
 				continue
@@ -222,6 +269,15 @@ func extractParentIDs(md metadata.MD) (segID, traceID string) {
 				traceID = kv[1]
 			case "parent":
 				segID = kv[1]
+			case "sampled":
+				val := strings.ToLower(strings.TrimSpace(kv[1]))
+				if val == "1" || val == "true" {
+					b := true
+					sampled = &b
+				} else if val == "0" || val == "false" {
+					b := false
+					sampled = &b
+				}
 			}
 		}
 	}
@@ -359,13 +415,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			return handler(srv, ss)
 		}
 
-		parentSegID := ""
-		parentTraceID := ""
-
-		var incomingMD metadata.MD
-		var ok bool
-
-		ctx := ss.Context()
+		parentSegID, parentTraceID, sampled, rawHeader := "", "", (*bool)(nil), ""
 		streamType := "StreamRPC"
 		if info != nil {
 			switch {
@@ -378,16 +428,38 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			}
 		}
 
+		var incomingMD metadata.MD
+		var ok bool
+		ctx := ss.Context()
+
 		if incomingMD, ok = metadata.FromIncomingContext(ctx); ok {
-			// accept both canonical X-Ray header and legacy short key
-			parentSegID, parentTraceID = extractParentIDs(incomingMD)
+			parentSegID, parentTraceID, sampled, rawHeader = extractParentIDs(incomingMD)
 		}
 
-		// use fullMethod (with safe fallback) instead of directly dereferencing info
-		segmentName := "GrpcService-" + streamType + "-" + fullMethod
+		// Respect Sampled=0 by propagating headers only.
+		if sampled != nil && !*sampled {
+			outgoingMD := metadata.New(nil)
+			if rawHeader != "" {
+				outgoingMD.Set("x-amzn-trace-id", rawHeader)
+			} else if parentTraceID != "" {
+				outgoingMD.Set("x-amzn-trace-id", formatTraceHeader(parentTraceID, parentSegID, false))
+			}
+			if parentSegID != "" {
+				outgoingMD.Set("x-amzn-seg-id", parentSegID)
+			}
+			if parentTraceID != "" {
+				outgoingMD.Set("x-amzn-tr-id", parentTraceID)
+			}
+			if hdrErr := grpc.SetHeader(ctx, outgoingMD); hdrErr != nil {
+				err = status.Error(codes.Internal, hdrErr.Error())
+				return err
+			}
+			return handler(srv, ss)
+		}
 
+		segmentName := sanitizeSegmentName("GrpcService-"+streamType+"-", fullMethod)
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment(segmentName, &xray.XRayParentSegment{ // use safe segmentName instead of info.FullMethod
+			seg = xray.NewSegment(segmentName, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
 				TraceID:   parentTraceID,
 			})
