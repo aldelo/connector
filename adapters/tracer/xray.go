@@ -19,7 +19,6 @@ package tracer
 import (
 	"context"
 	"fmt"
-	"log"
 	"runtime/debug"
 	"strings"
 
@@ -111,7 +110,6 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		}()
 
 		if !xray.XRayServiceOn() {
-			log.Println("!!! xray service off !!!")
 			return handler(ctx, req)
 		}
 
