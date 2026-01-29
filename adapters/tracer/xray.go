@@ -37,25 +37,36 @@ func panicError(r interface{}) error {
 	return fmt.Errorf("panic: %v\n%s", r, debug.Stack())
 }
 
+// keep stack for tracing while avoiding leaking it to callers.
+func panicTraceError(r interface{}) error {
+	return fmt.Errorf("panic: %v\n%s", r, debug.Stack())
+}
+
+// sanitized error returned to clients (no stack trace).
+func panicClientError(r interface{}) error {
+	return fmt.Errorf("panic: %v", r)
+}
+
 func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
 		var seg *xray.XSegment
+		createdSeg := false
 
 		// global panic guard always installed to prevent client crashes on any path
 		defer func() {
 			if r := recover(); r != nil {
-				recErr := panicError(r)
-				if segCtx := awsxray.GetSegment(ctx); segCtx != nil {
-					_ = segCtx.AddError(recErr)
-				}
-				if seg != nil && seg.Seg != nil {
-					_ = seg.Seg.AddError(recErr)
+				traceErr := panicTraceError(r)
+				clientErr := panicClientError(r)
+				if createdSeg && seg != nil && seg.Seg != nil {
+					_ = seg.Seg.AddError(traceErr)
 					seg.Close()
+				} else if segCtx := awsxray.GetSegment(ctx); segCtx != nil {
+					_ = segCtx.AddError(traceErr)
 				}
-				err = status.Error(codes.Internal, recErr.Error()) // return gRPC status for consistency
+				err = status.Error(codes.Internal, clientErr.Error()) // sanitized message
 				return
 			}
-			if seg != nil && seg.Seg != nil {
+			if createdSeg && seg != nil && seg.Seg != nil { // only close synthetic segment
 				if err != nil {
 					_ = seg.Seg.AddError(err)
 				}
@@ -76,6 +87,7 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 		if awsxray.GetSegment(ctx) == nil {
 			seg = xray.NewSegment("GrpcClient-UnaryRPC-" + method)
 			if seg != nil && seg.Seg != nil {
+				createdSeg = true
 				ctx = context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
 			} else {
 				// fallback: run without tracing if segment creation failed
@@ -97,12 +109,13 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		// global panic guard even when X-Ray is disabled, to avoid crashing the server
 		defer func() {
 			if r := recover(); r != nil {
-				recErr := panicError(r)
+				traceErr := panicTraceError(r)
+				clientErr := panicClientError(r)
 				if seg != nil && seg.Seg != nil {
-					_ = seg.Seg.AddError(recErr)
+					_ = seg.Seg.AddError(traceErr)
 					seg.Close()
 				}
-				err = status.Error(codes.Internal, recErr.Error())
+				err = status.Error(codes.Internal, clientErr.Error())
 				return
 			}
 			if seg != nil && seg.Seg != nil {
@@ -319,12 +332,13 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 	// global panic guard even when X-Ray is disabled
 	defer func() {
 		if r := recover(); r != nil {
-			recErr := panicError(r)
+			traceErr := panicTraceError(r)
+			clientErr := panicClientError(r)
 			if seg != nil && seg.Seg != nil {
-				_ = seg.Seg.AddError(recErr)
+				_ = seg.Seg.AddError(traceErr)
 				seg.Close()
 			}
-			err = status.Error(codes.Internal, recErr.Error())
+			err = status.Error(codes.Internal, clientErr.Error())
 			return
 		}
 		if seg != nil && seg.Seg != nil {
