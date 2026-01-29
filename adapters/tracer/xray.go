@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
-	"strconv"
 	"strings"
 
 	util "github.com/aldelo/common"
@@ -130,7 +129,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		parentSegID, parentTraceID := "", ""
 		if md, ok := metadata.FromIncomingContext(ctx); ok {
 			// accept both canonical X-Ray header and legacy short key
-			parentSegID, parentTraceID, _ = extractParentIDs(md)
+			parentSegID, parentTraceID = extractParentIDs(md)
 		}
 
 		// Create segment with optional parent.
@@ -156,7 +155,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		outgoingMD := metadata.New(nil)
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
 		traceHeader := formatTraceHeader(seg.Seg.TraceID, seg.Seg.ID, seg.Seg.Sampled)
-		outgoingMD.Set("x-amzn-trace-id", seg.Seg.TraceID)
+		outgoingMD.Set("x-amzn-trace-id", traceHeader)
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 		if hdrErr := grpc.SendHeader(segCtx, outgoingMD); hdrErr != nil {
@@ -194,17 +193,6 @@ func extractParentIDs(md metadata.MD) (segID, traceID string) {
 				traceID = kv[1]
 			case "parent":
 				segID = kv[1]
-			case "sampled":
-				// tolerate "1/0", "true/false"
-				if b, err := strconv.ParseBool(kv[1]); err == nil {
-					sampled = &b
-				} else if kv[1] == "1" {
-					t := true
-					sampled = &t
-				} else if kv[1] == "0" {
-					f := false
-					sampled = &f
-				}
 			}
 		}
 	}
@@ -362,7 +350,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 
 		if incomingMD, ok = metadata.FromIncomingContext(ctx); ok {
 			// accept both canonical X-Ray header and legacy short key
-			parentSegID, parentTraceID, _ = extractParentIDs(incomingMD)
+			parentSegID, parentTraceID = extractParentIDs(incomingMD)
 		}
 
 		// use fullMethod (with safe fallback) instead of directly dereferencing info
@@ -397,7 +385,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		// write both AWS standard and legacy header names
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
 		traceHeader := formatTraceHeader(seg.Seg.TraceID, seg.Seg.ID, seg.Seg.Sampled)
-		outgoingMD.Set("x-amzn-trace-id", seg.Seg.TraceID)
+		outgoingMD.Set("x-amzn-trace-id", traceHeader)
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 		// surface header send failures to the caller and trace
