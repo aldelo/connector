@@ -44,6 +44,9 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 		defer func() {
 			if r := recover(); r != nil {
 				recErr := panicError(r)
+				if segCtx := awsxray.GetSegment(ctx); segCtx != nil {
+					_ = segCtx.AddError(recErr)
+				}
 				if seg != nil && seg.Seg != nil {
 					_ = seg.Seg.AddError(recErr)
 					seg.Close()
@@ -388,19 +391,12 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 
 		// avoid mutating incoming metadata; build an outgoing copy
 		outgoingMD := metadata.New(nil)
-		if incomingMD != nil {
-			for k, v := range incomingMD {
-				outgoingMD[k] = append([]string(nil), v...)
-			}
-		}
-		// write both AWS standard and legacy header names
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
 		traceHeader := formatTraceHeader(seg.Seg.TraceID, seg.Seg.ID, seg.Seg.Sampled)
 		outgoingMD.Set("x-amzn-trace-id", traceHeader)
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
-		// surface header send failures to the caller and trace
-		if hdrErr := wrappedStream.SendHeader(outgoingMD); hdrErr != nil {
+		if hdrErr := grpc.SetHeader(segCtx, outgoingMD); hdrErr != nil {
 			if seg != nil && seg.Seg != nil { // guard segment before use
 				_ = seg.Seg.AddError(hdrErr)
 			}
