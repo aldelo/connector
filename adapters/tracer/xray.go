@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/xray"
@@ -173,7 +174,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 type contextServerStream struct {
 	grpc.ServerStream
 	ctx        context.Context
-	headerSent bool
+	headerSent atomic.Bool
 }
 
 func (w *contextServerStream) Context() context.Context {
@@ -182,13 +183,13 @@ func (w *contextServerStream) Context() context.Context {
 
 // track header send when handler or interceptor calls SendHeader.
 func (w *contextServerStream) SendHeader(md metadata.MD) error {
-	w.headerSent = true
+	w.headerSent.Store(true)
 	return w.ServerStream.SendHeader(md)
 }
 
 // mark headers as sent when the first message goes out (gRPC auto-sends headers on first SendMsg).
 func (w *contextServerStream) SendMsg(m interface{}) error {
-	w.headerSent = true
+	w.headerSent.Store(true)
 	return w.ServerStream.SendMsg(m)
 }
 
@@ -407,7 +408,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		err = handler(srv, wrappedStream)
 
 		// if handler never sent headers (no SendHeader/SendMsg), flush staged headers now.
-		if !wrappedStream.headerSent {
+		if !wrappedStream.headerSent.Load() {
 			if sendErr := wrappedStream.SendHeader(nil); sendErr != nil {
 				if seg != nil && seg.Seg != nil {
 					_ = seg.Seg.AddError(sendErr)
