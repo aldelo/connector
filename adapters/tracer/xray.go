@@ -160,7 +160,8 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		outgoingMD.Set("x-amzn-trace-id", traceHeader)
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
-		if hdrErr := grpc.SendHeader(segCtx, outgoingMD); hdrErr != nil {
+		// stage headers (do not flush yet) so the handler can merge/override its own metadata
+		if hdrErr := grpc.SetHeader(segCtx, outgoingMD); hdrErr != nil {
 			_ = seg.Seg.AddError(hdrErr)
 			err = status.Error(codes.Internal, hdrErr.Error())
 			return nil, err
