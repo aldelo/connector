@@ -101,6 +101,15 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 			}
 		}()
 
+		// honor upstream Sampled=0 headers even when no segment is present
+		if md, ok := metadata.FromOutgoingContext(ctx); ok {
+			_, _, sampled, _ := extractParentIDs(md)
+			if sampled != nil && !*sampled {
+				// do not create or propagate tracing; respect upstream opt-out
+				return invoker(ctx, method, req, reply, cc, opts...)
+			}
+		}
+
 		if !xray.XRayServiceOn() {
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
