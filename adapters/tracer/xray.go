@@ -450,10 +450,13 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			if parentTraceID != "" {
 				outgoingMD.Set("x-amzn-tr-id", parentTraceID)
 			}
-			if hdrErr := grpc.SetHeader(ctx, outgoingMD); hdrErr != nil {
+
+			// force header delivery even if handler never sends headers/messages
+			if hdrErr := ss.SendHeader(outgoingMD); hdrErr != nil {
 				err = status.Error(codes.Internal, hdrErr.Error())
 				return err
 			}
+
 			return handler(srv, ss)
 		}
 
