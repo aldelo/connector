@@ -1,7 +1,7 @@
 package client
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1108,6 +1108,8 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 		timeout = 5 * time.Second
 	}
 
+	expireDateTime := time.Now().Add(timeout)
+
 	//
 	// check if service is ready
 	// wait for target service to respond with serving status before moving forward
@@ -1118,21 +1120,27 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 	chanErrorInfo := make(chan string)
 
 	go func() {
+		defer wg.Done()
+
 		for {
 			if status, e := c.HealthProbe("", timeout); e != nil {
 				c._z.Errorf("Health Status Check Failed: %s", e.Error())
-				wg.Done()
 				chanErrorInfo <- "Health Status Check Failed: " + e.Error()
 				return
 			} else {
 				if status == grpc_health_v1.HealthCheckResponse_SERVING {
 					c._z.Printf("Serving Status Detected")
-					wg.Done()
 					chanErrorInfo <- "OK"
 					return
 				} else {
 					c._z.Warnf("Not Serving!")
 				}
+			}
+
+			if time.Now().After(expireDateTime) {
+				c._z.Warnf("Health Status Check Timeout")
+				chanErrorInfo <- "Health Status Check Failed: Timeout"
+				return
 			}
 
 			time.Sleep(2500 * time.Millisecond)
@@ -1148,10 +1156,10 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 	if errInfo == "OK" {
 		// success - server service health = serving
 		return nil
-	} else {
-		// failure
-		return fmt.Errorf(errInfo)
 	}
+
+	// failure
+	return fmt.Errorf(errInfo)
 }
 
 // setupHealthManualChecker sets up the HealthChecker for manual use by HealthProbe method
@@ -1807,21 +1815,17 @@ func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req 
 		parentSegID := ""
 		parentTraceID := ""
 
-		var md metadata.MD
-		var ok bool
-
-		if md, ok = metadata.FromIncomingContext(ctx); ok {
+		// use outgoing metadata on the client side
+		if md, ok := metadata.FromOutgoingContext(ctx); ok {
 			if v, ok2 := md["x-amzn-seg-id"]; ok2 && len(v) > 0 {
 				parentSegID = v[0]
 			}
-
 			if v, ok2 := md["x-amzn-tr-id"]; ok2 && len(v) > 0 {
 				parentTraceID = v[0]
 			}
 		}
 
 		var seg *xray.XSegment
-
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
 			seg = xray.NewSegment("GrpcClient-UnaryRPC-"+method, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
@@ -1837,21 +1841,18 @@ func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req 
 			}
 		}()
 
-		if md == nil {
-			md = make(metadata.MD)
-		}
-
+		md := metadata.New(nil)
 		md.Set("x-amzn-seg-id", seg.Seg.ID)
 		md.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
-		// header is sent by itself
-		_ = grpc.SendHeader(ctx, md)
+		// attach tracing headers to outgoing context
+		ctx = metadata.NewOutgoingContext(ctx, md)
 
 		err = invoker(ctx, method, req, reply, cc, opts...)
 		return err
-	} else {
-		return invoker(ctx, method, req, reply, cc, opts...)
 	}
+
+	return invoker(ctx, method, req, reply, cc, opts...)
 }
 
 func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (cs grpc.ClientStream, err error) {
@@ -1863,9 +1864,6 @@ func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamD
 		parentSegID := ""
 		parentTraceID := ""
 
-		var md metadata.MD
-		var ok bool
-
 		streamType := "StreamRPC"
 		if desc.ClientStreams {
 			streamType = "Client" + streamType
@@ -1873,18 +1871,16 @@ func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamD
 			streamType = "Server" + streamType
 		}
 
-		if md, ok = metadata.FromIncomingContext(ctx); ok {
+		if md, ok := metadata.FromOutgoingContext(ctx); ok {
 			if v, ok2 := md["x-amzn-seg-id"]; ok2 && len(v) > 0 {
 				parentSegID = v[0]
 			}
-
 			if v, ok2 := md["x-amzn-tr-id"]; ok2 && len(v) > 0 {
 				parentTraceID = v[0]
 			}
 		}
 
 		var seg *xray.XSegment
-
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
 			seg = xray.NewSegment("GrpcClient-"+streamType+"-"+method, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
@@ -1900,14 +1896,12 @@ func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamD
 			}
 		}()
 
-		if md == nil {
-			md = make(metadata.MD)
-		}
-
+		md := metadata.New(nil)
 		md.Set("x-amzn-seg-id", seg.Seg.ID)
 		md.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
-		_ = grpc.SendHeader(ctx, md)
+		// attach tracing headers to outgoing context for the stream
+		ctx = metadata.NewOutgoingContext(ctx, md)
 
 		cs, err = streamer(ctx, desc, cc, method, opts...)
 		return cs, err
