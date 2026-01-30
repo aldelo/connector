@@ -1,7 +1,7 @@
 package client
 
 /*
- * Copyright 2020-2023 Aldelo, LP
+ * Copyright 2020-2026 Aldelo, LP
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,11 +17,12 @@ package client
  */
 
 import (
-	util "github.com/aldelo/common"
 	"log"
 	"strings"
 	"sync"
 	"time"
+
+	util "github.com/aldelo/common"
 )
 
 type Cache struct {
@@ -40,6 +41,17 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	}
 
 	if len(eps) == 0 {
+		return
+	}
+
+	// sanitize incoming endpoints to drop nil entries and avoid panics
+	sanitized := make([]*serviceEndpoint, 0, len(eps))
+	for _, v := range eps {
+		if v != nil {
+			sanitized = append(sanitized, v)
+		}
+	}
+	if len(sanitized) == 0 {
 		return
 	}
 
@@ -64,17 +76,19 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 		set := make(map[string]*serviceEndpoint)
 
 		for _, v := range list {
+			if v == nil {
+				continue // skip nil to avoid panic
+			}
 			k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port))
 			set[k] = v
 		}
 
-		for _, v := range eps {
+		for _, v := range sanitized {
 			k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port))
 			set[k] = v
 		}
 
-		lst := []*serviceEndpoint{}
-
+		lst := make([]*serviceEndpoint, 0, len(set))
 		for _, v := range set {
 			lst = append(lst, v)
 		}
@@ -91,12 +105,12 @@ func (c *Cache) PurgeServiceEndpoints(serviceName string) {
 		return
 	}
 
+	c._mu.Lock()
+	defer c._mu.Unlock()
+
 	if c.ServiceEndpoints == nil {
 		return
 	}
-
-	c._mu.Lock()
-	defer c._mu.Unlock()
 
 	serviceName = strings.ToLower(serviceName)
 	if !c.DisableLogging {
@@ -192,10 +206,13 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	c._mu.Lock()
 	defer c._mu.Unlock()
 
+	if c.ServiceEndpoints == nil {
+		return []*serviceEndpoint{}
+	}
+
 	serviceName = strings.ToLower(serviceName)
 
 	eps, ok := c.ServiceEndpoints[serviceName]
-
 	if !ok {
 		if !c.DisableLogging {
 			log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + "None Found")
@@ -203,62 +220,72 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 		return []*serviceEndpoint{}
 	}
 
-	if len(eps) > 0 {
-		if !c.DisableLogging {
-			log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + util.Itoa(len(eps)) + " Found")
-		}
-		expiredList := []int{}
-
-		if !ignExp {
-			for i, v := range eps {
-				if v.CacheExpire.After(time.Now()) {
-					// not yet expired
-					if util.LenTrim(version) > 0 {
-						// has version, check to match version
-						if strings.ToLower(v.Version) != strings.ToLower(version) {
-							if !c.DisableLogging {
-								log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
-							}
-							continue
-						}
-					}
-
-					liveEndpoints = append(liveEndpoints, v)
-				} else {
-					if !c.DisableLogging {
-						log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
-					}
-					expiredList = append(expiredList, i)
-				}
-			}
-		} else {
-			for _, v := range eps {
-				liveEndpoints = append(liveEndpoints, v)
-			}
-		}
-
-		// remove expired entries
-		if len(expiredList) > 0 {
-			for _, v := range expiredList {
-				eps[v] = nil
-			}
-
-			newEps := []*serviceEndpoint{}
-
-			for _, v := range eps {
-				if v != nil {
-					newEps = append(newEps, v)
-				}
-			}
-
-			c.ServiceEndpoints[serviceName] = newEps
-		}
-
-		if !c.DisableLogging {
-			log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': " + util.Itoa(len(liveEndpoints)) + " Returned")
-		}
-		return
-	} else {
+	if len(eps) == 0 {
 		return []*serviceEndpoint{}
 	}
+
+	if !c.DisableLogging {
+		log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + util.Itoa(len(eps)) + " Found")
+	}
+
+	expiredList := []int{}
+
+	if !ignExp {
+		for i, v := range eps {
+			if v == nil { // guard nil to avoid panic
+				expiredList = append(expiredList, i)
+				continue
+			}
+
+			if v.CacheExpire.After(time.Now()) {
+				// not yet expired
+				if util.LenTrim(version) > 0 {
+					// has version, check to match version
+					if strings.ToLower(v.Version) != strings.ToLower(version) {
+						if !c.DisableLogging {
+							log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
+						}
+						continue
+					}
+				}
+
+				liveEndpoints = append(liveEndpoints, v)
+			} else {
+				if !c.DisableLogging {
+					log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
+				}
+				expiredList = append(expiredList, i)
+			}
+		}
+	} else {
+		for _, v := range eps {
+			if v == nil { // skip nil to avoid panic
+				continue
+			}
+			liveEndpoints = append(liveEndpoints, v)
+		}
+	}
+
+	// remove expired entries
+	if len(expiredList) > 0 {
+		for _, idx := range expiredList {
+			if idx >= 0 && idx < len(eps) {
+				eps[idx] = nil
+			}
+		}
+
+		newEps := make([]*serviceEndpoint, 0, len(eps))
+		for _, v := range eps {
+			if v != nil {
+				newEps = append(newEps, v)
+			}
+		}
+
+		c.ServiceEndpoints[serviceName] = newEps
+	}
+
+	if !c.DisableLogging {
+		log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': " + util.Itoa(len(liveEndpoints)) + " Returned")
+	}
+	return
 }
