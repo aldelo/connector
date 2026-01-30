@@ -97,6 +97,12 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 
 	if list, ok := c.ServiceEndpoints[serviceName]; ok {
 		for _, v := range list {
+			if v == nil { // drop nil existing entries
+				continue
+			}
+			if !v.CacheExpire.IsZero() && v.CacheExpire.Before(now) { // drop expired existing entries so fresh ones can replace them
+				continue
+			}
 			k := buildKey(v)
 			if k == "" {
 				continue // skip malformed/nil
@@ -194,44 +200,37 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 		if !c.DisableLogging {
 			log.Println("Cached Service Endpoint Purging OK: No Endpoints Found for " + serviceName)
 		}
-	} else {
-		removeIndex := -1
+		return
+	}
 
-		for idx, v := range eps {
-			if v != nil {
-				vHost := strings.ToLower(strings.TrimSpace(v.Host))
-				if vHost == hostNormalized && v.Port == port {
-					// found
-					removeIndex = idx
-					break
-				}
+	newEps := make([]*serviceEndpoint, 0, len(eps)) // replace util.SliceDeleteElement with safe manual filter
+	found := false
+
+	for _, v := range eps {
+		if v != nil {
+			vHost := strings.ToLower(strings.TrimSpace(v.Host))
+			if vHost == hostNormalized && v.Port == port {
+				// found
+				found = true
+				continue
 			}
 		}
+		newEps = append(newEps, v)
+	}
 
-		if removeIndex >= 0 {
-			if s := util.SliceDeleteElement(eps, removeIndex); s == nil {
-				delete(c.ServiceEndpoints, serviceName)
-			} else {
-				if newEps, epsOk := s.([]*serviceEndpoint); !epsOk {
-					delete(c.ServiceEndpoints, serviceName)
-				} else {
-					// also remove the map entry if the resulting slice is empty.
-					if len(newEps) == 0 {
-						delete(c.ServiceEndpoints, serviceName)
-					} else {
-						c.ServiceEndpoints[serviceName] = newEps
-					}
-				}
-			}
-
-			if !c.DisableLogging {
-				log.Println("Cached Service Endpoint Purging OK: Endpoint '" + hostNormalized + ":" + util.UintToStr(port) + "' Removed From " + serviceName)
-			}
-
+	if found {
+		if len(newEps) == 0 {
+			delete(c.ServiceEndpoints, serviceName)
 		} else {
-			if !c.DisableLogging {
-				log.Println("Cached Service Endpoint Purging OK: No Endpoint Found '" + hostNormalized + ":" + util.UintToStr(port) + "' In " + serviceName)
-			}
+			c.ServiceEndpoints[serviceName] = newEps
+		}
+
+		if !c.DisableLogging {
+			log.Println("Cached Service Endpoint Purging OK: Endpoint '" + hostNormalized + ":" + util.UintToStr(port) + "' Removed From " + serviceName)
+		}
+	} else {
+		if !c.DisableLogging {
+			log.Println("Cached Service Endpoint Purging OK: No Endpoint Found '" + hostNormalized + ":" + util.UintToStr(port) + "' In " + serviceName)
 		}
 	}
 }
@@ -279,7 +278,6 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	now := time.Now()
 	expiredList := []int{}
 	live := make([]*serviceEndpoint, 0, len(eps))
-	needsCompaction := false
 
 	if !ignExp {
 		for i, v := range eps {
@@ -306,9 +304,13 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 			}
 		}
 	} else {
-		for _, v := range eps {
+		for i, v := range eps {
 			if v == nil { // skip nil to avoid panic
-				needsCompaction = true
+				expiredList = append(expiredList, i)
+				continue
+			}
+			vVersion := strings.ToLower(strings.TrimSpace(v.Version)) // version filter even when ignoring expiry
+			if util.LenTrim(versionNormalized) > 0 && vVersion != versionNormalized {
 				continue
 			}
 			live = append(live, v)
@@ -316,7 +318,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	}
 
 	// remove expired entries
-	if len(expiredList) > 0 || needsCompaction {
+	if len(expiredList) > 0 {
 		for _, idx := range expiredList {
 			if idx >= 0 && idx < len(eps) {
 				eps[idx] = nil
