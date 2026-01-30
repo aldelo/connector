@@ -582,14 +582,8 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			stagedMD:     nil,
 		}
 
-		// send headers immediately so they are guaranteed to reach the client
-		// even if the handler never writes messages or calls SendHeader.
+		// only stage headers here; let handler add/override, and flush later to avoid ErrIllegalHeaderWrite.
 		if hdrErr := wrappedStream.SetHeader(outgoingMD); hdrErr != nil {
-			_ = seg.Seg.AddError(hdrErr)
-			err = status.Error(codes.Internal, hdrErr.Error())
-			return err
-		}
-		if hdrErr := wrappedStream.SendHeader(nil); hdrErr != nil {
 			_ = seg.Seg.AddError(hdrErr)
 			err = status.Error(codes.Internal, hdrErr.Error())
 			return err
