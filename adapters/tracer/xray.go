@@ -485,13 +485,31 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 				outgoingMD.Set("x-amzn-tr-id", parentTraceID)
 			}
 
-			// force header delivery even if handler never sends headers/messages
-			if hdrErr := ss.SendHeader(outgoingMD); hdrErr != nil {
+			wrappedStream := &contextServerStream{
+				ServerStream: ss,
+				ctx:          ctx,
+				headerSent:   &headerSent,
+				stagedMD:     outgoingMD, // stage for merge/flush
+			}
+
+			// Stage headers (do not force-send yet) to avoid duplicate-send errors if handler calls SendHeader.
+			if hdrErr := wrappedStream.SetHeader(outgoingMD); hdrErr != nil {
 				err = status.Error(codes.Internal, hdrErr.Error())
 				return err
 			}
 
-			return handler(srv, ss)
+			err = handler(srv, wrappedStream)
+
+			// Ensure headers flush once if handler sent nothing.
+			if !headerSent {
+				if hdrErr := wrappedStream.SendHeader(nil); hdrErr != nil {
+					if err == nil {
+						err = status.Error(codes.Internal, hdrErr.Error())
+					}
+				}
+			}
+
+			return err
 		}
 
 		segmentName := sanitizeSegmentName("GrpcService-"+streamType+"-", fullMethod)
