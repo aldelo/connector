@@ -310,13 +310,20 @@ func extractParentIDs(md metadata.MD) (segID, traceID string, sampled *bool, raw
 	return
 }
 
-// formatTraceHeader builds the canonical AWS X-Ray header value. // NEW
+// formatTraceHeader builds the canonical AWS X-Ray header value.
 func formatTraceHeader(traceID, parentID string, sampled bool) string {
 	sampledVal := "0"
 	if sampled {
 		sampledVal = "1"
 	}
-	return fmt.Sprintf("Root=%s;Parent=%s;Sampled=%s", traceID, parentID, sampledVal)
+
+	parts := []string{fmt.Sprintf("Root=%s", traceID)}
+	if strings.TrimSpace(parentID) != "" {
+		parts = append(parts, fmt.Sprintf("Parent=%s", parentID))
+	}
+	parts = append(parts, fmt.Sprintf("Sampled=%s", sampledVal))
+
+	return strings.Join(parts, ";")
 }
 
 // TracerUnaryServerInterceptor will perform xray tracing for each unary RPC call
@@ -501,10 +508,10 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		outgoingMD.Set("x-amzn-trace-id", traceHeader)
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
-		if hdrErr := grpc.SetHeader(segCtx, outgoingMD); hdrErr != nil {
-			if seg != nil && seg.Seg != nil { // guard segment before use
-				_ = seg.Seg.AddError(hdrErr)
-			}
+		// send headers immediately so they are guaranteed to reach the client
+		// even if the handler never writes messages or calls SendHeader.
+		if hdrErr := wrappedStream.SendHeader(outgoingMD); hdrErr != nil {
+			_ = seg.Seg.AddError(hdrErr)
 			err = status.Error(codes.Internal, hdrErr.Error())
 			return err
 		}
