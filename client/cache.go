@@ -65,7 +65,8 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 		if !cp.CacheExpire.IsZero() && cp.CacheExpire.Before(now) { // drop expired
 			continue
 		}
-		sanitized = append(sanitized, &cp)
+		cpCopy := cp
+		sanitized = append(sanitized, &cpCopy)
 	}
 	if len(sanitized) == 0 {
 		return
@@ -197,10 +198,13 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 		removeIndex := -1
 
 		for idx, v := range eps {
-			if v != nil && strings.ToLower(v.Host) == hostNormalized && v.Port == port {
-				// found
-				removeIndex = idx
-				break
+			if v != nil {
+				vHost := strings.ToLower(strings.TrimSpace(v.Host))
+				if vHost == hostNormalized && v.Port == port {
+					// found
+					removeIndex = idx
+					break
+				}
 			}
 		}
 
@@ -284,7 +288,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 				continue
 			}
 
-			if v.CacheExpire.After(now) {
+			if v.CacheExpire.IsZero() || v.CacheExpire.After(now) {
 				vVersion := strings.ToLower(strings.TrimSpace(v.Version))
 				if util.LenTrim(versionNormalized) > 0 && vVersion != versionNormalized {
 					// has version, check to match version
