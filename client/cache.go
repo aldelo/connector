@@ -181,8 +181,9 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 	defer c._mu.Unlock()
 
 	serviceName = strings.ToLower(serviceName)
+	hostNormalized := strings.ToLower(strings.TrimSpace(host))
 	if !c.DisableLogging {
-		log.Println("Cached Service Endpoint Purging " + host + ":" + util.UintToStr(port) + " From " + serviceName + "...")
+		log.Println("Cached Service Endpoint Purging " + hostNormalized + ":" + util.UintToStr(port) + " From " + serviceName + "...")
 	}
 
 	eps, ok := c.ServiceEndpoints[serviceName]
@@ -196,7 +197,7 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 		removeIndex := -1
 
 		for idx, v := range eps {
-			if v != nil && strings.ToLower(v.Host) == strings.ToLower(host) && v.Port == port {
+			if v != nil && strings.ToLower(v.Host) == hostNormalized && v.Port == port {
 				// found
 				removeIndex = idx
 				break
@@ -220,12 +221,12 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 			}
 
 			if !c.DisableLogging {
-				log.Println("Cached Service Endpoint Purging OK: Endpoint '" + host + ":" + util.UintToStr(port) + "' Removed From " + serviceName)
+				log.Println("Cached Service Endpoint Purging OK: Endpoint '" + hostNormalized + ":" + util.UintToStr(port) + "' Removed From " + serviceName)
 			}
 
 		} else {
 			if !c.DisableLogging {
-				log.Println("Cached Service Endpoint Purging OK: No Endpoint Found '" + host + ":" + util.UintToStr(port) + "' In " + serviceName)
+				log.Println("Cached Service Endpoint Purging OK: No Endpoint Found '" + hostNormalized + ":" + util.UintToStr(port) + "' In " + serviceName)
 			}
 		}
 	}
