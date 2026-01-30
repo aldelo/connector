@@ -254,7 +254,18 @@ func (w *contextServerStream) Context() context.Context {
 
 // stage headers (merge with existing) without sending; preserves handler-set headers
 func (w *contextServerStream) SetHeader(md metadata.MD) error {
-	w.stagedMD = metadata.Join(w.stagedMD, md)
+	// If caller provides nil, do nothing; avoid sending nil metadata.
+	if md == nil {
+		return nil
+	}
+	// Make a copy of incoming MD to avoid mutating caller-owned maps.
+	incoming := metadata.Join(nil, md)
+
+	w.stagedMD = metadata.Join(w.stagedMD, incoming)
+	if w.stagedMD == nil {
+		// Ensure we never attempt to send a nil header block.
+		w.stagedMD = metadata.MD{}
+	}
 	return w.ServerStream.SetHeader(w.stagedMD)
 }
 
@@ -264,6 +275,9 @@ func (w *contextServerStream) SendHeader(md metadata.MD) error {
 		return nil
 	}
 	merged := metadata.Join(w.stagedMD, md)
+	if merged == nil {
+		merged = metadata.MD{}
+	}
 	if w.headerSent != nil {
 		*w.headerSent = true
 	}
@@ -489,7 +503,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 				ServerStream: ss,
 				ctx:          ctx,
 				headerSent:   &headerSent,
-				stagedMD:     outgoingMD, // stage for merge/flush
+				stagedMD:     nil,
 			}
 
 			// Stage headers (do not force-send yet) to avoid duplicate-send errors if handler calls SendHeader.
@@ -540,7 +554,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			ServerStream: ss,
 			ctx:          segCtx,
 			headerSent:   &headerSent,
-			stagedMD:     outgoingMD, // stage headers for merge/flush
+			stagedMD:     nil,
 		}
 
 		// send headers immediately so they are guaranteed to reach the client
