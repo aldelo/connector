@@ -95,6 +95,9 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 			return ""
 		}
 		host := strings.ToLower(strings.TrimSpace(e.Host))
+		if host == "" || e.Port == 0 { // drop invalid existing entries (empty host or zero port)
+			return ""
+		}
 		ver := strings.ToLower(strings.TrimSpace(e.Version))
 		return host + ":" + util.UintToStr(e.Port) + "|" + ver
 	}
