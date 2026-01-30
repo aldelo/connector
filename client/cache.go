@@ -103,7 +103,7 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	}
 
 	// stable, deduplicated merge (preserve existing order, then new)
-	seen := make(map[string]struct{})
+	seen := make(map[string]int)
 	merged := make([]*serviceEndpoint, 0)
 
 	if list, ok := c.ServiceEndpoints[serviceName]; ok {
@@ -118,10 +118,11 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 			if k == "" {
 				continue // skip malformed/nil
 			}
-			if _, exists := seen[k]; exists {
+			if idx, exists := seen[k]; exists {
+				merged[idx] = v
 				continue
 			}
-			seen[k] = struct{}{}
+			seen[k] = len(merged)
 			merged = append(merged, v)
 		}
 		if !c.DisableLogging {
@@ -138,10 +139,11 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 		if k == "" {
 			continue // guard
 		}
-		if _, exists := seen[k]; exists {
+		if idx, exists := seen[k]; exists {
+			merged[idx] = v
 			continue
 		}
-		seen[k] = struct{}{}
+		seen[k] = len(merged)
 		merged = append(merged, v)
 	}
 
