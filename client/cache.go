@@ -48,13 +48,24 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 		return
 	}
 
+	now := time.Now()
+
 	// sanitize incoming endpoints to drop nil entries and avoid panics
 	sanitized := make([]*serviceEndpoint, 0, len(eps))
 	for _, v := range eps {
-		if v != nil {
-			cp := *v
-			sanitized = append(sanitized, &cp)
+		if v == nil {
+			continue
 		}
+		cp := *v
+		cp.Host = strings.TrimSpace(cp.Host)
+		cp.Version = strings.TrimSpace(cp.Version)
+		if cp.Host == "" || cp.Port == 0 { // drop invalid
+			continue
+		}
+		if !cp.CacheExpire.IsZero() && cp.CacheExpire.Before(now) { // drop expired
+			continue
+		}
+		sanitized = append(sanitized, &cp)
 	}
 	if len(sanitized) == 0 {
 		return
@@ -69,16 +80,26 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 
 	serviceName = strings.ToLower(serviceName)
 
+	// shared key builder with normalized host/version
+	buildKey := func(e *serviceEndpoint) string {
+		if e == nil {
+			return ""
+		}
+		host := strings.ToLower(strings.TrimSpace(e.Host))
+		ver := strings.ToLower(strings.TrimSpace(e.Version))
+		return host + ":" + util.UintToStr(e.Port) + "|" + ver
+	}
+
 	// stable, deduplicated merge (preserve existing order, then new)
 	seen := make(map[string]struct{})
 	merged := make([]*serviceEndpoint, 0)
 
 	if list, ok := c.ServiceEndpoints[serviceName]; ok {
 		for _, v := range list {
-			if v == nil {
-				continue
+			k := buildKey(v)
+			if k == "" {
+				continue // skip malformed/nil
 			}
-			k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port) + "|" + strings.ToLower(strings.TrimSpace(v.Version)))
 			if _, exists := seen[k]; exists {
 				continue
 			}
@@ -95,7 +116,10 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	}
 
 	for _, v := range sanitized {
-		k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port) + "|" + strings.ToLower(strings.TrimSpace(v.Version)))
+		k := buildKey(v)
+		if k == "" {
+			continue // guard
+		}
 		if _, exists := seen[k]; exists {
 			continue
 		}
@@ -233,6 +257,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	}
 
 	serviceName = strings.ToLower(serviceName)
+	versionNormalized := strings.ToLower(strings.TrimSpace(version))
 
 	eps, ok := c.ServiceEndpoints[serviceName]
 	if !ok || len(eps) == 0 {
@@ -259,7 +284,8 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 			}
 
 			if v.CacheExpire.After(now) {
-				if util.LenTrim(version) > 0 && strings.ToLower(v.Version) != strings.ToLower(version) {
+				vVersion := strings.ToLower(strings.TrimSpace(v.Version))
+				if util.LenTrim(versionNormalized) > 0 && vVersion != versionNormalized {
 					// has version, check to match version
 					if !c.DisableLogging {
 						log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
