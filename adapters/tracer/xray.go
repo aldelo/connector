@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	util "github.com/aldelo/common"
@@ -263,6 +264,8 @@ type contextServerStream struct {
 	ctx        context.Context
 	headerSent *uint32
 	stagedMD   metadata.MD
+
+	mu sync.Mutex
 }
 
 func (w *contextServerStream) Context() context.Context {
@@ -277,11 +280,14 @@ func (w *contextServerStream) SetHeader(md metadata.MD) error {
 	}
 	// Make a copy of incoming MD to avoid mutating caller-owned maps.
 	incoming := metadata.Join(nil, md)
+
+	w.mu.Lock()
 	w.stagedMD = metadata.Join(w.stagedMD, incoming)
 	if w.stagedMD == nil {
 		// Ensure we never attempt to send a nil header block.
 		w.stagedMD = metadata.MD{}
 	}
+	w.mu.Unlock()
 	return nil
 }
 
@@ -291,6 +297,8 @@ func (w *contextServerStream) SendHeader(md metadata.MD) error {
 	if w.headerSent != nil && atomic.LoadUint32(w.headerSent) == 1 {
 		return nil
 	}
+
+	w.mu.Lock()
 	merged := metadata.Join(w.stagedMD, md)
 	if merged == nil {
 		merged = metadata.MD{}
@@ -298,6 +306,8 @@ func (w *contextServerStream) SendHeader(md metadata.MD) error {
 	if w.headerSent != nil {
 		atomic.StoreUint32(w.headerSent, 1)
 	}
+	w.mu.Unlock()
+
 	return w.ServerStream.SendHeader(merged)
 }
 
