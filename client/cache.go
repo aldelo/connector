@@ -114,11 +114,11 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 			merged = append(merged, v)
 		}
 		if !c.DisableLogging {
-			log.Println("Adding New Service Endpoints for " + serviceName)
+			log.Println("Appending New Service Endpoints for " + serviceName)
 		}
 	} else {
 		if !c.DisableLogging {
-			log.Println("Appending New Service Endpoints for " + serviceName)
+			log.Println("Adding New Service Endpoints for " + serviceName)
 		}
 	}
 
