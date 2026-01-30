@@ -73,7 +73,7 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 			if v == nil {
 				continue
 			}
-			k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port))
+			k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port) + "|" + strings.ToLower(strings.TrimSpace(v.Version)))
 			if _, exists := seen[k]; exists {
 				continue
 			}
@@ -90,7 +90,7 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	}
 
 	for _, v := range sanitized {
-		k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port))
+		k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port) + "|" + strings.ToLower(strings.TrimSpace(v.Version)))
 		if _, exists := seen[k]; exists {
 			continue
 		}
@@ -173,7 +173,12 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 				if newEps, epsOk := s.([]*serviceEndpoint); !epsOk {
 					delete(c.ServiceEndpoints, serviceName)
 				} else {
-					c.ServiceEndpoints[serviceName] = newEps
+					// also remove the map entry if the resulting slice is empty.
+					if len(newEps) == 0 {
+						delete(c.ServiceEndpoints, serviceName)
+					} else {
+						c.ServiceEndpoints[serviceName] = newEps
+					}
 				}
 			}
 
@@ -227,6 +232,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	now := time.Now()
 	expiredList := []int{}
 	live := make([]*serviceEndpoint, 0, len(eps))
+	needsCompaction := false
 
 	if !ignExp {
 		for i, v := range eps {
@@ -254,6 +260,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	} else {
 		for _, v := range eps {
 			if v == nil { // skip nil to avoid panic
+				needsCompaction = true
 				continue
 			}
 			live = append(live, v)
@@ -261,7 +268,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	}
 
 	// remove expired entries
-	if len(expiredList) > 0 {
+	if len(expiredList) > 0 || needsCompaction {
 		for _, idx := range expiredList {
 			if idx >= 0 && idx < len(eps) {
 				eps[idx] = nil
