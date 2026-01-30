@@ -68,7 +68,7 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 		if !c.DisableLogging {
 			log.Println("Adding New Service Endpoints for " + serviceName)
 		}
-		c.ServiceEndpoints[serviceName] = eps
+		c.ServiceEndpoints[serviceName] = sanitized
 	} else {
 		if !c.DisableLogging {
 			log.Println("Appending New Service Endpoints for " + serviceName)
