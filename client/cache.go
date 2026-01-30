@@ -52,7 +52,8 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	sanitized := make([]*serviceEndpoint, 0, len(eps))
 	for _, v := range eps {
 		if v != nil {
-			sanitized = append(sanitized, v)
+			cp := *v
+			sanitized = append(sanitized, &cp)
 		}
 	}
 	if len(sanitized) == 0 {
@@ -298,7 +299,11 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 			}
 		}
 
-		c.ServiceEndpoints[serviceName] = newEps
+		if len(newEps) == 0 { // drop empty slice to avoid stale map entries
+			delete(c.ServiceEndpoints, serviceName)
+		} else {
+			c.ServiceEndpoints[serviceName] = newEps
+		}
 	}
 
 	// defensive copy to avoid caller mutating shared cache entries
