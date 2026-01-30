@@ -277,16 +277,16 @@ func (w *contextServerStream) SetHeader(md metadata.MD) error {
 	}
 	// Make a copy of incoming MD to avoid mutating caller-owned maps.
 	incoming := metadata.Join(nil, md)
-
 	w.stagedMD = metadata.Join(w.stagedMD, incoming)
 	if w.stagedMD == nil {
 		// Ensure we never attempt to send a nil header block.
 		w.stagedMD = metadata.MD{}
 	}
-	return w.ServerStream.SetHeader(w.stagedMD)
+	return nil
 }
 
 // track header send when handler or interceptor calls SendHeader.
+// send exactly once, merging staged + provided metadata
 func (w *contextServerStream) SendHeader(md metadata.MD) error {
 	if w.headerSent != nil && atomic.LoadUint32(w.headerSent) == 1 {
 		return nil
@@ -302,6 +302,7 @@ func (w *contextServerStream) SendHeader(md metadata.MD) error {
 }
 
 // mark headers as sent when the first message goes out (gRPC auto-sends headers on first SendMsg).
+// ensure a single header send before first message
 func (w *contextServerStream) SendMsg(m interface{}) error {
 	if w.headerSent != nil && atomic.LoadUint32(w.headerSent) == 0 {
 		if err := w.SendHeader(nil); err != nil {
@@ -584,6 +585,11 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		// send headers immediately so they are guaranteed to reach the client
 		// even if the handler never writes messages or calls SendHeader.
 		if hdrErr := wrappedStream.SetHeader(outgoingMD); hdrErr != nil {
+			_ = seg.Seg.AddError(hdrErr)
+			err = status.Error(codes.Internal, hdrErr.Error())
+			return err
+		}
+		if hdrErr := wrappedStream.SendHeader(nil); hdrErr != nil {
 			_ = seg.Seg.AddError(hdrErr)
 			err = status.Error(codes.Internal, hdrErr.Error())
 			return err
