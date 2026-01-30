@@ -226,7 +226,9 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		outgoingMD := metadata.New(nil)
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
 		traceHeader := formatTraceHeader(seg.Seg.TraceID, seg.Seg.ID, seg.Seg.Sampled)
-		outgoingMD.Set("x-amzn-trace-id", traceHeader)
+		if traceHeader != "" {
+			outgoingMD.Set("x-amzn-trace-id", traceHeader)
+		}
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 		// stage headers (do not flush yet) so the handler can merge/override its own metadata
@@ -339,6 +341,11 @@ func extractParentIDs(md metadata.MD) (segID, traceID string, sampled *bool, raw
 
 // formatTraceHeader builds the canonical AWS X-Ray header value.
 func formatTraceHeader(traceID, parentID string, sampled bool) string {
+	if strings.TrimSpace(traceID) == "" {
+		// No Root => do not construct a header; callers should skip setting it.
+		return ""
+	}
+
 	sampledVal := "0"
 	if sampled {
 		sampledVal = "1"
@@ -547,7 +554,9 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		outgoingMD := metadata.New(nil)
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
 		traceHeader := formatTraceHeader(seg.Seg.TraceID, seg.Seg.ID, seg.Seg.Sampled)
-		outgoingMD.Set("x-amzn-trace-id", traceHeader)
+		if traceHeader != "" {
+			outgoingMD.Set("x-amzn-trace-id", traceHeader)
+		}
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 		wrappedStream := &contextServerStream{
