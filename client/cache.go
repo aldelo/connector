@@ -85,6 +85,9 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	}
 
 	serviceName = normalizeServiceName(serviceName)
+	if serviceName == "" { // guard empty key after normalization
+		return
+	}
 
 	// shared key builder with normalized host/version
 	buildKey := func(e *serviceEndpoint) string {
@@ -161,7 +164,10 @@ func (c *Cache) PurgeServiceEndpoints(serviceName string) {
 		return
 	}
 
-	serviceName = strings.ToLower(serviceName)
+	serviceName = normalizeServiceName(serviceName)
+	if serviceName == "" { // guard empty key after normalization
+		return
+	}
 	if !c.DisableLogging {
 		log.Println("Cached Service Endpoints Purged for " + serviceName)
 	}
@@ -192,7 +198,10 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 	c._mu.Lock()
 	defer c._mu.Unlock()
 
-	serviceName = strings.ToLower(serviceName)
+	serviceName = normalizeServiceName(serviceName)
+	if serviceName == "" { // guard empty key after normalization
+		return
+	}
 	hostNormalized := strings.ToLower(strings.TrimSpace(host))
 	if !c.DisableLogging {
 		log.Println("Cached Service Endpoint Purging " + hostNormalized + ":" + util.UintToStr(port) + " From " + serviceName + "...")
