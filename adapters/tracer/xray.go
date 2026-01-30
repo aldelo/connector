@@ -31,11 +31,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// enrich panic errors with stack traces for X-Ray and gRPC status propagation.
-func panicError(r interface{}) error {
-	return fmt.Errorf("panic: %v\n%s", r, debug.Stack())
-}
-
 // keep stack for tracing while avoiding leaking it to callers.
 func panicTraceError(r interface{}) error {
 	return fmt.Errorf("panic: %v\n%s", r, debug.Stack())
@@ -202,7 +197,13 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 			return handler(ctx, req)
 		}
 
-		segName := sanitizeSegmentName("GrpcService-UnaryRPC-", fullMethod)
+		// include serviceName in segment naming when provided.
+		segPrefix := "GrpcService-UnaryRPC-"
+		if strings.TrimSpace(serviceName) != "" {
+			segPrefix = sanitizeSegmentName("", serviceName+"-GrpcService-UnaryRPC-")
+		}
+		segName := sanitizeSegmentName(segPrefix, fullMethod)
+
 		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
 			seg = xray.NewSegment(segName, &xray.XRayParentSegment{
 				SegmentID: parentSegID,
@@ -491,7 +492,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 
 		// bind the segment into the stream context so downstream code can see it
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
-		wrappedStream := &contextServerStream{ServerStream: ss, ctx: segCtx}
+		wrappedStream := &contextServerStream{ServerStream: ss, ctx: segCtx, headerSent: &headerSent}
 
 		// avoid mutating incoming metadata; build an outgoing copy
 		outgoingMD := metadata.New(nil)
@@ -507,21 +508,9 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			err = status.Error(codes.Internal, hdrErr.Error())
 			return err
 		}
+		headerSent = true
 
 		err = handler(srv, wrappedStream)
-
-		// ensure headers are actually delivered even if handler sent no messages/headers.
-		if !headerSent {
-			if hdrErr := wrappedStream.SendHeader(outgoingMD); hdrErr != nil {
-				if seg != nil && seg.Seg != nil {
-					_ = seg.Seg.AddError(hdrErr)
-				}
-				if err == nil { // preserve handler error precedence
-					err = status.Error(codes.Internal, hdrErr.Error())
-				}
-			}
-		}
-
 		return err
 	}
 
