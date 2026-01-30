@@ -274,7 +274,10 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 		return []*serviceEndpoint{}
 	}
 
-	serviceName = strings.ToLower(serviceName)
+	serviceName = normalizeServiceName(serviceName) // normalize consistently
+	if serviceName == "" {                          // guard empty key after normalization
+		return []*serviceEndpoint{}
+	}
 	versionNormalized := strings.ToLower(strings.TrimSpace(version))
 
 	eps, ok := c.ServiceEndpoints[serviceName]
