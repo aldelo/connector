@@ -32,6 +32,11 @@ type Cache struct {
 	_mu            sync.Mutex
 }
 
+// normalize service names consistently across all cache operations
+func normalizeServiceName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 // AddServiceEndpoints will append slice of service endpoints associated with the given serviceName within map
 //
 // serviceName = lowercase of servicename.namespacename
@@ -79,7 +84,7 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 		c.ServiceEndpoints = make(map[string][]*serviceEndpoint)
 	}
 
-	serviceName = strings.ToLower(serviceName)
+	serviceName = normalizeServiceName(serviceName)
 
 	// shared key builder with normalized host/version
 	buildKey := func(e *serviceEndpoint) string {
