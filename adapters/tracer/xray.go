@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/xray"
@@ -73,6 +74,9 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 		var seg *xray.XSegment
 		createdSeg := false
 
+		// track incoming trace headers (if any) to parent synthetic segment when context lacks a segment
+		parentSegID, parentTraceID, sampled, _ := "", "", (*bool)(nil), ""
+
 		// global panic guard always installed to prevent client crashes on any path
 		defer func() {
 			if r := recover(); r != nil {
@@ -97,7 +101,7 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 
 		// honor upstream Sampled=0 headers even when no segment is present
 		if md, ok := metadata.FromOutgoingContext(ctx); ok {
-			_, _, sampled, _ := extractParentIDs(md)
+			parentSegID, parentTraceID, sampled, _ = extractParentIDs(md)
 			if sampled != nil && !*sampled {
 				// do not create or propagate tracing; respect upstream opt-out
 				return invoker(ctx, method, req, reply, cc, opts...)
@@ -115,7 +119,18 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 
 		// If there is no current segment, create a temporary one to ensure trace propagation.
 		if awsxray.GetSegment(ctx) == nil {
-			seg = xray.NewSegment(sanitizeSegmentName("GrpcClient-UnaryRPC-", method))
+			segName := sanitizeSegmentName("GrpcClient-UnaryRPC-", method)
+
+			// adopt parent trace/segment IDs when available to avoid trace breaks
+			if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
+				seg = xray.NewSegment(segName, &xray.XRayParentSegment{
+					SegmentID: parentSegID,
+					TraceID:   parentTraceID,
+				})
+			} else {
+				seg = xray.NewSegment(segName)
+			}
+
 			if seg != nil && seg.Seg != nil {
 				createdSeg = true
 				ctx = context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
@@ -246,7 +261,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 type contextServerStream struct {
 	grpc.ServerStream
 	ctx        context.Context
-	headerSent *bool
+	headerSent *uint32
 	stagedMD   metadata.MD
 }
 
@@ -273,7 +288,7 @@ func (w *contextServerStream) SetHeader(md metadata.MD) error {
 
 // track header send when handler or interceptor calls SendHeader.
 func (w *contextServerStream) SendHeader(md metadata.MD) error {
-	if w.headerSent != nil && *w.headerSent {
+	if w.headerSent != nil && atomic.LoadUint32(w.headerSent) == 1 {
 		return nil
 	}
 	merged := metadata.Join(w.stagedMD, md)
@@ -281,14 +296,14 @@ func (w *contextServerStream) SendHeader(md metadata.MD) error {
 		merged = metadata.MD{}
 	}
 	if w.headerSent != nil {
-		*w.headerSent = true
+		atomic.StoreUint32(w.headerSent, 1)
 	}
 	return w.ServerStream.SendHeader(merged)
 }
 
 // mark headers as sent when the first message goes out (gRPC auto-sends headers on first SendMsg).
 func (w *contextServerStream) SendMsg(m interface{}) error {
-	if w.headerSent != nil && !*w.headerSent {
+	if w.headerSent != nil && atomic.LoadUint32(w.headerSent) == 0 {
 		if err := w.SendHeader(nil); err != nil {
 			return err
 		}
@@ -438,7 +453,7 @@ func formatTraceHeader(traceID, parentID string, sampled bool) string {
 //	ctx = metadata.NewOutgoingContext(ctx, md)
 func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 	var seg *xray.XSegment // outer-scope segment for recovery/close
-	headerSent := false
+	headerSent := uint32(0)
 
 	// global panic guard even when X-Ray is disabled
 	defer func() {
@@ -522,7 +537,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			err = handler(srv, wrappedStream)
 
 			// Ensure headers flush once if handler sent nothing.
-			if !headerSent {
+			if atomic.LoadUint32(&headerSent) == 0 { // atomic read
 				if hdrErr := wrappedStream.SendHeader(nil); hdrErr != nil {
 					if err == nil {
 						err = status.Error(codes.Internal, hdrErr.Error())
@@ -577,7 +592,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		err = handler(srv, wrappedStream)
 
 		// ensure headers are flushed once even if handler sent nothing
-		if !headerSent {
+		if atomic.LoadUint32(&headerSent) == 0 { // atomic read
 			if hdrErr := wrappedStream.SendHeader(nil); hdrErr != nil {
 				_ = seg.Seg.AddError(hdrErr)
 				if err == nil {
