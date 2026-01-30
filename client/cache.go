@@ -299,42 +299,36 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	expiredList := []int{}
 	live := make([]*serviceEndpoint, 0, len(eps))
 
-	if !ignExp {
-		for i, v := range eps {
-			if v == nil { // guard nil to avoid panic
-				expiredList = append(expiredList, i)
-				continue
-			}
+	for i, v := range eps {
+		if v == nil { // guard nil to avoid panic
+			expiredList = append(expiredList, i)
+			continue
+		}
 
-			if v.CacheExpire.IsZero() || v.CacheExpire.After(now) {
-				vVersion := strings.ToLower(strings.TrimSpace(v.Version))
-				if util.LenTrim(versionNormalized) > 0 && vVersion != versionNormalized {
-					// has version, check to match version
-					if !c.DisableLogging {
-						log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
-					}
-					continue
-				}
-				live = append(live, v)
-			} else {
-				if !c.DisableLogging {
-					log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
-				}
-				expiredList = append(expiredList, i)
+		vVersion := strings.ToLower(strings.TrimSpace(v.Version))
+		isExpired := !v.CacheExpire.IsZero() && v.CacheExpire.Before(now)
+
+		if isExpired && !ignExp {
+			if !c.DisableLogging {
+				log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
 			}
+			expiredList = append(expiredList, i)
+			continue
 		}
-	} else {
-		for i, v := range eps {
-			if v == nil { // skip nil to avoid panic
-				expiredList = append(expiredList, i)
-				continue
-			}
-			vVersion := strings.ToLower(strings.TrimSpace(v.Version)) // version filter even when ignoring expiry
-			if util.LenTrim(versionNormalized) > 0 && vVersion != versionNormalized {
-				continue
-			}
-			live = append(live, v)
+
+		// even when ignoring expiry for return filtering, still purge expired entries from the cache
+		if isExpired && ignExp {
+			expiredList = append(expiredList, i)
 		}
+
+		if util.LenTrim(versionNormalized) > 0 && vVersion != versionNormalized {
+			if !c.DisableLogging && !ignExp { // keep existing log behavior only when enforcing expiry
+				log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
+			}
+			continue
+		}
+
+		live = append(live, v)
 	}
 
 	// remove expired entries
