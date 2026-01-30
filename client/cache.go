@@ -36,6 +36,10 @@ type Cache struct {
 //
 // serviceName = lowercase of servicename.namespacename
 func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) {
+	if c == nil {
+		return
+	}
+
 	if util.LenTrim(serviceName) == 0 {
 		return
 	}
@@ -105,6 +109,10 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 //
 // serviceName = lowercase of servicename.namespacename
 func (c *Cache) PurgeServiceEndpoints(serviceName string) {
+	if c == nil {
+		return
+	}
+
 	if util.LenTrim(serviceName) == 0 {
 		return
 	}
@@ -128,6 +136,10 @@ func (c *Cache) PurgeServiceEndpoints(serviceName string) {
 //
 // serviceName = lowercase of servicename.namespacename
 func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host string, port uint) {
+	if c == nil {
+		return
+	}
+
 	if util.LenTrim(serviceName) == 0 {
 		return
 	}
@@ -199,6 +211,10 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 //
 // serviceName = lowercase of servicename.namespacename
 func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, ignoreExpired ...bool) (liveEndpoints []*serviceEndpoint) {
+	if c == nil {
+		return []*serviceEndpoint{}
+	}
+
 	if util.LenTrim(serviceName) == 0 {
 		return []*serviceEndpoint{}
 	}
