@@ -64,37 +64,41 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 
 	serviceName = strings.ToLower(serviceName)
 
-	if list, ok := c.ServiceEndpoints[serviceName]; !ok {
+	// stable, deduplicated merge (preserve existing order, then new)
+	seen := make(map[string]struct{})
+	merged := make([]*serviceEndpoint, 0)
+
+	if list, ok := c.ServiceEndpoints[serviceName]; ok {
+		for _, v := range list {
+			if v == nil {
+				continue
+			}
+			k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port))
+			if _, exists := seen[k]; exists {
+				continue
+			}
+			seen[k] = struct{}{}
+			merged = append(merged, v)
+		}
 		if !c.DisableLogging {
 			log.Println("Adding New Service Endpoints for " + serviceName)
 		}
-		c.ServiceEndpoints[serviceName] = sanitized
 	} else {
 		if !c.DisableLogging {
 			log.Println("Appending New Service Endpoints for " + serviceName)
 		}
-		set := make(map[string]*serviceEndpoint)
-
-		for _, v := range list {
-			if v == nil {
-				continue // skip nil to avoid panic
-			}
-			k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port))
-			set[k] = v
-		}
-
-		for _, v := range sanitized {
-			k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port))
-			set[k] = v
-		}
-
-		lst := make([]*serviceEndpoint, 0, len(set))
-		for _, v := range set {
-			lst = append(lst, v)
-		}
-
-		c.ServiceEndpoints[serviceName] = lst
 	}
+
+	for _, v := range sanitized {
+		k := strings.ToLower(v.Host + ":" + util.UintToStr(v.Port))
+		if _, exists := seen[k]; exists {
+			continue
+		}
+		seen[k] = struct{}{}
+		merged = append(merged, v)
+	}
+
+	c.ServiceEndpoints[serviceName] = merged
 }
 
 // PurgeServiceEndpoints will remove all endpoints associated with the given serviceName within map
@@ -194,10 +198,6 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 		return []*serviceEndpoint{}
 	}
 
-	if c.ServiceEndpoints == nil {
-		return []*serviceEndpoint{}
-	}
-
 	ignExp := false
 	if len(ignoreExpired) > 0 {
 		ignExp = ignoreExpired[0]
@@ -213,14 +213,10 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	serviceName = strings.ToLower(serviceName)
 
 	eps, ok := c.ServiceEndpoints[serviceName]
-	if !ok {
+	if !ok || len(eps) == 0 {
 		if !c.DisableLogging {
 			log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + "None Found")
 		}
-		return []*serviceEndpoint{}
-	}
-
-	if len(eps) == 0 {
 		return []*serviceEndpoint{}
 	}
 
@@ -228,7 +224,9 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 		log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + util.Itoa(len(eps)) + " Found")
 	}
 
+	now := time.Now()
 	expiredList := []int{}
+	live := make([]*serviceEndpoint, 0, len(eps))
 
 	if !ignExp {
 		for i, v := range eps {
@@ -237,19 +235,15 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 				continue
 			}
 
-			if v.CacheExpire.After(time.Now()) {
-				// not yet expired
-				if util.LenTrim(version) > 0 {
+			if v.CacheExpire.After(now) {
+				if util.LenTrim(version) > 0 && strings.ToLower(v.Version) != strings.ToLower(version) {
 					// has version, check to match version
-					if strings.ToLower(v.Version) != strings.ToLower(version) {
-						if !c.DisableLogging {
-							log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
-						}
-						continue
+					if !c.DisableLogging {
+						log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
 					}
+					continue
 				}
-
-				liveEndpoints = append(liveEndpoints, v)
+				live = append(live, v)
 			} else {
 				if !c.DisableLogging {
 					log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
@@ -262,7 +256,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 			if v == nil { // skip nil to avoid panic
 				continue
 			}
-			liveEndpoints = append(liveEndpoints, v)
+			live = append(live, v)
 		}
 	}
 
@@ -282,6 +276,16 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 		}
 
 		c.ServiceEndpoints[serviceName] = newEps
+	}
+
+	// defensive copy to avoid caller mutating shared cache entries
+	liveEndpoints = make([]*serviceEndpoint, 0, len(live))
+	for _, v := range live {
+		if v == nil {
+			continue
+		}
+		cp := *v
+		liveEndpoints = append(liveEndpoints, &cp)
 	}
 
 	if !c.DisableLogging {
