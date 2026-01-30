@@ -242,7 +242,8 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 // bind the created segment into the stream context and use the wrapped stream for SendHeader and handler.
 type contextServerStream struct {
 	grpc.ServerStream
-	ctx context.Context
+	ctx        context.Context
+	headerSent *bool
 }
 
 func (w *contextServerStream) Context() context.Context {
@@ -251,11 +252,17 @@ func (w *contextServerStream) Context() context.Context {
 
 // track header send when handler or interceptor calls SendHeader.
 func (w *contextServerStream) SendHeader(md metadata.MD) error {
+	if w.headerSent != nil {
+		*w.headerSent = true
+	}
 	return w.ServerStream.SendHeader(md)
 }
 
 // mark headers as sent when the first message goes out (gRPC auto-sends headers on first SendMsg).
 func (w *contextServerStream) SendMsg(m interface{}) error {
+	if w.headerSent != nil {
+		*w.headerSent = true
+	}
 	return w.ServerStream.SendMsg(m)
 }
 
@@ -389,6 +396,7 @@ func formatTraceHeader(traceID, parentID string, sampled bool) string {
 //	ctx = metadata.NewOutgoingContext(ctx, md)
 func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 	var seg *xray.XSegment // outer-scope segment for recovery/close
+	headerSent := false
 
 	// global panic guard even when X-Ray is disabled
 	defer func() {
@@ -501,6 +509,19 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		}
 
 		err = handler(srv, wrappedStream)
+
+		// ensure headers are actually delivered even if handler sent no messages/headers.
+		if !headerSent {
+			if hdrErr := wrappedStream.SendHeader(outgoingMD); hdrErr != nil {
+				if seg != nil && seg.Seg != nil {
+					_ = seg.Seg.AddError(hdrErr)
+				}
+				if err == nil { // preserve handler error precedence
+					err = status.Error(codes.Internal, hdrErr.Error())
+				}
+			}
+		}
+
 		return err
 	}
 
