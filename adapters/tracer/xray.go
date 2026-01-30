@@ -245,24 +245,37 @@ type contextServerStream struct {
 	grpc.ServerStream
 	ctx        context.Context
 	headerSent *bool
+	stagedMD   metadata.MD
 }
 
 func (w *contextServerStream) Context() context.Context {
 	return w.ctx
 }
 
+// stage headers (merge with existing) without sending; preserves handler-set headers
+func (w *contextServerStream) SetHeader(md metadata.MD) error {
+	w.stagedMD = metadata.Join(w.stagedMD, md)
+	return w.ServerStream.SetHeader(w.stagedMD)
+}
+
 // track header send when handler or interceptor calls SendHeader.
 func (w *contextServerStream) SendHeader(md metadata.MD) error {
+	if w.headerSent != nil && *w.headerSent {
+		return nil
+	}
+	merged := metadata.Join(w.stagedMD, md)
 	if w.headerSent != nil {
 		*w.headerSent = true
 	}
-	return w.ServerStream.SendHeader(md)
+	return w.ServerStream.SendHeader(merged)
 }
 
 // mark headers as sent when the first message goes out (gRPC auto-sends headers on first SendMsg).
 func (w *contextServerStream) SendMsg(m interface{}) error {
-	if w.headerSent != nil {
-		*w.headerSent = true
+	if w.headerSent != nil && !*w.headerSent {
+		if err := w.SendHeader(nil); err != nil {
+			return err
+		}
 	}
 	return w.ServerStream.SendMsg(m)
 }
@@ -499,25 +512,39 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 
 		// bind the segment into the stream context so downstream code can see it
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
-		wrappedStream := &contextServerStream{ServerStream: ss, ctx: segCtx, headerSent: &headerSent}
-
-		// avoid mutating incoming metadata; build an outgoing copy
 		outgoingMD := metadata.New(nil)
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
 		traceHeader := formatTraceHeader(seg.Seg.TraceID, seg.Seg.ID, seg.Seg.Sampled)
 		outgoingMD.Set("x-amzn-trace-id", traceHeader)
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
+		wrappedStream := &contextServerStream{
+			ServerStream: ss,
+			ctx:          segCtx,
+			headerSent:   &headerSent,
+			stagedMD:     outgoingMD, // stage headers for merge/flush
+		}
+
 		// send headers immediately so they are guaranteed to reach the client
 		// even if the handler never writes messages or calls SendHeader.
-		if hdrErr := wrappedStream.SendHeader(outgoingMD); hdrErr != nil {
+		if hdrErr := wrappedStream.SetHeader(outgoingMD); hdrErr != nil {
 			_ = seg.Seg.AddError(hdrErr)
 			err = status.Error(codes.Internal, hdrErr.Error())
 			return err
 		}
-		headerSent = true
 
 		err = handler(srv, wrappedStream)
+
+		// ensure headers are flushed once even if handler sent nothing
+		if !headerSent {
+			if hdrErr := wrappedStream.SendHeader(nil); hdrErr != nil {
+				_ = seg.Seg.AddError(hdrErr)
+				if err == nil {
+					err = status.Error(codes.Internal, hdrErr.Error())
+				}
+			}
+		}
+
 		return err
 	}
 
