@@ -62,8 +62,8 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 			continue
 		}
 		cp := *v
-		cp.Host = strings.TrimSpace(cp.Host)
-		cp.Version = strings.TrimSpace(cp.Version)
+		cp.Host = strings.ToLower(strings.TrimSpace(cp.Host))
+		cp.Version = strings.ToLower(strings.TrimSpace(cp.Version))
 		if cp.Host == "" || cp.Port == 0 { // drop invalid
 			continue
 		}
@@ -109,6 +109,9 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	if list, ok := c.ServiceEndpoints[serviceName]; ok {
 		for _, v := range list {
 			if v == nil { // drop nil existing entries
+				continue
+			}
+			if strings.TrimSpace(v.Host) == "" || v.Port == 0 { // drop invalid existing entries
 				continue
 			}
 			if !v.CacheExpire.IsZero() && v.CacheExpire.Before(now) { // drop expired existing entries so fresh ones can replace them
@@ -303,6 +306,12 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 
 	for i, v := range eps {
 		if v == nil { // guard nil to avoid panic
+			expiredList = append(expiredList, i)
+			continue
+		}
+
+		// remove unusable entries with empty host or zero port
+		if util.LenTrim(v.Host) == 0 || v.Port == 0 {
 			expiredList = append(expiredList, i)
 			continue
 		}
