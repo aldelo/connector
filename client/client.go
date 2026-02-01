@@ -1519,8 +1519,6 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
 
-	c.setEndpoints(nil)
-
 	cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
 	if cacheExpSeconds == 0 {
 		cacheExpSeconds = 300
@@ -1549,28 +1547,21 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 		return fmt.Errorf("Client Object Nil")
 	}
 
-	ip := ""
-	port := uint(0)
-
-	if host, portStr, err := net.SplitHostPort(directIpPort); err == nil { // robust IPv4/IPv6 parsing
-		if p, convErr := strconv.Atoi(portStr); convErr == nil && p > 0 && p <= 65535 {
-			ip = host
-			port = uint(p)
-		}
-	} else {
-		// fallback for bare host without port; keep behavior but force explicit port
-		ip = directIpPort
+	host, portStr, err := net.SplitHostPort(directIpPort)
+	if err != nil {
+		return fmt.Errorf("Direct Connect target must include host and port (got %q): %v", directIpPort, err)
 	}
 
-	if util.LenTrim(ip) == 0 || port == 0 {
-		return fmt.Errorf("Direct Connect IP or Port Not Defined in Config")
+	p, convErr := strconv.Atoi(portStr)
+	if convErr != nil || p <= 0 || p > 65535 {
+		return fmt.Errorf("Direct Connect port invalid (got %q): %v", portStr, convErr)
 	}
 
 	c.setEndpoints([]*serviceEndpoint{
 		{
 			SdType:      "direct",
-			Host:        ip,
-			Port:        port,
+			Host:        host,
+			Port:        uint(p),
 			CacheExpire: cacheExpires,
 		},
 	})
@@ -1625,6 +1616,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 		sdType = "srv"
 	}
 
+	seen := make(map[string]struct{})
 	endpoints := make([]*serviceEndpoint, 0, len(ipList))
 	for _, v := range ipList {
 		ip := ""
@@ -1638,14 +1630,23 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 				port = util.StrToUint(av[1])
 			}
 
-			if util.LenTrim(ip) == 0 || port == 0 {
+			if util.LenTrim(ip) == 0 || port == 0 || port > 65535 {
 				return fmt.Errorf("SRV Host or Port From Service Discovery Not Valid: " + v)
 			}
 		} else {
 			// a
 			ip = v
-			port = c._config.Target.InstancePort
+			if instancePort == 0 || instancePort > 65535 {
+				return fmt.Errorf("Configured Instance Port Not Valid: %d", instancePort)
+			}
+			port = instancePort
 		}
+
+		key := fmt.Sprintf("%s:%d", ip, port)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 
 		endpoints = append(endpoints, &serviceEndpoint{
 			SdType:      sdType,
@@ -1719,8 +1720,19 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		return fmt.Errorf("Service Discovery By API Failed: " + err.Error())
 	}
 
+	seen := make(map[string]struct{})
 	endpoints := make([]*serviceEndpoint, 0, len(instanceList))
 	for _, v := range instanceList {
+		if v.InstancePort == 0 || v.InstancePort > 65535 {
+			return fmt.Errorf("Service Discovery Returned Invalid Port for %s:%d", v.InstanceIP, v.InstancePort)
+		}
+
+		key := fmt.Sprintf("%s:%d", v.InstanceIP, v.InstancePort)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
 		endpoints = append(endpoints, &serviceEndpoint{
 			SdType:      "api",
 			Host:        v.InstanceIP,
