@@ -826,7 +826,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 
 	if c._conn == nil {
 		errorf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
-		return 0, fmt.Errorf("GetLiveEndpointsCount Requires Current Client Connection Already Established First")
+		return 0, fmt.Errorf("GetLiveEndpointsCount requires current client connection already established first")
 	}
 
 	if c._config.Target.ServiceDiscoveryType == "direct" {
