@@ -804,30 +804,50 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		return 0, fmt.Errorf("Client Object Nil")
 	}
 
+	z := c.ZLog()
+	printf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	errorf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Errorf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+
+	if c._config == nil {
+		return 0, fmt.Errorf("Config Data Not Loaded")
+	}
+
 	if c._conn == nil {
-		c._z.Errorf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Requires Current Client Connection Already Established First")
+		errorf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return 0, fmt.Errorf("GetLiveEndpointsCount Requires Current Client Connection Already Established First")
 	}
 
 	if c._config.Target.ServiceDiscoveryType == "direct" {
-		c._z.Warnf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Service Discovery Type is Direct")
+		printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return 0, nil
 	}
 
-	c._z.Printf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Started...")
+	printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Started...", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 
 	forceRefresh := len(c.endpointsSnapshot()) == 0 || updateEndpointsToLoadBalanceResolver
 
 	if e := c.discoverEndpoints(forceRefresh); e != nil {
-		s := "GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Error) " + e.Error()
-		c._z.Errorf(s)
+		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+		errorf(s)
 		return 0, fmt.Errorf(s)
 	}
 
 	eps := c.endpointsSnapshot()
 	if len(eps) == 0 {
-		s := "GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Yielded Zero)"
-		c._z.Errorf(s)
+		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) No Live Endpoints", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		errorf(s)
 		return 0, fmt.Errorf(s)
 	}
 
@@ -847,8 +867,8 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		}
 
 		if len(endpointAddrs) == 0 {
-			s := "GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Endpoint Addresses Required"
-			c._z.Errorf(s)
+			s := fmt.Sprintf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+			errorf(s)
 			return 0, fmt.Errorf(s)
 		}
 
@@ -858,16 +878,14 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		schemeName = "clb" + schemeName
 
 		if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
-			c._z.Errorf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: " + e.Error())
+			errorf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
 			return 0, e
 		}
 
-		c._z.Printf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' OK")
+		printf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' OK", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 	}
 
-	c._z.Printf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' OK")
-
-	// get live endpoints count
+	printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' OK", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 	return len(eps), nil
 }
 
@@ -877,23 +895,43 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	z := c.ZLog()
+	printf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	errorf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Errorf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+
+	if c._config == nil {
+		return fmt.Errorf("Config Data Not Loaded")
+	}
+
 	if c._conn == nil {
-		c._z.Errorf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Requires Current Client Connection Already Established First")
+		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return fmt.Errorf("UpdateLoadBalanceResolver Requires Current Client Connection Already Established First")
 	}
 
 	if c._config.Target.ServiceDiscoveryType == "direct" {
-		c._z.Warnf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Service Discovery Type is Direct")
+		printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return nil
 	}
 
-	c._z.Printf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Started...")
+	printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Started...", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 
 	eps := c.endpointsSnapshot()
 	if len(eps) == 0 {
 		if e := c.discoverEndpoints(false); e != nil {
-			s := "UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Error) " + e.Error()
-			c._z.Errorf(s)
+			s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+			errorf(s)
 			return fmt.Errorf(s)
 		}
 		// refresh snapshot after discovery to use newly populated endpoints
@@ -901,8 +939,8 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	}
 
 	if len(eps) == 0 {
-		s := "UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Endpoint Addresses Required"
-		c._z.Errorf(s)
+		s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		errorf(s)
 		return fmt.Errorf(s)
 	}
 
@@ -926,11 +964,11 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	schemeName = "clb" + schemeName
 
 	if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
-		c._z.Errorf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: " + e.Error())
+		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
 		return e
 	}
 
-	c._z.Printf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' OK")
+	printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' OK", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 	return nil
 }
 
@@ -945,6 +983,29 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 func (c *Client) DoNotifierAlertService() (err error) {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
+	}
+
+	z := c.ZLog()
+	printf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	errorf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Errorf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	warnf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Warnf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
 	}
 
 	// finally, run notifier client to subscribe for notification callbacks
@@ -1000,7 +1061,11 @@ func (c *Client) DoNotifierAlertService() (err error) {
 							c.setEndpoints(cacheGetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true))
 
 							if e := c.UpdateLoadBalanceResolver(); e != nil {
-								c.ZLog().Errorf(e.Error())
+								if z != nil {
+									z.Errorf(e.Error())
+								} else {
+									log.Printf(e.Error())
+								}
 							}
 						}
 					}
@@ -1009,13 +1074,17 @@ func (c *Client) DoNotifierAlertService() (err error) {
 				c._notifierClient.ServiceHostOfflineHandler = func(host string, port uint) {
 					if c._config != nil {
 						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
-							cachePurgeServiceEndpointByHostAndPort(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), host, port) // CHANGED
+							cachePurgeServiceEndpointByHostAndPort(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), host, port)
 						}
 
 						c.setEndpoints(cacheGetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true)) // CHANGED
 
 						if e := c.UpdateLoadBalanceResolver(); e != nil {
-							c.ZLog().Errorf(e.Error())
+							if z != nil {
+								z.Errorf(e.Error())
+							} else {
+								log.Printf(e.Error())
+							}
 						}
 					}
 				}
@@ -1023,51 +1092,60 @@ func (c *Client) DoNotifierAlertService() (err error) {
 				c._notifierClient.ServiceAlertStoppedHandler = func(reason string) {
 					if strings.Contains(strings.ToLower(reason), "transport is closing") {
 						if c._notifierClient != nil && c._z != nil {
-							c._z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+							if z != nil {
+								z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+							} else {
+								log.Printf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+							}
 
 							go func() { // reconnect asynchronously to avoid blocking callback
 								for {
 									time.Sleep(5 * time.Second)
 									c._notifierClient.Close()
 									if e := c.DoNotifierAlertService(); e != nil {
-										c._z.Errorf("... Reconnect Notifier Server Failed: " + e.Error() + " (Will Retry in 5 Seconds)")
+										if z != nil {
+											z.Errorf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", e.Error())
+										} else {
+											log.Printf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", e.Error())
+										}
 										continue
 									}
 									return
 								}
 							}()
 						}
-					} else if c._z != nil {
-						c._z.Printf("--- Notifier Client Service Disconnected Normally: " + reason + " ---")
+					} else if z != nil {
+						z.Printf("--- Notifier Client Service Disconnected Normally: %s ---", reason)
+					} else {
+						log.Printf("--- Notifier Client Service Disconnected Normally: %s ---", reason)
 					}
 				}
 			}
 
-			if c._notifierClient == nil || c._z == nil {
+			if c._notifierClient == nil {
 				return nil
 			}
 
 			// dial notifier client to notifier server endpoint and begin service operations
 			if err = c._notifierClient.Dial(); err != nil {
-				if c._notifierClient != nil && c._z != nil {
-					c._z.Errorf("!!! Notifier Client Service Dial Failed: " + err.Error() + " !!!")
-					c._notifierClient.Close() // close to clean up
+				if c._notifierClient != nil {
+					errorf("!!! Notifier Client Service Dial Failed: %s !!!", err.Error())
+					c._notifierClient.Close()
 				}
 				return err
 			} else {
 				if err = c._notifierClient.Subscribe(c._notifierClient.ConfiguredSNSDiscoveryTopicArn()); err != nil {
-					if c._notifierClient != nil && c._z != nil {
-						c._z.Errorf("!!! Notifier Client Service Subscribe Failed: " + err.Error() + " !!!")
-						c._notifierClient.Close() // close to clean up
+					if c._notifierClient != nil {
+						errorf("!!! Notifier Client Service Subscribe Failed: %s !!!", err.Error())
+						c._notifierClient.Close()
 					}
 					return err
 				} else {
-					// subscribe successful, notifier client alert services started
-					c._z.Printf("~~~ Notifier Client Service Started ~~~")
+					printf("~~~ Notifier Client Service Started ~~~")
 				}
 			}
 		} else {
-			c._z.Printf("### Notifier Client Service Skipped, Not Yet Configured for Dial ###")
+			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial ###")
 		}
 	}
 
@@ -1081,12 +1159,34 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	z := c.ZLog()
+	printf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	errorf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Errorf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	warnf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Warnf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+
 	if util.LenTrim(c.WebServerConfig.WebServerLocalAddress) == 0 {
 		return fmt.Errorf("Web Server Host Address is Empty")
 	}
 
 	var timeout time.Duration
-
 	if len(timeoutDuration) > 0 {
 		timeout = timeoutDuration[0]
 	} else {
@@ -1107,25 +1207,25 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 	go func() {
 		for {
 			if status, _, e := rest.GET(healthUrl, nil); e != nil {
-				c._z.Errorf("Web Server Health Check Failed: %s", e.Error())
+				errorf("Web Server Health Check Failed: %s", e.Error())
 				wg.Done()
 				chanErrorInfo <- "Web Server Health Check Failed: " + e.Error()
 				return
 			} else {
 				if status == 200 {
-					c._z.Printf("Web Server Health OK")
+					printf("Web Server Health OK")
 					wg.Done()
 					chanErrorInfo <- "OK"
 					return
 				} else {
-					c._z.Warnf("Web Server Not Ready!")
+					warnf("Web Server Not Ready!")
 				}
 			}
 
 			time.Sleep(2500 * time.Millisecond)
 
 			if time.Now().After(expireDateTime) {
-				c._z.Warnf("Web Server Health Check Timeout")
+				warnf("Web Server Health Check Timeout")
 				wg.Done()
 				chanErrorInfo <- "Web Server Health Check Failed: Timeout"
 				return
@@ -1135,17 +1235,17 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 
 	wg.Wait()
 
-	c._z.Printf("Web Server Heath Check Finalized...")
+	printf("Web Server Heath Check Finalized...")
 
 	errInfo := <-chanErrorInfo
 
 	if errInfo == "OK" {
 		// success - web server health check = ok
 		return nil
-	} else {
-		// failure
-		return fmt.Errorf(errInfo)
 	}
+
+	// failure
+	return fmt.Errorf(errInfo)
 }
 
 // waitForEndpointReady is called after Dial to check if target service is ready as reported by health probe
@@ -1154,8 +1254,30 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
-	var timeout time.Duration
+	z := c.ZLog()
+	printf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	errorf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Errorf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	warnf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Warnf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
 
+	var timeout time.Duration
 	if len(timeoutDuration) > 0 {
 		timeout = timeoutDuration[0]
 	} else {
@@ -1178,21 +1300,21 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 
 		for {
 			if status, e := c.HealthProbe("", timeout); e != nil {
-				c._z.Errorf("Health Status Check Failed: %s", e.Error())
+				errorf("Health Status Check Failed: %s", e.Error())
 				chanErrorInfo <- "Health Status Check Failed: " + e.Error()
 				return
 			} else {
 				if status == grpc_health_v1.HealthCheckResponse_SERVING {
-					c._z.Printf("Serving Status Detected")
+					printf("Serving Status Detected")
 					chanErrorInfo <- "OK"
 					return
 				} else {
-					c._z.Warnf("Not Serving!")
+					warnf("Not Serving!")
 				}
 			}
 
 			if time.Now().After(expireDateTime) {
-				c._z.Warnf("Health Status Check Timeout")
+				warnf("Health Status Check Timeout")
 				chanErrorInfo <- "Health Status Check Failed: Timeout"
 				return
 			}
@@ -1203,7 +1325,7 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 
 	wg.Wait()
 
-	c._z.Printf("Heath Status Check Finalized...")
+	printf("Heath Status Check Finalized...")
 
 	errInfo := <-chanErrorInfo
 
@@ -1236,6 +1358,15 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 		return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Client Object Nil")
 	}
 
+	z := c.ZLog()
+	printf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+
 	if c._healthManualChecker == nil {
 		if c._conn != nil {
 			c.setupHealthManualChecker()
@@ -1248,8 +1379,8 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 		}
 	}
 
-	c._z.Printf("Health Probe - Manual Check Begin...")
-	defer c._z.Printf("... Health Probe - Manual Check End")
+	printf("Health Probe - Manual Check Begin...")
+	defer printf("... Health Probe - Manual Check End")
 
 	return c._healthManualChecker.Check(serviceName, timeoutDuration...)
 }
@@ -1275,21 +1406,33 @@ func (c *Client) Close() {
 		return
 	}
 
+	z := c.ZLog()
+	printf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	errorf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Errorf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+
 	if c.BeforeClientClose != nil {
-		c._z.Printf("Before gRPC Client Close Begin...")
-
+		printf("Before gRPC Client Close Begin...")
 		c.BeforeClientClose(c)
-
-		c._z.Printf("... Before gRPC Client Close End")
+		printf("... Before gRPC Client Close End")
 	}
 
 	defer func() {
 		if c.AfterClientClose != nil {
-			c._z.Printf("After gRPC Client Close Begin...")
-
+			printf("After gRPC Client Close Begin...")
 			c.AfterClientClose(c)
-
-			c._z.Printf("... After gRPC Client Close End")
+			printf("... After gRPC Client Close End")
 		}
 	}()
 
