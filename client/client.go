@@ -1094,7 +1094,9 @@ func (c *Client) DoNotifierAlertService() (err error) {
 							go func() { // reconnect asynchronously to avoid blocking callback
 								for {
 									time.Sleep(5 * time.Second)
-									c._notifierClient.Close()
+									if c._notifierClient != nil {
+										c._notifierClient.Close()
+									}
 									if e := c.DoNotifierAlertService(); e != nil {
 										if z != nil {
 											z.Errorf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", e.Error())
@@ -1279,6 +1281,9 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 
 	expireDateTime := time.Now().Add(timeout)
 
+	// per-attempt timeout (cap at remaining time, min 1s)
+	perAttempt := 2 * time.Second
+
 	//
 	// check if service is ready
 	// wait for target service to respond with serving status before moving forward
@@ -1292,7 +1297,18 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 		defer wg.Done()
 
 		for {
-			if status, e := c.HealthProbe("", timeout); e != nil {
+			remaining := time.Until(expireDateTime)
+			if remaining <= 0 {
+				warnf("Health Status Check Timeout")
+				chanErrorInfo <- "Health Status Check Failed: Timeout"
+				return
+			}
+			attemptTimeout := perAttempt
+			if remaining < attemptTimeout {
+				attemptTimeout = remaining
+			}
+
+			if status, e := c.HealthProbe("", attemptTimeout); e != nil {
 				errorf("Health Status Check Failed: %s", e.Error())
 				chanErrorInfo <- "Health Status Check Failed: " + e.Error()
 				return
@@ -1306,13 +1322,13 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 				}
 			}
 
+			time.Sleep(2500 * time.Millisecond)
+
 			if time.Now().After(expireDateTime) {
 				warnf("Health Status Check Timeout")
 				chanErrorInfo <- "Health Status Check Failed: Timeout"
 				return
 			}
-
-			time.Sleep(2500 * time.Millisecond)
 		}
 	}()
 
