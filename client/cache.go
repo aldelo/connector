@@ -231,6 +231,9 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 	for _, v := range eps {
 		if v != nil {
 			vHost := strings.ToLower(strings.TrimSpace(v.Host))
+			if vHost == "" || v.Port == 0 { // drop invalid cached entries while purging
+				continue
+			}
 			if vHost == hostNormalized && v.Port == port {
 				// found
 				found = true
@@ -291,13 +294,13 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	eps, ok := c.ServiceEndpoints[serviceName]
 	if !ok || len(eps) == 0 {
 		if !c.DisableLogging {
-			log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + "None Found")
+			log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + versionNormalized + "': " + "None Found")
 		}
 		return []*serviceEndpoint{}
 	}
 
 	if !c.DisableLogging {
-		log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + version + "': " + util.Itoa(len(eps)) + " Found")
+		log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + versionNormalized + "': " + util.Itoa(len(eps)) + " Found")
 	}
 
 	now := time.Now()
@@ -321,7 +324,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 
 		if isExpired && !ignExp {
 			if !c.DisableLogging {
-				log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
+				log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + versionNormalized + "': (Expired) " + v.Host + ":" + util.UintToStr(v.Port))
 			}
 			expiredList = append(expiredList, i)
 			continue
@@ -334,7 +337,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 
 		if util.LenTrim(versionNormalized) > 0 && vVersion != versionNormalized {
 			if !c.DisableLogging && !ignExp { // keep existing log behavior only when enforcing expiry
-				log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + version)
+				log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + versionNormalized)
 			}
 			continue
 		}
@@ -375,7 +378,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	}
 
 	if !c.DisableLogging {
-		log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': " + util.Itoa(len(liveEndpoints)) + " Returned")
+		log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + versionNormalized + "': " + util.Itoa(len(liveEndpoints)) + " Returned")
 	}
 	return
 }
