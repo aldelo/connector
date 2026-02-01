@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"path"
 	"strconv"
 	"strings"
@@ -57,14 +58,55 @@ import (
 )
 
 // client side cache
-var _cache *Cache
+var (
+	_cache  *Cache
+	cacheMu sync.RWMutex
+)
 
 func init() {
+	cacheMu.Lock()
 	_cache = new(Cache)
+	cacheMu.Unlock()
 }
 
 func ClearEndpointCache() {
+	cacheMu.Lock()
 	_cache = new(Cache)
+	cacheMu.Unlock()
+}
+
+// cache helper shims to serialize access and avoid races
+func cacheDisableLogging(disable bool) {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if _cache != nil {
+		_cache.DisableLogging = disable
+	}
+}
+
+func cacheAddServiceEndpoints(key string, eps []*serviceEndpoint) {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if _cache != nil {
+		_cache.AddServiceEndpoints(key, eps)
+	}
+}
+
+func cacheGetLiveServiceEndpoints(key, version string, force ...bool) []*serviceEndpoint {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if _cache == nil {
+		return nil
+	}
+	return _cache.GetLiveServiceEndpoints(key, version, force...)
+}
+
+func cachePurgeServiceEndpointByHostAndPort(key, host string, port uint) {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if _cache != nil {
+		_cache.PurgeServiceEndpointByHostAndPort(key, host, port)
+	}
 }
 
 var _mux sync.Mutex // thread-safety for accessing resolver map in DialContext()
@@ -227,9 +269,7 @@ func (c *Client) readConfig() error {
 		return fmt.Errorf("Init ZapLog Failed: %s", e.Error())
 	}
 
-	if _cache != nil {
-		_cache.DisableLogging = !c._config.Target.ZapLogEnabled
-	}
+	cacheDisableLogging(!c._config.Target.ZapLogEnabled)
 
 	return nil
 }
@@ -912,10 +952,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	// within the notifier client config yaml, named xyz-notifier-client.yaml, where xyz is the endpoint service name,
 	// the discovery topicArn as pre-created on aws is stored within, this enables callback for this specific topicArn from notifier server,
 	// note that the service discovery of notifier client is to the notifier server cluster
-	doConnection := false
-	if c._notifierClient != nil {
-		doConnection = true
-	}
+	doConnection := c._notifierClient != nil
 
 	if doConnection || util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName+"-notifier-client.yaml")) {
 		if !doConnection {
@@ -941,7 +978,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 			if !doConnection {
 				c._notifierClient.ServiceHostOnlineHandler = func(host string, port uint) {
-					if _cache != nil && c._config != nil {
+					if c._config != nil {
 						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
 							cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
 							if cacheExpSeconds == 0 {
@@ -960,7 +997,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 								},
 							})
 
-							c.setEndpoints(_cache.GetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true)) // CHANGED
+							c.setEndpoints(cacheGetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true))
 
 							if e := c.UpdateLoadBalanceResolver(); e != nil {
 								c.ZLog().Errorf(e.Error())
@@ -970,12 +1007,12 @@ func (c *Client) DoNotifierAlertService() (err error) {
 				}
 
 				c._notifierClient.ServiceHostOfflineHandler = func(host string, port uint) {
-					if _cache != nil && c._config != nil {
+					if c._config != nil {
 						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
-							_cache.PurgeServiceEndpointByHostAndPort(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), host, port)
+							cachePurgeServiceEndpointByHostAndPort(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), host, port) // CHANGED
 						}
 
-						c.setEndpoints(_cache.GetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true))
+						c.setEndpoints(cacheGetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true)) // CHANGED
 
 						if e := c.UpdateLoadBalanceResolver(); e != nil {
 							c.ZLog().Errorf(e.Error())
@@ -988,17 +1025,17 @@ func (c *Client) DoNotifierAlertService() (err error) {
 						if c._notifierClient != nil && c._z != nil {
 							c._z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
 
-							c._notifierClient.PurgeEndpointCache()
-							time.Sleep(5 * time.Second)
-
-							for {
-								if e := c.DoNotifierAlertService(); e != nil {
-									c._z.Errorf("... Reconnect Notifier Server Failed: " + e.Error() + " (Will Retry in 5 Seconds)")
+							go func() { // reconnect asynchronously to avoid blocking callback
+								for {
 									time.Sleep(5 * time.Second)
-								} else {
+									c._notifierClient.Close()
+									if e := c.DoNotifierAlertService(); e != nil {
+										c._z.Errorf("... Reconnect Notifier Server Failed: " + e.Error() + " (Will Retry in 5 Seconds)")
+										continue
+									}
 									return
 								}
-							}
+							}()
 						}
 					} else if c._z != nil {
 						c._z.Printf("--- Notifier Client Service Disconnected Normally: " + reason + " ---")
@@ -1376,14 +1413,16 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 		return fmt.Errorf("Client Object Nil")
 	}
 
-	v := strings.Split(directIpPort, ":")
 	ip := ""
 	port := uint(0)
 
-	if len(v) == 2 {
-		ip = v[0]
-		port = util.StrToUint(v[1])
+	if host, portStr, err := net.SplitHostPort(directIpPort); err == nil { // robust IPv4/IPv6 parsing
+		if p, convErr := strconv.Atoi(portStr); convErr == nil && p > 0 && p <= 65535 {
+			ip = host
+			port = uint(p)
+		}
 	} else {
+		// fallback for bare host without port; keep behavior but force explicit port
 		ip = directIpPort
 	}
 
@@ -1426,9 +1465,8 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	//
 	// check for existing cache
 	//
-	found := _cache.GetLiveServiceEndpoints(serviceName+"."+namespaceName, "")
-
-	if len(found) > 0 && !forceRefresh {
+	found := cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, "", forceRefresh)
+	if len(found) > 0 {
 		c.setEndpoints(found)
 		c._z.Printf("Using DNS Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
 		for _, v := range c.endpointsSnapshot() {
@@ -1482,7 +1520,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	}
 
 	c.setEndpoints(endpoints)
-	_cache.AddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
+	cacheAddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
 
 	return nil
 }
@@ -1510,9 +1548,8 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	//
 	// check for existing cache
 	//
-	found := _cache.GetLiveServiceEndpoints(serviceName+"."+namespaceName, version)
-
-	if len(found) > 0 && !forceRefresh {
+	found := cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, version, forceRefresh)
+	if len(found) > 0 {
 		c.setEndpoints(found)
 		c._z.Printf("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
 		for _, v := range c.endpointsSnapshot() {
@@ -1560,7 +1597,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	}
 
 	c.setEndpoints(endpoints)
-	_cache.AddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
+	cacheAddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
 
 	return nil
 }
