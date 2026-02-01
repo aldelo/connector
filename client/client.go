@@ -135,6 +135,10 @@ type Client struct {
 	// discovered endpoints for client load balancer use
 	_endpoints []*serviceEndpoint
 
+	// thread-safety guards
+	endpointsMu sync.RWMutex // protects _endpoints
+	cbMu        sync.RWMutex // protects _circuitBreakers
+
 	// instantiated internal objects
 	_conn          *grpc.ClientConn
 	_remoteAddress string
@@ -150,6 +154,22 @@ type Client struct {
 
 	// zap logger instead of standard log
 	_z *data.ZapLog
+}
+
+// safely replace the current endpoints slice
+func (c *Client) setEndpoints(eps []*serviceEndpoint) {
+	c.endpointsMu.Lock()
+	c._endpoints = eps
+	c.endpointsMu.Unlock()
+}
+
+// snapshot current endpoints (shallow copy) under read lock
+func (c *Client) endpointsSnapshot() []*serviceEndpoint {
+	c.endpointsMu.RLock()
+	defer c.endpointsMu.RUnlock()
+	out := make([]*serviceEndpoint, len(c._endpoints))
+	copy(out, c._endpoints)
+	return out
 }
 
 // serviceEndpoint represents a specific service endpoint connection target
@@ -513,11 +533,13 @@ func (c *Client) Ready() bool {
 		log.Println("Ready(): Client Object Nil")
 		return false
 	}
-	if c._conn != nil && len(c._endpoints) > 0 && (c._conn.GetState() == connectivity.Ready || c._conn.GetState() == connectivity.Idle) {
+
+	eps := c.endpointsSnapshot() // protect _endpoints read
+	if c._conn != nil && len(eps) > 0 && (c._conn.GetState() == connectivity.Ready || c._conn.GetState() == connectivity.Idle) {
 		return true
-	} else {
-		return false
 	}
+
+	return false
 }
 
 // Dial will dial grpc service and establish client connection
@@ -754,12 +776,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 
 	c._z.Printf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Started...")
 
-	forceRefresh := false
-
-	if len(c._endpoints) == 0 || updateEndpointsToLoadBalanceResolver {
-		// force refresh endpoints
-		forceRefresh = true
-	}
+	forceRefresh := len(c.endpointsSnapshot()) == 0 || updateEndpointsToLoadBalanceResolver
 
 	if e := c.discoverEndpoints(forceRefresh); e != nil {
 		s := "GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Error) " + e.Error()
@@ -767,7 +784,8 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		return 0, fmt.Errorf(s)
 	}
 
-	if len(c._endpoints) == 0 {
+	eps := c.endpointsSnapshot()
+	if len(eps) == 0 {
 		s := "GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Yielded Zero)"
 		c._z.Errorf(s)
 		return 0, fmt.Errorf(s)
@@ -777,7 +795,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		// get endpoint addresses
 		endpointAddrs := []string{}
 
-		for i, ep := range c._endpoints {
+		for i, ep := range eps {
 			endpointAddrs = append(endpointAddrs, fmt.Sprintf("%s:%s", ep.Host, util.UintToStr(ep.Port)))
 
 			info := strconv.Itoa(i+1) + ") "
@@ -796,7 +814,6 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 
 		// update load balance resolver with new endpoint addresses
 		serviceName := fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
-
 		schemeName, _ := util.ExtractAlpha(c._config.AppName)
 		schemeName = "clb" + schemeName
 
@@ -811,7 +828,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 	c._z.Printf("GetLiveEndpointsCount for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' OK")
 
 	// get live endpoints count
-	return len(c._endpoints), nil
+	return len(eps), nil
 }
 
 // UpdateLoadBalanceResolves updates client load balancer resolver state with new endpoint addresses
@@ -832,7 +849,8 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 
 	c._z.Printf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Started...")
 
-	if len(c._endpoints) == 0 {
+	eps := c.endpointsSnapshot()
+	if len(eps) == 0 {
 		if e := c.discoverEndpoints(false); e != nil {
 			s := "UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Failed: (Discover Endpoints From Cloudmap Error) " + e.Error()
 			c._z.Errorf(s)
@@ -842,8 +860,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 
 	// get endpoint addresses
 	endpointAddrs := []string{}
-
-	for i, ep := range c._endpoints {
+	for i, ep := range eps {
 		endpointAddrs = append(endpointAddrs, fmt.Sprintf("%s:%s", ep.Host, util.UintToStr(ep.Port)))
 
 		info := strconv.Itoa(i+1) + ") "
@@ -872,7 +889,6 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	}
 
 	c._z.Printf("UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' OK")
-
 	return nil
 }
 
@@ -895,7 +911,6 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	// the discovery topicArn as pre-created on aws is stored within, this enables callback for this specific topicArn from notifier server,
 	// note that the service discovery of notifier client is to the notifier server cluster
 	doConnection := false
-
 	if c._notifierClient != nil {
 		doConnection = true
 	}
@@ -943,7 +958,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 								},
 							})
 
-							c._endpoints = _cache.GetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true)
+							c.setEndpoints(_cache.GetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true)) // CHANGED
 
 							if e := c.UpdateLoadBalanceResolver(); e != nil {
 								c.ZLog().Errorf(e.Error())
@@ -958,7 +973,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 							_cache.PurgeServiceEndpointByHostAndPort(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), host, port)
 						}
 
-						c._endpoints = _cache.GetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true)
+						c.setEndpoints(_cache.GetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true))
 
 						if e := c.UpdateLoadBalanceResolver(); e != nil {
 							c.ZLog().Errorf(e.Error())
@@ -1323,7 +1338,7 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
 
-	c._endpoints = []*serviceEndpoint{}
+	c.setEndpoints(nil)
 
 	cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
 	if cacheExpSeconds == 0 {
@@ -1368,11 +1383,13 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 		return fmt.Errorf("Direct Connect IP or Port Not Defined in Config")
 	}
 
-	c._endpoints = append(c._endpoints, &serviceEndpoint{
-		SdType:      "direct",
-		Host:        ip,
-		Port:        port,
-		CacheExpire: cacheExpires,
+	c.setEndpoints([]*serviceEndpoint{
+		{
+			SdType:      "direct",
+			Host:        ip,
+			Port:        port,
+			CacheExpire: cacheExpires,
+		},
 	})
 
 	return nil
@@ -1391,10 +1408,8 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 		return fmt.Errorf("Namespace Name Not Defined in Config (SRV / A SD)")
 	}
 
-	if !srv {
-		if instancePort == 0 {
-			return fmt.Errorf("Instance Port Required in Config When Service Discovery Type is DNS Record Type A")
-		}
+	if !srv && instancePort == 0 {
+		return fmt.Errorf("Instance Port Required in Config When Service Discovery Type is DNS Record Type A")
 	}
 
 	serviceName = strings.ToLower(serviceName)
@@ -1406,9 +1421,9 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	found := _cache.GetLiveServiceEndpoints(serviceName+"."+namespaceName, "")
 
 	if len(found) > 0 && !forceRefresh {
-		c._endpoints = found
+		c.setEndpoints(found)
 		c._z.Printf("Using DNS Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
-		for _, v := range c._endpoints {
+		for _, v := range c.endpointsSnapshot() {
 			c._z.Printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
 		}
 		return nil
@@ -1418,50 +1433,50 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	// acquire dns ip port from service discovery
 	//
 	log.Printf("Start DiscoverDnsIps %s.%s SRV=%v", serviceName, namespaceName, srv)
-	if ipList, err := registry.DiscoverDnsIps(serviceName+"."+namespaceName, srv); err != nil {
+	ipList, err := registry.DiscoverDnsIps(serviceName+"."+namespaceName, srv)
+	if err != nil {
 		return fmt.Errorf("Service Discovery By DNS Failed: " + err.Error())
-	} else {
-		sdType := ""
+	}
+
+	endpoints := []*serviceEndpoint{}
+	sdType := "a"
+	if srv {
+		sdType = "srv"
+	}
+
+	for _, v := range ipList {
+		ip := ""
+		port := uint(0)
 
 		if srv {
-			sdType = "srv"
-		} else {
-			sdType = "a"
-		}
-
-		for _, v := range ipList {
-			ip := ""
-			port := uint(0)
-
-			if srv {
-				// srv
-				av := strings.Split(v, ":")
-				if len(av) == 2 {
-					ip = av[0]
-					port = util.StrToUint(av[1])
-				}
-
-				if util.LenTrim(ip) == 0 || port == 0 {
-					return fmt.Errorf("SRV Host or Port From Service Discovery Not Valid: " + v)
-				}
-			} else {
-				// a
-				ip = v
-				port = c._config.Target.InstancePort
+			// srv
+			av := strings.Split(v, ":")
+			if len(av) == 2 {
+				ip = av[0]
+				port = util.StrToUint(av[1])
 			}
 
-			c._endpoints = append(c._endpoints, &serviceEndpoint{
-				SdType:      sdType,
-				Host:        ip,
-				Port:        port,
-				CacheExpire: cacheExpires,
-			})
+			if util.LenTrim(ip) == 0 || port == 0 {
+				return fmt.Errorf("SRV Host or Port From Service Discovery Not Valid: " + v)
+			}
+		} else {
+			// a
+			ip = v
+			port = c._config.Target.InstancePort
 		}
 
-		_cache.AddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
-
-		return nil
+		c._endpoints = append(c._endpoints, &serviceEndpoint{
+			SdType:      sdType,
+			Host:        ip,
+			Port:        port,
+			CacheExpire: cacheExpires,
+		})
 	}
+
+	c.setEndpoints(endpoints)
+	_cache.AddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
+
+	return nil
 }
 
 func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint, forceRefresh bool) error {
@@ -1490,9 +1505,9 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	found := _cache.GetLiveServiceEndpoints(serviceName+"."+namespaceName, version)
 
 	if len(found) > 0 && !forceRefresh {
-		c._endpoints = found
+		c.setEndpoints(found)
 		c._z.Printf("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
-		for _, v := range c._endpoints {
+		for _, v := range c.endpointsSnapshot() {
 			c._z.Printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
 		}
 		return nil
@@ -1506,13 +1521,11 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	}
 
 	var timeoutDuration []time.Duration
-
 	if timeoutSeconds > 0 {
 		timeoutDuration = append(timeoutDuration, time.Duration(timeoutSeconds)*time.Second)
 	}
 
 	customAttr := map[string]string{}
-
 	if util.LenTrim(version) > 0 {
 		customAttr["INSTANCE_VERSION"] = version
 	} else {
@@ -1520,25 +1533,28 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	}
 
 	log.Printf("Start DiscoverInstances %s.%s attr=%v count=%d", serviceName, namespaceName, customAttr, maxCount)
-	if instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, true, customAttr, &maxCount, timeoutDuration...); err != nil {
+	instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, true, customAttr, &maxCount, timeoutDuration...)
+	if err != nil {
 		return fmt.Errorf("Service Discovery By API Failed: " + err.Error())
-	} else {
-		for _, v := range instanceList {
-			c._endpoints = append(c._endpoints, &serviceEndpoint{
-				SdType:      "api",
-				Host:        v.InstanceIP,
-				Port:        v.InstancePort,
-				InstanceId:  v.InstanceId,
-				ServiceId:   v.ServiceId,
-				Version:     v.InstanceVersion,
-				CacheExpire: cacheExpires,
-			})
-		}
-
-		_cache.AddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
-
-		return nil
 	}
+
+	endpoints := []*serviceEndpoint{}
+	for _, v := range instanceList {
+		c._endpoints = append(c._endpoints, &serviceEndpoint{
+			SdType:      "api",
+			Host:        v.InstanceIP,
+			Port:        v.InstancePort,
+			InstanceId:  v.InstanceId,
+			ServiceId:   v.ServiceId,
+			Version:     v.InstanceVersion,
+			CacheExpire: cacheExpires,
+		})
+	}
+
+	c.setEndpoints(endpoints)
+	_cache.AddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
+
+	return nil
 }
 
 // findUnhealthyInstances will call cloud map sd to discover unhealthy instances, a slice of unhealthy instances is returned
@@ -1672,7 +1688,9 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 	if c._config.Grpc.CircuitBreakerEnabled {
 		c._z.Printf("In - Unary Circuit Breaker Handler: " + method)
 
+		c.cbMu.RLock()
 		cb := c._circuitBreakers[method]
+		c.cbMu.RUnlock()
 
 		if cb == nil {
 			c._z.Printf("... Creating Circuit Breaker for: " + method)
@@ -1682,7 +1700,6 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 				OutputToConsole: false,
 				AppName:         c.AppName,
 			}
-
 			_ = z.Init()
 
 			var e error
@@ -1697,11 +1714,16 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 				c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
 
 				return invoker(ctx, method, req, reply, cc, opts...)
-			} else {
-				c._z.Printf("... Circuit Breaker Created for: " + method)
-
-				c._circuitBreakers[method] = cb
 			}
+
+			c.cbMu.Lock()
+			if c._circuitBreakers == nil {
+				c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
+			}
+			c._circuitBreakers[method] = cb
+			c.cbMu.Unlock()
+
+			c._z.Printf("... Circuit Breaker Created for: " + method)
 		} else {
 			c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
 		}
@@ -1726,9 +1748,9 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 		}, nil)
 
 		return gerr
-	} else {
-		return invoker(ctx, method, req, reply, cc, opts...)
 	}
+
+	return invoker(ctx, method, req, reply, cc, opts...)
 }
 
 func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
@@ -1739,7 +1761,9 @@ func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.Str
 	if c._config.Grpc.CircuitBreakerEnabled {
 		c._z.Printf("In - Stream Circuit Breaker Handler: " + method)
 
+		c.cbMu.RLock()
 		cb := c._circuitBreakers[method]
+		c.cbMu.RUnlock()
 
 		if cb == nil {
 			c._z.Printf("... Creating Circuit Breaker for: " + method)
@@ -1749,7 +1773,6 @@ func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.Str
 				OutputToConsole: false,
 				AppName:         c.AppName,
 			}
-
 			_ = z.Init()
 
 			var e error
@@ -1762,13 +1785,17 @@ func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.Str
 				z); e != nil {
 				c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
 				c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
-
 				return streamer(ctx, desc, cc, method, opts...)
-			} else {
-				c._z.Printf("... Circuit Breaker Created for: " + method)
-
-				c._circuitBreakers[method] = cb
 			}
+
+			c.cbMu.Lock()
+			if c._circuitBreakers == nil { // defensive init
+				c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
+			}
+			c._circuitBreakers[method] = cb
+			c.cbMu.Unlock()
+
+			c._z.Printf("... Circuit Breaker Created for: " + method)
 		} else {
 			c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
 		}
@@ -1795,15 +1822,13 @@ func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.Str
 		if gres != nil {
 			if cs, ok := gres.(grpc.ClientStream); ok {
 				return cs, gerr
-			} else {
-				return nil, fmt.Errorf("Assert grpc.ClientStream Failed")
 			}
-		} else {
-			return nil, gerr
+			return nil, fmt.Errorf("Assert grpc.ClientStream Failed")
 		}
-	} else {
-		return streamer(ctx, desc, cc, method, opts...)
+		return nil, gerr
 	}
+
+	return streamer(ctx, desc, cc, method, opts...)
 }
 
 func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
