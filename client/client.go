@@ -1438,12 +1438,12 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 		return fmt.Errorf("Service Discovery By DNS Failed: " + err.Error())
 	}
 
-	endpoints := []*serviceEndpoint{}
 	sdType := "a"
 	if srv {
 		sdType = "srv"
 	}
 
+	endpoints := make([]*serviceEndpoint, 0, len(ipList))
 	for _, v := range ipList {
 		ip := ""
 		port := uint(0)
@@ -1465,7 +1465,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 			port = c._config.Target.InstancePort
 		}
 
-		c._endpoints = append(c._endpoints, &serviceEndpoint{
+		endpoints = append(endpoints, &serviceEndpoint{
 			SdType:      sdType,
 			Host:        ip,
 			Port:        port,
@@ -1538,9 +1538,9 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		return fmt.Errorf("Service Discovery By API Failed: " + err.Error())
 	}
 
-	endpoints := []*serviceEndpoint{}
+	endpoints := make([]*serviceEndpoint, 0, len(instanceList))
 	for _, v := range instanceList {
-		c._endpoints = append(c._endpoints, &serviceEndpoint{
+		endpoints = append(endpoints, &serviceEndpoint{
 			SdType:      "api",
 			Host:        v.InstanceIP,
 			Port:        v.InstancePort,
