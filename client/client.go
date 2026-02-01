@@ -1812,12 +1812,6 @@ func (c *Client) updateHealth(p *serviceEndpoint, healthy bool) error {
 	}
 
 	if c._sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
-		var timeoutDuration []time.Duration
-
-		if c._config.Target.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(c._config.Target.SdTimeout)*time.Second)
-		}
-
 		return registry.UpdateHealthStatus(c._sd, p.InstanceId, p.ServiceId, healthy)
 	} else {
 		return nil
