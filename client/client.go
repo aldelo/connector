@@ -856,6 +856,14 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 			c._z.Errorf(s)
 			return fmt.Errorf(s)
 		}
+		// refresh snapshot after discovery to use newly populated endpoints
+		eps = c.endpointsSnapshot()
+	}
+
+	if len(eps) == 0 {
+		s := "UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Endpoint Addresses Required"
+		c._z.Errorf(s)
+		return fmt.Errorf(s)
 	}
 
 	// get endpoint addresses
@@ -869,12 +877,6 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
 
 		c._z.Printf("       - " + info)
-	}
-
-	if len(endpointAddrs) == 0 {
-		s := "UpdateLoadBalanceResolver for Client " + c._config.AppName + " with Service '" + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "' Aborted: Endpoint Addresses Required"
-		c._z.Errorf(s)
-		return fmt.Errorf(s)
 	}
 
 	// update load balance resolver with new endpoint addresses
@@ -1311,6 +1313,12 @@ func (c *Client) RemoteAddress() string {
 func (c *Client) connectSd() error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
+	}
+
+	// skip CloudMap wiring when using direct discovery to avoid unnecessary AWS dependency
+	if strings.EqualFold(c._config.Target.ServiceDiscoveryType, "direct") {
+		c._sd = nil
+		return nil
 	}
 
 	if util.LenTrim(c._config.Target.NamespaceName) > 0 && util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.Region) > 0 {
