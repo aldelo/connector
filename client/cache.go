@@ -45,11 +45,12 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 		return
 	}
 
-	if util.LenTrim(serviceName) == 0 {
+	if len(eps) == 0 {
 		return
 	}
 
-	if len(eps) == 0 {
+	serviceName = normalizeServiceName(serviceName) // normalize once up front
+	if serviceName == "" {                          // guard empty normalized name early
 		return
 	}
 
@@ -82,11 +83,6 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 
 	if c.ServiceEndpoints == nil {
 		c.ServiceEndpoints = make(map[string][]*serviceEndpoint)
-	}
-
-	serviceName = normalizeServiceName(serviceName)
-	if serviceName == "" { // guard empty key after normalization
-		return
 	}
 
 	// shared key builder with normalized host/version
@@ -269,14 +265,17 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 		return []*serviceEndpoint{}
 	}
 
-	if util.LenTrim(serviceName) == 0 {
-		return []*serviceEndpoint{}
-	}
-
 	ignExp := false
 	if len(ignoreExpired) > 0 {
 		ignExp = ignoreExpired[0]
 	}
+
+	serviceName = normalizeServiceName(serviceName) // normalize before any other work
+	if serviceName == "" {                          // guard empty normalized name
+		return []*serviceEndpoint{}
+	}
+
+	versionNormalized := strings.ToLower(strings.TrimSpace(version))
 
 	c._mu.Lock()
 	defer c._mu.Unlock()
@@ -284,12 +283,6 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	if c.ServiceEndpoints == nil {
 		return []*serviceEndpoint{}
 	}
-
-	serviceName = normalizeServiceName(serviceName) // normalize consistently
-	if serviceName == "" {                          // guard empty key after normalization
-		return []*serviceEndpoint{}
-	}
-	versionNormalized := strings.ToLower(strings.TrimSpace(version))
 
 	eps, ok := c.ServiceEndpoints[serviceName]
 	if !ok || len(eps) == 0 {
@@ -337,7 +330,7 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 
 		if util.LenTrim(versionNormalized) > 0 && vVersion != versionNormalized {
 			if !c.DisableLogging && !ignExp { // keep existing log behavior only when enforcing expiry
-				log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + version + "': (Version Mismatch) " + v.Version + " vs " + versionNormalized)
+				log.Println("Get Live Service Endpoints for " + serviceName + ", Version '" + versionNormalized + "': (Version Mismatch) " + v.Version + " vs " + versionNormalized)
 			}
 			continue
 		}
