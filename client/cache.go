@@ -34,7 +34,7 @@ type Cache struct {
 
 // normalize service names consistently across all cache operations
 func normalizeServiceName(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(name)), " "))
 }
 
 // AddServiceEndpoints will append slice of service endpoints associated with the given serviceName within map
@@ -71,8 +71,7 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 		if !cp.CacheExpire.IsZero() && cp.CacheExpire.Before(now) { // drop expired
 			continue
 		}
-		cpCopy := cp
-		sanitized = append(sanitized, &cpCopy)
+		sanitized = append(sanitized, &cp)
 	}
 	if len(sanitized) == 0 {
 		return
@@ -207,6 +206,9 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 		return
 	}
 	hostNormalized := strings.ToLower(strings.TrimSpace(host))
+	if hostNormalized == "" { // guard empty after normalization
+		return
+	}
 	if !c.DisableLogging {
 		log.Println("Cached Service Endpoint Purging " + hostNormalized + ":" + util.UintToStr(port) + " From " + serviceName + "...")
 	}
