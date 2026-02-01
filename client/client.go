@@ -1000,13 +1000,6 @@ func (c *Client) DoNotifierAlertService() (err error) {
 			log.Printf(msg, args...)
 		}
 	}
-	warnf := func(msg string, args ...interface{}) {
-		if z != nil {
-			z.Warnf(msg, args...)
-		} else {
-			log.Printf(msg, args...)
-		}
-	}
 
 	// finally, run notifier client to subscribe for notification callbacks
 	// the notifier client uses the same client config yaml, but a copy of it to keep the scope separated
@@ -1445,7 +1438,7 @@ func (c *Client) Close() {
 	if c._notifierClient != nil {
 		if c._notifierClient.NotifierClientAlertServicesStarted() {
 			if err := c._notifierClient.Unsubscribe(); err != nil {
-				c._z.Errorf("!!! Notifier Client Alert Services Unsubscribe Failed: " + err.Error() + " !!!")
+				errorf("!!! Notifier Client Alert Services Unsubscribe Failed: " + err.Error() + " !!!")
 			}
 		}
 
