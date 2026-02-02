@@ -152,6 +152,28 @@ func (c *Client) clearConnection() *grpc.ClientConn {
 	return conn
 }
 
+// centralized helper to drop expired endpoints and normalize live list
+func pruneExpiredEndpoints(eps []*serviceEndpoint) []*serviceEndpoint {
+	now := time.Now()
+	live := make([]*serviceEndpoint, 0, len(eps))
+	seen := make(map[string]struct{})
+	for _, ep := range eps {
+		if ep == nil {
+			continue
+		}
+		if !ep.CacheExpire.IsZero() && ep.CacheExpire.Before(now) {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d", ep.Host, ep.Port)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		live = append(live, ep)
+	}
+	return live
+}
+
 var _mux sync.Mutex // thread-safety for accessing resolver map in DialContext()
 
 // Client represents a gRPC client's connection and entry point,
@@ -255,7 +277,10 @@ func (c *Client) setEndpoints(eps []*serviceEndpoint) {
 func (c *Client) endpointsSnapshot() []*serviceEndpoint {
 	c.endpointsMu.RLock()
 	defer c.endpointsMu.RUnlock()
-	out := make([]*serviceEndpoint, len(c._endpoints))
+
+	live := pruneExpiredEndpoints(c._endpoints)
+	out := make([]*serviceEndpoint, len(live))
+
 	copy(out, c._endpoints)
 	return out
 }
@@ -1735,7 +1760,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	//
 	// check for existing cache
 	//
-	found := cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, "", forceRefresh)
+	found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, "", forceRefresh))
 	if len(found) > 0 {
 		c.setEndpoints(found)
 		c._z.Printf("Using DNS Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
@@ -1762,30 +1787,31 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	seen := make(map[string]struct{})
 	endpoints := make([]*serviceEndpoint, 0, len(ipList))
 	for _, v := range ipList {
-		ip := ""
-		port := uint(0)
+		var host string
+		var port uint
 
 		if srv {
 			// srv
-			av := strings.Split(v, ":")
-			if len(av) == 2 {
-				ip = av[0]
-				port = util.StrToUint(av[1])
+			h, pStr, splitErr := net.SplitHostPort(v)
+			if splitErr != nil {
+				return fmt.Errorf("SRV Host or Port From Service Discovery Not Valid (%q): %v", v, splitErr)
 			}
-
-			if util.LenTrim(ip) == 0 || port == 0 || port > 65535 {
-				return fmt.Errorf("SRV Host or Port From Service Discovery Not Valid: " + v)
+			pInt, convErr := strconv.Atoi(pStr)
+			if convErr != nil || pInt <= 0 || pInt > 65535 {
+				return fmt.Errorf("SRV Port From Service Discovery Not Valid (%q): %v", pStr, convErr)
 			}
+			host = h
+			port = uint(pInt)
 		} else {
 			// a
-			ip = v
+			host = v
 			if instancePort == 0 || instancePort > 65535 {
 				return fmt.Errorf("Configured Instance Port Not Valid: %d", instancePort)
 			}
 			port = instancePort
 		}
 
-		key := fmt.Sprintf("%s:%d", ip, port)
+		key := fmt.Sprintf("%s:%d", host, port)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -1793,14 +1819,15 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 
 		endpoints = append(endpoints, &serviceEndpoint{
 			SdType:      sdType,
-			Host:        ip,
+			Host:        host,
 			Port:        port,
 			CacheExpire: cacheExpires,
 		})
 	}
 
-	c.setEndpoints(endpoints)
-	cacheAddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
+	live := pruneExpiredEndpoints(endpoints)
+	c.setEndpoints(live)
+	cacheAddServiceEndpoints(serviceName+"."+namespaceName, live)
 
 	return nil
 }
@@ -1828,7 +1855,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	//
 	// check for existing cache
 	//
-	found := cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, version, forceRefresh)
+	found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, version, forceRefresh))
 	if len(found) > 0 {
 		c.setEndpoints(found)
 		c._z.Printf("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
@@ -1887,8 +1914,9 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		})
 	}
 
-	c.setEndpoints(endpoints)
-	cacheAddServiceEndpoints(serviceName+"."+namespaceName, c._endpoints)
+	live := pruneExpiredEndpoints(endpoints)
+	c.setEndpoints(live)
+	cacheAddServiceEndpoints(serviceName+"."+namespaceName, live)
 
 	return nil
 }
