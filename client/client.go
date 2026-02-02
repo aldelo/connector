@@ -118,8 +118,20 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 	c.connMu.Lock()
 	c._conn = conn
 	c._remoteAddress = remote
+
 	if conn != nil {
-		c._healthManualChecker, _ = health.NewHealthClient(conn)
+		// capture and handle possible health client init error to avoid nil deref later
+		hc, err := health.NewHealthClient(conn)
+		if err != nil {
+			c._healthManualChecker = nil
+			if c._z != nil {
+				c._z.Errorf("Init health client failed: %v", err)
+			} else {
+				log.Printf("Init health client failed: %v", err)
+			}
+		} else {
+			c._healthManualChecker = hc
+		}
 	} else {
 		c._healthManualChecker = nil
 	}
@@ -1369,10 +1381,21 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 
 	// per-attempt timeout (cap at remaining time, min 1s)
 	perAttempt := 2 * time.Second
+	if perAttempt > timeout {
+		perAttempt = timeout
+	}
 
 	result := make(chan string, 1)
 	go func() {
+		defer close(result)
 		for {
+			remaining := time.Until(expireDateTime)
+			if remaining <= 0 {
+				warnf("Health Status Check Timeout")
+				result <- "Health Status Check Failed: Timeout"
+				return
+			}
+
 			select {
 			case <-ctx.Done():
 				result <- ctx.Err().Error()
@@ -1380,12 +1403,6 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			default:
 			}
 
-			remaining := time.Until(expireDateTime)
-			if remaining <= 0 {
-				warnf("Health Status Check Timeout")
-				result <- "Health Status Check Failed: Timeout"
-				return
-			}
 			attemptTimeout := perAttempt
 			if remaining < attemptTimeout {
 				attemptTimeout = remaining
@@ -1400,24 +1417,21 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 					printf("Serving Status Detected")
 					result <- "OK"
 					return
-				} else {
-					warnf("Not Serving!")
 				}
+
+				warnf("Not Serving!")
 			}
 
 			time.Sleep(2500 * time.Millisecond)
-
-			if time.Now().After(expireDateTime) {
-				warnf("Health Status Check Timeout")
-				result <- "Health Status Check Failed: Timeout"
-				return
-			}
 		}
 	}()
 
 	printf("Heath Status Check Finalized...")
 
-	errInfo := <-result
+	errInfo, ok := <-result
+	if !ok {
+		return fmt.Errorf("Health Status Check Failed: unknown error")
+	}
 
 	if errInfo == "OK" {
 		// success - server service health = serving
@@ -1443,8 +1457,20 @@ func (c *Client) setupHealthManualChecker() {
 	}
 
 	c.connMu.Lock()
-	c._healthManualChecker, _ = health.NewHealthClient(conn) // now under lock
-	c.connMu.Unlock()
+	defer c.connMu.Unlock()
+
+	// handle potential init error; keep state consistent
+	hc, err := health.NewHealthClient(conn)
+	if err != nil {
+		c._healthManualChecker = nil
+		if c._z != nil {
+			c._z.Errorf("Init health client failed: %v", err)
+		} else {
+			log.Printf("Init health client failed: %v", err)
+		}
+		return
+	}
+	c._healthManualChecker = hc
 }
 
 // HealthProbe manually checks service serving health status
