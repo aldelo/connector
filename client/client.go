@@ -842,7 +842,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 
 	if e := c.discoverEndpoints(forceRefresh); e != nil {
 		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error()) // CHANGED
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
 		errorf(s)
 		return 0, fmt.Errorf(s)
 	}
@@ -880,7 +880,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		// update load balance resolver with new endpoint addresses
 		serviceName := fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		schemeName, _ := util.ExtractAlpha(c._config.AppName)
-		schemeName = "clb" + schemeName
+		schemeName = strings.ToLower("clb" + schemeName)
 
 		if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
 			errorf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s",
@@ -974,7 +974,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	serviceName := fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
 
 	schemeName, _ := util.ExtractAlpha(c._config.AppName)
-	schemeName = "clb" + schemeName
+	schemeName = strings.ToLower("clb" + schemeName)
 
 	if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
 		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s",
@@ -2056,6 +2056,11 @@ func (c *Client) streamCircuitBreakerHandler(
 			return cs, gerr
 		}
 		return nil, fmt.Errorf("Assert grpc.ClientStream Failed")
+	}
+
+	// avoid returning (nil, nil) which causes caller panic
+	if gerr == nil {
+		return nil, fmt.Errorf("Circuit breaker returned nil stream without error for method %s", method)
 	}
 	return nil, gerr
 }
