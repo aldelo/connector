@@ -264,6 +264,9 @@ type Client struct {
 	_z *data.ZapLog
 
 	closed atomic.Bool
+
+	// guard to avoid spawning overlapping notifier reconnect loops
+	notifierReconnectActive atomic.Bool
 }
 
 // safely replace the current endpoints slice
@@ -1090,6 +1093,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
+
 	if c.closed.Load() {
 		return fmt.Errorf("Client is closed")
 	}
@@ -1193,37 +1197,49 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 				c._notifierClient.ServiceAlertStoppedHandler = func(reason string) {
 					if strings.Contains(strings.ToLower(reason), "transport is closing") {
-						if c._notifierClient != nil && c._z != nil {
+						if c.closed.Load() {
+							return
+						}
+						// guard to avoid overlapping reconnect loops
+						if !c.notifierReconnectActive.CompareAndSwap(false, true) {
 							if z != nil {
-								z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+								z.Warnf("Notifier reconnect already in progress; skipping duplicate attempt")
 							} else {
-								log.Printf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+								log.Printf("Notifier reconnect already in progress; skipping duplicate attempt")
 							}
+							return
+						}
 
-							go func() { // reconnect asynchronously to avoid blocking callback
-								for {
-									if c.closed.Load() {
-										return
-									}
-									time.Sleep(5 * time.Second)
-									if c._notifierClient != nil {
-										c._notifierClient.Close()
-									}
-									if c.closed.Load() {
-										return
-									}
-									if e := c.DoNotifierAlertService(); e != nil {
-										if z != nil {
-											z.Errorf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", e.Error())
-										} else {
-											log.Printf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", e.Error())
-										}
-										continue
-									}
+						if z != nil {
+							z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+						} else {
+							log.Printf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+						}
+
+						go func() { // reconnect asynchronously to avoid blocking callback
+							defer c.notifierReconnectActive.Store(false)
+							for {
+								if c.closed.Load() {
 									return
 								}
-							}()
-						}
+								time.Sleep(5 * time.Second)
+								if c._notifierClient != nil {
+									c._notifierClient.Close()
+								}
+								if c.closed.Load() {
+									return
+								}
+								if e := c.DoNotifierAlertService(); e != nil {
+									if z != nil {
+										z.Errorf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", e.Error())
+									} else {
+										log.Printf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", e.Error())
+									}
+									continue
+								}
+								return
+							}
+						}()
 					} else if z != nil {
 						z.Printf("--- Notifier Client Service Disconnected Normally: %s ---", reason)
 					} else {
@@ -1242,6 +1258,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 					errorf("!!! Notifier Client Service Dial Failed: %s !!!", err.Error())
 					c._notifierClient.Close()
 				}
+				c.notifierReconnectActive.Store(false)
 				return err
 			} else {
 				if err = c._notifierClient.Subscribe(c._notifierClient.ConfiguredSNSDiscoveryTopicArn()); err != nil {
@@ -1249,6 +1266,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 						errorf("!!! Notifier Client Service Subscribe Failed: %s !!!", err.Error())
 						c._notifierClient.Close()
 					}
+					c.notifierReconnectActive.Store(false)
 					return err
 				} else {
 					printf("~~~ Notifier Client Service Started ~~~")
@@ -1402,20 +1420,15 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		timeout = 5 * time.Second
 	}
 
-	expireDateTime := time.Now().Add(timeout)
-
-	// per-attempt timeout (cap at remaining time, min 1s)
-	perAttempt := 2 * time.Second
-	if perAttempt > timeout {
-		perAttempt = timeout
-	}
+	// use a deadline-aware loop without fixed oversleep
+	deadline := time.Now().Add(timeout)
+	interval := 250 * time.Millisecond
 
 	result := make(chan string, 1)
 	go func() {
 		defer close(result)
 		for {
-			remaining := time.Until(expireDateTime)
-			if remaining <= 0 {
+			if time.Now().After(deadline) {
 				warnf("Health Status Check Timeout")
 				result <- "Health Status Check Failed: Timeout"
 				return
@@ -1428,12 +1441,14 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			default:
 			}
 
-			attemptTimeout := perAttempt
-			if remaining < attemptTimeout {
-				attemptTimeout = remaining
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				warnf("Health Status Check Timeout")
+				result <- "Health Status Check Failed: Timeout"
+				return
 			}
 
-			if status, e := c.HealthProbe("", attemptTimeout); e != nil {
+			if status, e := c.HealthProbe("", remaining); e != nil {
 				errorf("Health Status Check Failed: %s", e.Error())
 				result <- "Health Status Check Failed: " + e.Error()
 				return
@@ -1443,11 +1458,14 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 					result <- "OK"
 					return
 				}
-
 				warnf("Not Serving!")
 			}
 
-			time.Sleep(2500 * time.Millisecond)
+			// sleep only up to the remaining time
+			if sleep := interval; sleep > remaining {
+				sleep = remaining
+			}
+			time.Sleep(interval)
 		}
 	}()
 
@@ -1504,6 +1522,10 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 		return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Client Object Nil")
 	}
 
+	if c.closed.Load() {
+		return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: client is closed")
+	}
+
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {
 		if z != nil {
@@ -1517,6 +1539,10 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 	hc := c._healthManualChecker
 	conn := c._conn
 	c.connMu.RUnlock()
+
+	if conn == nil {
+		return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: client connection is nil")
+	}
 
 	if hc == nil {
 		if conn != nil {
@@ -1610,6 +1636,7 @@ func (c *Client) Close() {
 		c._notifierClient.Close()
 		c._notifierClient = nil
 	}
+	c.notifierReconnectActive.Store(false)
 
 	if c._sqs != nil {
 		c._sqs.Disconnect()
@@ -1622,6 +1649,12 @@ func (c *Client) Close() {
 	if conn := c.clearConnection(); conn != nil {
 		_ = conn.Close()
 	}
+
+	// clear circuit breaker and endpoints state to avoid reuse across dials
+	c.cbMu.Lock()
+	c._circuitBreakers = nil
+	c.cbMu.Unlock()
+	c.setEndpoints(nil)
 }
 
 // ClientConnection returns the currently loaded grpc client connection
@@ -1721,8 +1754,11 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 	}
 
 	p, convErr := strconv.Atoi(portStr)
-	if convErr != nil || p <= 0 || p > 65535 {
-		return fmt.Errorf("Direct Connect port invalid (got %q): %v", portStr, convErr)
+	if convErr != nil {
+		return fmt.Errorf("Direct Connect port invalid (%q): %v", portStr, convErr)
+	}
+	if p <= 0 || p > 65535 {
+		return fmt.Errorf("Direct Connect port out of range (1-65535): %d", p)
 	}
 
 	c.setEndpoints([]*serviceEndpoint{
