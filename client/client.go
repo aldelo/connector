@@ -1967,47 +1967,63 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	logprintf := func(msg string, args ...interface{}) {
+		if z := c.ZLog(); z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+	errorf := func(msg string, args ...interface{}) {
+		if z := c.ZLog(); z != nil {
+			z.Errorf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+
 	if c._sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
-		c._z.Printf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Begin...")
+		logprintf("De-Register Instance '%s:%s-%s' Begin...", p.Host, util.UintToStr(p.Port), p.InstanceId)
 
 		var timeoutDuration []time.Duration
-
 		if c._config.Target.SdTimeout > 0 {
 			timeoutDuration = append(timeoutDuration, time.Duration(c._config.Target.SdTimeout)*time.Second)
 		}
 
-		if operationId, err := registry.DeregisterInstance(c._sd, p.InstanceId, p.ServiceId, timeoutDuration...); err != nil {
-			c._z.Errorf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: " + err.Error())
-			return fmt.Errorf("De-Register Instance '"+p.Host+":"+util.UintToStr(p.Port)+"-"+p.InstanceId+"'Fail: %s", err.Error())
-		} else {
-			tryCount := 0
-
-			time.Sleep(250 * time.Millisecond)
-
-			for {
-				if status, e := registry.GetOperationStatus(c._sd, operationId, timeoutDuration...); e != nil {
-					c._z.Errorf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: " + e.Error())
-					return fmt.Errorf("De-Register Instance '"+p.Host+":"+util.UintToStr(p.Port)+"-"+p.InstanceId+"'Fail: %s", e.Error())
-				} else {
-					if status == sdoperationstatus.Success {
-						c._z.Printf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' OK")
-					} else {
-						// wait 250 ms then retry, up until 20 counts of 250 ms (5 seconds)
-						if tryCount < 20 {
-							tryCount++
-							c._z.Printf("... Checking De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Completion Status, Attempt " + strconv.Itoa(tryCount) + " (100ms)")
-							time.Sleep(250 * time.Millisecond)
-						} else {
-							c._z.Errorf("... De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "' Failed: Operation Timeout After 5 Seconds")
-							return fmt.Errorf("De-Register Instance '" + p.Host + ":" + util.UintToStr(p.Port) + "-" + p.InstanceId + "'Fail When Operation Timed Out After 5 Seconds")
-						}
-					}
-				}
-			}
+		operationId, err := registry.DeregisterInstance(c._sd, p.InstanceId, p.ServiceId, timeoutDuration...)
+		if err != nil {
+			errorf("... De-Register Instance '%s:%s-%s' Failed: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
+			return fmt.Errorf("De-Register Instance '%s:%s-%s'Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
 		}
-	} else {
-		return nil
+
+		tryCount := 0
+		time.Sleep(250 * time.Millisecond)
+
+		for {
+			status, e := registry.GetOperationStatus(c._sd, operationId, timeoutDuration...)
+			if e != nil {
+				errorf("... De-Register Instance '%s:%s-%s' Failed: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, e.Error())
+				return fmt.Errorf("De-Register Instance '%s:%s-%s'Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, e.Error())
+			}
+
+			if status == sdoperationstatus.Success {
+				logprintf("... De-Register Instance '%s:%s-%s' OK", p.Host, util.UintToStr(p.Port), p.InstanceId)
+				return nil
+			}
+
+			if tryCount < 20 {
+				tryCount++
+				logprintf("... Checking De-Register Instance '%s:%s-%s' Completion Status, Attempt %d (100ms)", p.Host, util.UintToStr(p.Port), p.InstanceId, tryCount)
+				time.Sleep(250 * time.Millisecond)
+				continue
+			}
+
+			errorf("... De-Register Instance '%s:%s-%s' Failed: Operation Timeout After 5 Seconds", p.Host, util.UintToStr(p.Port), p.InstanceId)
+			return fmt.Errorf("De-Register Instance '%s:%s-%s'Fail When Operation Timed Out After 5 Seconds", p.Host, util.UintToStr(p.Port), p.InstanceId)
+		}
 	}
+
+	return nil
 }
 
 func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
