@@ -577,9 +577,16 @@ func (c *Client) Ready() bool {
 		return false
 	}
 
+	if c.closed.Load() { // ensure closed clients are never reported ready
+		return false
+	}
+
 	eps := c.endpointsSnapshot() // protect _endpoints read
-	if c._conn != nil && len(eps) > 0 && (c._conn.GetState() == connectivity.Ready || c._conn.GetState() == connectivity.Idle) {
-		return true
+	if c._conn != nil && len(eps) > 0 {
+		state := c._conn.GetState() // avoid multiple state reads
+		if state == connectivity.Ready || state == connectivity.Idle {
+			return true
+		}
 	}
 
 	return false
@@ -1520,6 +1527,8 @@ func (c *Client) Close() {
 
 	if c._conn != nil {
 		_ = c._conn.Close()
+		c._conn = nil // clear closed connection reference
+		c._healthManualChecker = nil
 	}
 }
 
@@ -2130,8 +2139,13 @@ func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req 
 			}
 		}()
 
-		md := metadata.New(nil)
-		md.Set("x-amzn-seg-id", seg.Seg.ID)
+		md, ok := metadata.FromOutgoingContext(ctx) // preserve existing outgoing metadata
+		if !ok {
+			md = metadata.New(nil) // initialize if absent
+		} else {
+			md = md.Copy() // avoid mutating shared maps
+		}
+		md.Set("x-amzn-seg-id", seg.Seg.ID) // keep existing keys while adding tracing
 		md.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 		// attach tracing headers to outgoing context
@@ -2193,8 +2207,13 @@ func (c *Client) streamXRayTracerHandler(
 			}
 		}()
 
-		md := metadata.New(nil)
-		md.Set("x-amzn-seg-id", seg.Seg.ID)
+		md, ok := metadata.FromOutgoingContext(ctx) // preserve existing outgoing metadata
+		if !ok {
+			md = metadata.New(nil) // initialize if absent
+		} else {
+			md = md.Copy() // avoid mutating shared maps
+		}
+		md.Set("x-amzn-seg-id", seg.Seg.ID) // keep existing keys while adding tracing
 		md.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 		// attach tracing headers to outgoing context for the stream
