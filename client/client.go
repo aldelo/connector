@@ -281,7 +281,7 @@ func (c *Client) endpointsSnapshot() []*serviceEndpoint {
 	live := pruneExpiredEndpoints(c._endpoints)
 	out := make([]*serviceEndpoint, len(live))
 
-	copy(out, c._endpoints)
+	copy(out, live)
 	return out
 }
 
