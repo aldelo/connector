@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	util "github.com/aldelo/common"
@@ -196,6 +197,8 @@ type Client struct {
 
 	// zap logger instead of standard log
 	_z *data.ZapLog
+
+	closed atomic.Bool
 }
 
 // safely replace the current endpoints slice
@@ -588,6 +591,7 @@ func (c *Client) Dial(ctx context.Context) error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	c.closed.Store(false)
 	c._remoteAddress = ""
 
 	// read client config data in
@@ -732,7 +736,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			c._z.Printf("... gRPC Service @ " + target + " [" + c._remoteAddress + "] Connected")
 
 			if c.WaitForServerReady {
-				if e := c.waitForEndpointReady(time.Duration(dialSec) * time.Second); e != nil {
+				if e := c.waitForEndpointReady(ctxWithTimeout, time.Duration(dialSec)*time.Second); e != nil {
 					// health probe failed
 					_ = c._conn.Close()
 					if seg != nil {
@@ -767,7 +771,7 @@ func (c *Client) Dial(ctx context.Context) error {
 					c._z.Errorf("... Http Web Server Fail to Start")
 				default:
 					// wait short time to check if web server was started up successfully
-					if e := c.waitForWebServerReady(time.Duration(c._config.Target.SdTimeout) * time.Second); e != nil {
+					if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
 						// web server error
 						c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
 						if seg != nil {
@@ -999,6 +1003,9 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
+	if c.closed.Load() {
+		return fmt.Errorf("Client is closed")
+	}
 
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {
@@ -1108,9 +1115,15 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 							go func() { // reconnect asynchronously to avoid blocking callback
 								for {
+									if c.closed.Load() {
+										return
+									}
 									time.Sleep(5 * time.Second)
 									if c._notifierClient != nil {
 										c._notifierClient.Close()
+									}
+									if c.closed.Load() {
+										return
 									}
 									if e := c.DoNotifierAlertService(); e != nil {
 										if z != nil {
@@ -1164,7 +1177,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 // waitForWebServerReady is called after web server is expected to start,
 // this function will wait a short time for web server startup success or timeout
-func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
+func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...time.Duration) error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
@@ -1216,6 +1229,14 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 
 	go func() {
 		for {
+			select {
+			case <-ctx.Done():
+				wg.Done()
+				chanErrorInfo <- ctx.Err().Error()
+				return
+			default:
+			}
+
 			if status, _, e := rest.GET(healthUrl, nil); e != nil {
 				errorf("Web Server Health Check Failed: %s", e.Error())
 				wg.Done()
@@ -1259,7 +1280,7 @@ func (c *Client) waitForWebServerReady(timeoutDuration ...time.Duration) error {
 }
 
 // waitForEndpointReady is called after Dial to check if target service is ready as reported by health probe
-func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
+func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...time.Duration) error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
@@ -1312,6 +1333,13 @@ func (c *Client) waitForEndpointReady(timeoutDuration ...time.Duration) error {
 		defer wg.Done()
 
 		for {
+			select {
+			case <-ctx.Done():
+				chanErrorInfo <- ctx.Err().Error()
+				return
+			default:
+			}
+
 			remaining := time.Until(expireDateTime)
 			if remaining <= 0 {
 				warnf("Health Status Check Timeout")
@@ -1429,6 +1457,8 @@ func (c *Client) Close() {
 		log.Println("Close(): Client Object Nil")
 		return
 	}
+
+	c.closed.Store(true)
 
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {
