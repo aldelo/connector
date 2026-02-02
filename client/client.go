@@ -110,6 +110,36 @@ func cachePurgeServiceEndpointByHostAndPort(key, host string, port uint) {
 	}
 }
 
+// sets connection state under lock
+func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
+	if c == nil {
+		return
+	}
+	c.connMu.Lock()
+	c._conn = conn
+	c._remoteAddress = remote
+	if conn != nil {
+		c._healthManualChecker, _ = health.NewHealthClient(conn)
+	} else {
+		c._healthManualChecker = nil
+	}
+	c.connMu.Unlock()
+}
+
+// clears connection state under lock and returns old conn for closing
+func (c *Client) clearConnection() *grpc.ClientConn {
+	if c == nil {
+		return nil
+	}
+	c.connMu.Lock()
+	conn := c._conn
+	c._conn = nil
+	c._remoteAddress = ""
+	c._healthManualChecker = nil
+	c.connMu.Unlock()
+	return conn
+}
+
 var _mux sync.Mutex // thread-safety for accessing resolver map in DialContext()
 
 // Client represents a gRPC client's connection and entry point,
@@ -181,6 +211,7 @@ type Client struct {
 	// thread-safety guards
 	endpointsMu sync.RWMutex // protects _endpoints
 	cbMu        sync.RWMutex // protects _circuitBreakers
+	connMu      sync.RWMutex // protects _conn, _remoteAddress, _healthManualChecker
 
 	// instantiated internal objects
 	_conn          *grpc.ClientConn
@@ -582,8 +613,13 @@ func (c *Client) Ready() bool {
 	}
 
 	eps := c.endpointsSnapshot() // protect _endpoints read
-	if c._conn != nil && len(eps) > 0 {
-		state := c._conn.GetState() // avoid multiple state reads
+
+	c.connMu.RLock()
+	conn := c._conn
+	c.connMu.RUnlock()
+
+	if conn != nil && len(eps) > 0 {
+		state := conn.GetState() // avoid multiple state reads
 		if state == connectivity.Ready || state == connectivity.Idle {
 			return true
 		}
@@ -599,7 +635,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	}
 
 	c.closed.Store(false)
-	c._remoteAddress = ""
+	c.setConnection(nil, "")
 
 	// read client config data in
 	if c._config == nil {
@@ -723,79 +759,80 @@ func (c *Client) Dial(ctx context.Context) error {
 			defer seg.Close()
 		}
 
-		if c._conn, err = muxDialContext(ctxWithTimeout, target, opts...); err != nil {
+		conn, err := muxDialContext(ctxWithTimeout, target, opts...)
+		if err != nil {
 			c._z.Errorf("Dial Failed: (If TLS/mTLS, Check Certificate SAN) %s", err.Error())
 			e := fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: (If TLS/mTLS, Check Certificate SAN) %s", target, err.Error())
 			if seg != nil {
 				_ = seg.Seg.AddError(e)
 			}
 			return e
-		} else {
-			// dial grpc service endpoint success
-			c._z.Printf("Dial Successful")
-
-			c._remoteAddress = target
-
-			c._z.Printf("Remote Address = " + target)
-
-			c.setupHealthManualChecker()
-
-			c._z.Printf("... gRPC Service @ " + target + " [" + c._remoteAddress + "] Connected")
-
-			if c.WaitForServerReady {
-				if e := c.waitForEndpointReady(ctxWithTimeout, time.Duration(dialSec)*time.Second); e != nil {
-					// health probe failed
-					_ = c._conn.Close()
-					if seg != nil {
-						_ = seg.Seg.AddError(fmt.Errorf("gRPC Service Server Not Ready: " + e.Error()))
-					}
-					return fmt.Errorf("gRPC Service Server Not Ready: " + e.Error())
-				}
-			}
-
-			// dial successful, now start web server for notification callbacks (webhook)
-			if c.WebServerConfig != nil && util.LenTrim(c.WebServerConfig.ConfigFileName) > 0 {
-				c._z.Printf("Starting Http Web Server...")
-				startWebServerFail := make(chan bool)
-
-				go func() {
-					//
-					// start http web server
-					//
-					if err := c.startWebServer(); err != nil {
-						c._z.Errorf("Serve Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
-						startWebServerFail <- true
-					} else {
-						c._z.Printf("... Http Web Server Quit Command Received")
-					}
-				}()
-
-				// give slight time delay to allow time slice for non blocking code to complete in goroutine above
-				time.Sleep(150 * time.Millisecond)
-
-				select {
-				case <-startWebServerFail:
-					c._z.Errorf("... Http Web Server Fail to Start")
-				default:
-					// wait short time to check if web server was started up successfully
-					if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
-						// web server error
-						c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
-						if seg != nil {
-							_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
-						}
-					} else {
-						// web server ok
-						c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
-					}
-				}
-			}
-
-			//
-			// dial completed
-			//
-			return nil
 		}
+
+		// dial grpc service endpoint success
+		c._z.Printf("Dial Successful")
+
+		c.setConnection(conn, target)
+
+		c._z.Printf("Remote Address = " + target)
+
+		c._z.Printf("... gRPC Service @ " + target + " [" + c.RemoteAddress() + "] Connected")
+
+		if c.WaitForServerReady {
+			if e := c.waitForEndpointReady(ctxWithTimeout, time.Duration(dialSec)*time.Second); e != nil {
+				// health probe failed
+				if closedConn := c.clearConnection(); closedConn != nil {
+					_ = closedConn.Close()
+				}
+				if seg != nil {
+					_ = seg.Seg.AddError(fmt.Errorf("gRPC Service Server Not Ready: " + e.Error()))
+				}
+				return fmt.Errorf("gRPC Service Server Not Ready: " + e.Error())
+			}
+		}
+
+		// dial successful, now start web server for notification callbacks (webhook)
+		if c.WebServerConfig != nil && util.LenTrim(c.WebServerConfig.ConfigFileName) > 0 {
+			c._z.Printf("Starting Http Web Server...")
+			startWebServerFail := make(chan bool)
+
+			go func() {
+				//
+				// start http web server
+				//
+				if err := c.startWebServer(); err != nil {
+					c._z.Errorf("Serve Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
+					startWebServerFail <- true
+				} else {
+					c._z.Printf("... Http Web Server Quit Command Received")
+				}
+			}()
+
+			// give slight time delay to allow time slice for non blocking code to complete in goroutine above
+			time.Sleep(150 * time.Millisecond)
+
+			select {
+			case <-startWebServerFail:
+				c._z.Errorf("... Http Web Server Fail to Start")
+			default:
+				// wait short time to check if web server was started up successfully
+				if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+					// web server error
+					c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
+					if seg != nil {
+						_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
+					}
+				} else {
+					// web server ok
+					c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
+				}
+			}
+		}
+
+		//
+		// dial completed
+		//
+		return nil
 	}
 }
 
@@ -835,9 +872,12 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		return 0, fmt.Errorf("Config Data Not Loaded")
 	}
 
-	if c._conn == nil {
+	c.connMu.RLock()
+	connReady := c._conn != nil
+	c.connMu.RUnlock()
+	if !connReady {
 		errorf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName) // CHANGED
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return 0, fmt.Errorf("GetLiveEndpointsCount requires current client connection already established first")
 	}
 
@@ -934,7 +974,10 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
 
-	if c._conn == nil {
+	c.connMu.RLock()
+	connReady := c._conn != nil
+	c.connMu.RUnlock()
+	if !connReady {
 		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return fmt.Errorf("UpdateLoadBalanceResolver Requires Current Client Connection Already Established First")
@@ -1327,22 +1370,12 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	// per-attempt timeout (cap at remaining time, min 1s)
 	perAttempt := 2 * time.Second
 
-	//
-	// check if service is ready
-	// wait for target service to respond with serving status before moving forward
-	//
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-
-	chanErrorInfo := make(chan string)
-
+	result := make(chan string, 1)
 	go func() {
-		defer wg.Done()
-
 		for {
 			select {
 			case <-ctx.Done():
-				chanErrorInfo <- ctx.Err().Error()
+				result <- ctx.Err().Error()
 				return
 			default:
 			}
@@ -1350,7 +1383,7 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			remaining := time.Until(expireDateTime)
 			if remaining <= 0 {
 				warnf("Health Status Check Timeout")
-				chanErrorInfo <- "Health Status Check Failed: Timeout"
+				result <- "Health Status Check Failed: Timeout"
 				return
 			}
 			attemptTimeout := perAttempt
@@ -1360,12 +1393,12 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 
 			if status, e := c.HealthProbe("", attemptTimeout); e != nil {
 				errorf("Health Status Check Failed: %s", e.Error())
-				chanErrorInfo <- "Health Status Check Failed: " + e.Error()
+				result <- "Health Status Check Failed: " + e.Error()
 				return
 			} else {
 				if status == grpc_health_v1.HealthCheckResponse_SERVING {
 					printf("Serving Status Detected")
-					chanErrorInfo <- "OK"
+					result <- "OK"
 					return
 				} else {
 					warnf("Not Serving!")
@@ -1376,17 +1409,15 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 
 			if time.Now().After(expireDateTime) {
 				warnf("Health Status Check Timeout")
-				chanErrorInfo <- "Health Status Check Failed: Timeout"
+				result <- "Health Status Check Failed: Timeout"
 				return
 			}
 		}
 	}()
 
-	wg.Wait()
-
 	printf("Heath Status Check Finalized...")
 
-	errInfo := <-chanErrorInfo
+	errInfo := <-result
 
 	if errInfo == "OK" {
 		// success - server service health = serving
@@ -1404,11 +1435,16 @@ func (c *Client) setupHealthManualChecker() {
 		return
 	}
 
-	if c._conn == nil {
+	c.connMu.RLock()
+	conn := c._conn
+	c.connMu.RUnlock()
+	if conn == nil {
 		return
 	}
 
-	c._healthManualChecker, _ = health.NewHealthClient(c._conn)
+	c.connMu.Lock()
+	c._healthManualChecker, _ = health.NewHealthClient(conn) // now under lock
+	c.connMu.Unlock()
 }
 
 // HealthProbe manually checks service serving health status
@@ -1426,11 +1462,18 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 		}
 	}
 
-	if c._healthManualChecker == nil {
-		if c._conn != nil {
-			c.setupHealthManualChecker()
+	c.connMu.RLock()
+	hc := c._healthManualChecker
+	conn := c._conn
+	c.connMu.RUnlock()
 
-			if c._healthManualChecker == nil {
+	if hc == nil {
+		if conn != nil {
+			c.setupHealthManualChecker()
+			c.connMu.RLock()
+			hc = c._healthManualChecker
+			c.connMu.RUnlock()
+			if hc == nil {
 				return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: (Auto Instantiate) %s", "Health Manual Checker is Nil")
 			}
 		} else {
@@ -1441,7 +1484,7 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 	printf("Health Probe - Manual Check Begin...")
 	defer printf("... Health Probe - Manual Check End")
 
-	return c._healthManualChecker.Check(serviceName, timeoutDuration...)
+	return hc.Check(serviceName, timeoutDuration...)
 }
 
 // GetState returns the current grpc client connection's state
@@ -1451,8 +1494,11 @@ func (c *Client) GetState() connectivity.State {
 		return connectivity.Shutdown
 	}
 
-	if c._conn != nil {
-		return c._conn.GetState()
+	c.connMu.RLock()
+	conn := c._conn
+	c.connMu.RUnlock()
+	if conn != nil {
+		return conn.GetState()
 	} else {
 		return connectivity.Shutdown
 	}
@@ -1514,9 +1560,6 @@ func (c *Client) Close() {
 		c._notifierClient = nil
 	}
 
-	// clean up client connection objects
-	c._remoteAddress = ""
-
 	if c._sqs != nil {
 		c._sqs.Disconnect()
 	}
@@ -1525,10 +1568,8 @@ func (c *Client) Close() {
 		c._sd.Disconnect()
 	}
 
-	if c._conn != nil {
-		_ = c._conn.Close()
-		c._conn = nil // clear closed connection reference
-		c._healthManualChecker = nil
+	if conn := c.clearConnection(); conn != nil {
+		_ = conn.Close()
 	}
 }
 
@@ -1539,7 +1580,10 @@ func (c *Client) ClientConnection() grpc.ClientConnInterface {
 		return nil
 	}
 
-	return c._conn
+	c.connMu.RLock()
+	conn := c._conn
+	c.connMu.RUnlock()
+	return conn
 }
 
 // RemoteAddress gets the remote endpoint address currently connected to
@@ -1549,7 +1593,10 @@ func (c *Client) RemoteAddress() string {
 		return ""
 	}
 
-	return c._remoteAddress
+	c.connMu.RLock()
+	addr := c._remoteAddress
+	c.connMu.RUnlock()
+	return addr
 }
 
 // connectSd will try to establish service discovery object to struct
