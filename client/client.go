@@ -825,12 +825,14 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 	}
 
 	if c._conn == nil {
-		errorf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		errorf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName) // CHANGED
 		return 0, fmt.Errorf("GetLiveEndpointsCount requires current client connection already established first")
 	}
 
 	if c._config.Target.ServiceDiscoveryType == "direct" {
-		printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return 0, nil
 	}
 
@@ -839,14 +841,16 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 	forceRefresh := len(c.endpointsSnapshot()) == 0 || updateEndpointsToLoadBalanceResolver
 
 	if e := c.discoverEndpoints(forceRefresh); e != nil {
-		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error()) // CHANGED
 		errorf(s)
 		return 0, fmt.Errorf(s)
 	}
 
 	eps := c.endpointsSnapshot()
 	if len(eps) == 0 {
-		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) No Live Endpoints", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) No Live Endpoints",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		errorf(s)
 		return 0, fmt.Errorf(s)
 	}
@@ -863,11 +867,12 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 			info += "Version=" + ep.Version + ", "
 			info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
 
-			c._z.Printf("       - " + info)
+			printf("       - " + info)
 		}
 
 		if len(endpointAddrs) == 0 {
-			s := fmt.Sprintf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+			s := fmt.Sprintf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required",
+				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 			errorf(s)
 			return 0, fmt.Errorf(s)
 		}
@@ -878,14 +883,17 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		schemeName = "clb" + schemeName
 
 		if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
-			errorf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+			errorf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s",
+				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
 			return 0, e
 		}
 
-		printf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' OK", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		printf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' OK",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 	}
 
-	printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' OK", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+	printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' OK",
+		c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 	return len(eps), nil
 }
 
@@ -916,21 +924,25 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	}
 
 	if c._conn == nil {
-		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return fmt.Errorf("UpdateLoadBalanceResolver Requires Current Client Connection Already Established First")
 	}
 
 	if c._config.Target.ServiceDiscoveryType == "direct" {
-		printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return nil
 	}
 
-	printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Started...", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+	printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Started...",
+		c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 
 	eps := c.endpointsSnapshot()
 	if len(eps) == 0 {
 		if e := c.discoverEndpoints(false); e != nil {
-			s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+			s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s",
+				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
 			errorf(s)
 			return fmt.Errorf(s)
 		}
@@ -939,7 +951,8 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	}
 
 	if len(eps) == 0 {
-		s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		errorf(s)
 		return fmt.Errorf(s)
 	}
@@ -954,7 +967,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		info += "Version=" + ep.Version + ", "
 		info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
 
-		c._z.Printf("       - " + info)
+		printf("       - " + info)
 	}
 
 	// update load balance resolver with new endpoint addresses
@@ -964,11 +977,13 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	schemeName = "clb" + schemeName
 
 	if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
-		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
 		return e
 	}
 
-	printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' OK", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+	printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' OK",
+		c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 	return nil
 }
 
@@ -1888,150 +1903,161 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 		return fmt.Errorf("Client Object Nil")
 	}
 
-	if c._config.Grpc.CircuitBreakerEnabled {
-		c._z.Printf("In - Unary Circuit Breaker Handler: " + method)
-
-		c.cbMu.RLock()
-		cb := c._circuitBreakers[method]
-		c.cbMu.RUnlock()
-
-		if cb == nil {
-			c._z.Printf("... Creating Circuit Breaker for: " + method)
-
-			z := &data.ZapLog{
-				DisableLogger:   false,
-				OutputToConsole: false,
-				AppName:         c.AppName,
-			}
-			_ = z.Init()
-
-			var e error
-			if cb, e = plugins.NewHystrixGoPlugin(method,
-				int(c._config.Grpc.CircuitBreakerTimeout),
-				int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
-				int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
-				int(c._config.Grpc.CircuitBreakerSleepWindow),
-				int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
-				z); e != nil {
-				c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
-				c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
-
-				return invoker(ctx, method, req, reply, cc, opts...)
-			}
-
-			c.cbMu.Lock()
-			if c._circuitBreakers == nil {
-				c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
-			}
-			c._circuitBreakers[method] = cb
-			c.cbMu.Unlock()
-
-			c._z.Printf("... Circuit Breaker Created for: " + method)
-		} else {
-			c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
-		}
-
-		_, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-			c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
-
-			err = invoker(ctx, method, req, reply, cc, opts...)
-
-			if err != nil {
-				c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
-			} else {
-				c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
-			}
-			return nil, err
-
-		}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
-			c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
-			c._z.Warnf("... Error = " + errIn.Error())
-
-			return nil, errIn
-		}, nil)
-
-		return gerr
+	// guard against nil _config
+	if c._config == nil || !c._config.Grpc.CircuitBreakerEnabled {
+		return invoker(ctx, method, req, reply, cc, opts...)
 	}
 
-	return invoker(ctx, method, req, reply, cc, opts...)
+	c._z.Printf("In - Unary Circuit Breaker Handler: " + method)
+
+	c.cbMu.RLock()
+	cb := c._circuitBreakers[method]
+	c.cbMu.RUnlock()
+
+	if cb == nil {
+		c._z.Printf("... Creating Circuit Breaker for: " + method)
+
+		z := &data.ZapLog{
+			DisableLogger:   false,
+			OutputToConsole: false,
+			AppName:         c.AppName,
+		}
+		_ = z.Init()
+
+		var e error
+		if cb, e = plugins.NewHystrixGoPlugin(method,
+			int(c._config.Grpc.CircuitBreakerTimeout),
+			int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
+			int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
+			int(c._config.Grpc.CircuitBreakerSleepWindow),
+			int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
+			z); e != nil {
+			c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+			c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+
+			return invoker(ctx, method, req, reply, cc, opts...)
+		}
+
+		c.cbMu.Lock()
+		if c._circuitBreakers == nil {
+			c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
+		}
+		c._circuitBreakers[method] = cb
+		c.cbMu.Unlock()
+
+		c._z.Printf("... Circuit Breaker Created for: " + method)
+	} else {
+		c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
+	}
+
+	_, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
+		c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
+
+		err = invoker(ctx, method, req, reply, cc, opts...)
+
+		if err != nil {
+			c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+		} else {
+			c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
+		}
+		return nil, err
+
+	}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
+		c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
+		c._z.Warnf("... Error = " + errIn.Error())
+
+		return nil, errIn
+	}, nil)
+
+	return gerr
 }
 
-func (c *Client) streamCircuitBreakerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+func (c *Client) streamCircuitBreakerHandler(
+	ctx context.Context,
+	desc *grpc.StreamDesc,
+	cc *grpc.ClientConn,
+	method string,
+	streamer grpc.Streamer,
+	opts ...grpc.CallOption,
+) (grpc.ClientStream, error) {
+
 	if c == nil {
 		return nil, fmt.Errorf("Client Object Nil")
 	}
 
-	if c._config.Grpc.CircuitBreakerEnabled {
-		c._z.Printf("In - Stream Circuit Breaker Handler: " + method)
-
-		c.cbMu.RLock()
-		cb := c._circuitBreakers[method]
-		c.cbMu.RUnlock()
-
-		if cb == nil {
-			c._z.Printf("... Creating Circuit Breaker for: " + method)
-
-			z := &data.ZapLog{
-				DisableLogger:   false,
-				OutputToConsole: false,
-				AppName:         c.AppName,
-			}
-			_ = z.Init()
-
-			var e error
-			if cb, e = plugins.NewHystrixGoPlugin(method,
-				int(c._config.Grpc.CircuitBreakerTimeout),
-				int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
-				int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
-				int(c._config.Grpc.CircuitBreakerSleepWindow),
-				int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
-				z); e != nil {
-				c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
-				c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
-				return streamer(ctx, desc, cc, method, opts...)
-			}
-
-			c.cbMu.Lock()
-			if c._circuitBreakers == nil { // defensive init
-				c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
-			}
-			c._circuitBreakers[method] = cb
-			c.cbMu.Unlock()
-
-			c._z.Printf("... Circuit Breaker Created for: " + method)
-		} else {
-			c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
-		}
-
-		gres, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-			c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
-
-			dataOut, err = streamer(ctx, desc, cc, method, opts...)
-
-			if err != nil {
-				c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
-			} else {
-				c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
-			}
-			return dataOut, err
-
-		}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
-			c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
-			c._z.Warnf("... Error = " + errIn.Error())
-
-			return nil, errIn
-		}, nil)
-
-		if gres != nil {
-			if cs, ok := gres.(grpc.ClientStream); ok {
-				return cs, gerr
-			}
-			return nil, fmt.Errorf("Assert grpc.ClientStream Failed")
-		}
-		return nil, gerr
+	// guard against nil _config to avoid panic
+	if c._config == nil || !c._config.Grpc.CircuitBreakerEnabled {
+		return streamer(ctx, desc, cc, method, opts...)
 	}
 
-	return streamer(ctx, desc, cc, method, opts...)
+	c._z.Printf("In - Stream Circuit Breaker Handler: " + method)
+
+	c.cbMu.RLock()
+	cb := c._circuitBreakers[method]
+	c.cbMu.RUnlock()
+
+	if cb == nil {
+		c._z.Printf("... Creating Circuit Breaker for: " + method)
+
+		z := &data.ZapLog{
+			DisableLogger:   false,
+			OutputToConsole: false,
+			AppName:         c.AppName,
+		}
+		_ = z.Init()
+
+		var e error
+		cb, e = plugins.NewHystrixGoPlugin(method,
+			int(c._config.Grpc.CircuitBreakerTimeout),
+			int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
+			int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
+			int(c._config.Grpc.CircuitBreakerSleepWindow),
+			int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
+			z)
+
+		if e != nil {
+			c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+			c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+			return streamer(ctx, desc, cc, method, opts...)
+		}
+
+		c.cbMu.Lock()
+		if c._circuitBreakers == nil { // defensive init
+			c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
+		}
+		c._circuitBreakers[method] = cb
+		c.cbMu.Unlock()
+
+		c._z.Printf("... Circuit Breaker Created for: " + method)
+	} else {
+		c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
+	}
+
+	gres, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
+		c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
+
+		dataOut, err = streamer(ctx, desc, cc, method, opts...)
+
+		if err != nil {
+			c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+		} else {
+			c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
+		}
+		return dataOut, err
+	}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
+		c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
+		c._z.Warnf("... Error = " + errIn.Error())
+
+		return nil, errIn
+	}, nil)
+
+	if gres != nil {
+		if cs, ok := gres.(grpc.ClientStream); ok {
+			return cs, gerr
+		}
+		return nil, fmt.Errorf("Assert grpc.ClientStream Failed")
+	}
+	return nil, gerr
 }
 
 func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
@@ -2083,7 +2109,15 @@ func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req 
 	return invoker(ctx, method, req, reply, cc, opts...)
 }
 
-func (c *Client) streamXRayTracerHandler(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (cs grpc.ClientStream, err error) {
+func (c *Client) streamXRayTracerHandler(
+	ctx context.Context,
+	desc *grpc.StreamDesc,
+	cc *grpc.ClientConn,
+	method string,
+	streamer grpc.Streamer,
+	opts ...grpc.CallOption,
+) (cs grpc.ClientStream, err error) {
+
 	if c == nil {
 		return cs, fmt.Errorf("Client Object Nil")
 	}
