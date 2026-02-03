@@ -461,43 +461,45 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	// turn off retry when retry default is enabled in the future framework versions
 	opts = append(opts, grpc.WithDisableRetry())
 
-	// add unary client interceptors
+	// Build interceptor chains from a fresh local slice to avoid duplicate appends across re-dials.
+	unaryInts := append([]grpc.UnaryClientInterceptor{}, c.UnaryClientInterceptors...)
 	if c._config.Grpc.CircuitBreakerEnabled {
 		c._z.Printf("Setup Unary Circuit Breaker Interceptor")
-		c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryCircuitBreakerHandler)
+		unaryInts = append(unaryInts, c.unaryCircuitBreakerHandler)
 	}
 
 	if xray.XRayServiceOn() {
 		c._z.Printf("Setup Unary XRay Tracer Interceptor")
 		//c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryXRayTracerHandler)
-		c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, tracer.TracerUnaryClientInterceptor(c._config.Target.AppName+"-Client"))
+		unaryInts = append(unaryInts, tracer.TracerUnaryClientInterceptor(c._config.Target.AppName+"-Client"))
 	}
 
-	count := len(c.UnaryClientInterceptors)
+	count := len(unaryInts)
 
 	if count == 1 {
-		opts = append(opts, grpc.WithUnaryInterceptor(c.UnaryClientInterceptors[0]))
+		opts = append(opts, grpc.WithUnaryInterceptor(unaryInts[0]))
 	} else if count > 1 {
-		opts = append(opts, grpc.WithChainUnaryInterceptor(c.UnaryClientInterceptors...))
+		opts = append(opts, grpc.WithChainUnaryInterceptor(unaryInts...))
 	}
 
-	// add stream client interceptors
+	// Build stream interceptors from a fresh local slice to avoid duplicate appends across re-dials.
+	streamInts := append([]grpc.StreamClientInterceptor{}, c.StreamClientInterceptors...)
 	if c._config.Grpc.CircuitBreakerEnabled {
 		c._z.Printf("Setup Stream Circuit Breaker Interceptor")
-		c.StreamClientInterceptors = append(c.StreamClientInterceptors, c.streamCircuitBreakerHandler)
+		streamInts = append(streamInts, c.streamCircuitBreakerHandler)
 	}
 
 	if xray.XRayServiceOn() {
 		c._z.Printf("Setup Stream XRay Tracer Interceptor")
-		c.StreamClientInterceptors = append(c.StreamClientInterceptors, c.streamXRayTracerHandler)
+		streamInts = append(streamInts, c.streamXRayTracerHandler)
 	}
 
-	count = len(c.StreamClientInterceptors)
+	count = len(streamInts)
 
 	if count == 1 {
-		opts = append(opts, grpc.WithStreamInterceptor(c.StreamClientInterceptors[0]))
+		opts = append(opts, grpc.WithStreamInterceptor(streamInts[0]))
 	} else if count > 1 {
-		opts = append(opts, grpc.WithChainStreamInterceptor(c.StreamClientInterceptors...))
+		opts = append(opts, grpc.WithChainStreamInterceptor(streamInts...))
 	}
 
 	// for monitoring use
@@ -1423,12 +1425,14 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	// use a deadline-aware loop without fixed oversleep
 	deadline := time.Now().Add(timeout)
 	interval := 250 * time.Millisecond
+	maxPerAttempt := 2 * time.Second
 
 	result := make(chan string, 1)
 	go func() {
 		defer close(result)
 		for {
-			if time.Now().After(deadline) {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
 				warnf("Health Status Check Timeout")
 				result <- "Health Status Check Failed: Timeout"
 				return
@@ -1441,14 +1445,12 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			default:
 			}
 
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				warnf("Health Status Check Timeout")
-				result <- "Health Status Check Failed: Timeout"
-				return
+			perAttempt := remaining
+			if perAttempt > maxPerAttempt {
+				perAttempt = maxPerAttempt
 			}
 
-			if status, e := c.HealthProbe("", remaining); e != nil {
+			if status, e := c.HealthProbe("", perAttempt); e != nil {
 				errorf("Health Status Check Failed: %s", e.Error())
 				result <- "Health Status Check Failed: " + e.Error()
 				return
@@ -1458,20 +1460,21 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 					result <- "OK"
 					return
 				}
+
 				warnf("Not Serving!")
 			}
 
-			// sleep only up to the remaining time
-			if sleep := interval; sleep > remaining {
+			sleep := interval
+			if sleep > remaining {
 				sleep = remaining
 			}
-			time.Sleep(interval)
+			time.Sleep(sleep)
 		}
 	}()
 
+	errInfo, ok := <-result
 	printf("Heath Status Check Finalized...")
 
-	errInfo, ok := <-result
 	if !ok {
 		return fmt.Errorf("Health Status Check Failed: unknown error")
 	}
