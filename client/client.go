@@ -115,7 +115,9 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 	if c == nil {
 		return
 	}
+
 	c.connMu.Lock()
+	old := c._conn
 	c._conn = conn
 	c._remoteAddress = remote
 
@@ -136,6 +138,11 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 		c._healthManualChecker = nil
 	}
 	c.connMu.Unlock()
+
+	// close prior connection outside lock to avoid leaks
+	if old != nil && old != conn {
+		_ = old.Close()
+	}
 }
 
 // clears connection state under lock and returns old conn for closing
@@ -267,6 +274,8 @@ type Client struct {
 
 	// guard to avoid spawning overlapping notifier reconnect loops
 	notifierReconnectActive atomic.Bool
+
+	zOnce sync.Once
 }
 
 // safely replace the current endpoints slice
@@ -524,9 +533,11 @@ func (c *Client) ZLog() *data.ZapLog {
 		return nil
 	}
 
-	if c._z != nil {
-		return c._z
-	} else {
+	c.zOnce.Do(func() {
+		if c._z != nil {
+			return
+		}
+
 		appName := "Default-BeforeConfigLoad"
 		disableLogger := true
 		outputConsole := true
@@ -537,15 +548,16 @@ func (c *Client) ZLog() *data.ZapLog {
 			outputConsole = c._config.Target.ZapLogOutputConsole
 		}
 
-		c._z = &data.ZapLog{
+		z := &data.ZapLog{
 			DisableLogger:   disableLogger,
 			OutputToConsole: outputConsole,
 			AppName:         appName,
 		}
-		_ = c._z.Init()
+		_ = z.Init()
+		c._z = z
+	})
 
-		return c._z
-	}
+	return c._z
 }
 
 // PreloadConfigData will load the config data before Dial()
@@ -1316,74 +1328,37 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 		return fmt.Errorf("Web Server Host Address is Empty")
 	}
 
-	var timeout time.Duration
+	timeout := 5 * time.Second
 	if len(timeoutDuration) > 0 {
 		timeout = timeoutDuration[0]
-	} else {
-		timeout = 5 * time.Second
 	}
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(2500 * time.Millisecond)
+	defer ticker.Stop()
 
-	expireDateTime := time.Now().Add(timeout)
-
-	//
-	// check if web server is ready and healthy via /health check
-	//
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-
-	chanErrorInfo := make(chan string)
 	healthUrl := c.WebServerConfig.WebServerLocalAddress + "/health"
 
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				wg.Done()
-				chanErrorInfo <- ctx.Err().Error()
-				return
-			default:
-			}
+	for {
+		if time.Now().After(deadline) {
+			warnf("Web Server Health Check Timeout")
+			return fmt.Errorf("Web Server Health Check Failed: Timeout")
+		}
 
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
 			if status, _, e := rest.GET(healthUrl, nil); e != nil {
 				errorf("Web Server Health Check Failed: %s", e.Error())
-				wg.Done()
-				chanErrorInfo <- "Web Server Health Check Failed: " + e.Error()
-				return
+				return fmt.Errorf("Web Server Health Check Failed: %s", e.Error())
+			} else if status == 200 {
+				printf("Web Server Health OK")
+				return nil
 			} else {
-				if status == 200 {
-					printf("Web Server Health OK")
-					wg.Done()
-					chanErrorInfo <- "OK"
-					return
-				} else {
-					warnf("Web Server Not Ready!")
-				}
-			}
-
-			time.Sleep(2500 * time.Millisecond)
-
-			if time.Now().After(expireDateTime) {
-				warnf("Web Server Health Check Timeout")
-				wg.Done()
-				chanErrorInfo <- "Web Server Health Check Failed: Timeout"
-				return
+				warnf("Web Server Not Ready!")
 			}
 		}
-	}()
-
-	wg.Wait()
-
-	printf("Web Server Heath Check Finalized...")
-
-	errInfo := <-chanErrorInfo
-
-	if errInfo == "OK" {
-		// success - web server health check = ok
-		return nil
 	}
-
-	// failure
-	return fmt.Errorf(errInfo)
 }
 
 // waitForEndpointReady is called after Dial to check if target service is ready as reported by health probe
@@ -1907,7 +1882,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	//
 	// acquire api ip port from service discovery
 	//
-	if maxCount == 0 {
+	if maxCount <= 0 {
 		maxCount = 100
 	}
 
@@ -1978,7 +1953,7 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 		return []*serviceEndpoint{}, fmt.Errorf("Namespace Name Not Defined in Config (API SD)")
 	}
 
-	if maxCount == 0 {
+	if maxCount <= 0 {
 		maxCount = 100
 	}
 
