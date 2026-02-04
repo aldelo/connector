@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"path"
 	"strconv"
 	"strings"
@@ -304,7 +305,8 @@ type Client struct {
 // safely replace the current endpoints slice
 func (c *Client) setEndpoints(eps []*serviceEndpoint) {
 	c.endpointsMu.Lock()
-	c._endpoints = eps
+	live := pruneExpiredEndpoints(eps)
+	c._endpoints = live
 	c.endpointsMu.Unlock()
 }
 
@@ -1194,6 +1196,9 @@ func (c *Client) DoNotifierAlertService() (err error) {
 					if c == nil {
 						return
 					}
+					if c.closed.Load() {
+						return
+					}
 					if c._config != nil {
 						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
 							cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
@@ -1228,6 +1233,9 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 				nc.ServiceHostOfflineHandler = func(host string, port uint) {
 					if c == nil {
+						return
+					}
+					if c.closed.Load() {
 						return
 					}
 					if c._config != nil {
@@ -1392,16 +1400,36 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if status, _, e := rest.GET(healthUrl, nil); e != nil {
+			remaining := time.Until(deadline)
+			perAttempt := remaining
+			if perAttempt > 2*time.Second { // cap per-attempt to 2s
+				perAttempt = 2 * time.Second
+			} else if perAttempt <= 0 {
+				perAttempt = 250 * time.Millisecond
+			}
+
+			reqCtx, cancel := context.WithTimeout(ctx, perAttempt)
+			req, _ := http.NewRequestWithContext(reqCtx, http.MethodGet, healthUrl, nil)
+			resp, e := (&http.Client{Timeout: perAttempt}).Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			cancel()
+
+			if e != nil {
 				warnf("Web Server Health Check Failed: %s", e.Error())
 				continue
-			} else if status == 200 {
+			}
+			if resp != nil && resp.StatusCode == 200 {
 				printf("Web Server Health OK")
 				return nil
-			} else {
-				// non-200 is also retried until timeout instead of failing fast
-				warnf("Web Server Not Ready (status %d), retrying...", status)
 			}
+			// non-200 is also retried until timeout instead of failing fast
+			statusCode := 0
+			if resp != nil {
+				statusCode = resp.StatusCode
+			}
+			warnf("Web Server Not Ready (status %d), retrying...", statusCode)
 		}
 	}
 }
@@ -1555,6 +1583,9 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 
 	if conn == nil {
 		return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: client connection is nil")
+	}
+	if conn.GetState() == connectivity.Shutdown { // guard against shutdown connections
+		return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: client connection is shutdown")
 	}
 
 	if hc == nil {
