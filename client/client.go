@@ -181,6 +181,26 @@ func pruneExpiredEndpoints(eps []*serviceEndpoint) []*serviceEndpoint {
 	return live
 }
 
+// safely set notifier client instance
+func (c *Client) setNotifierClient(nc *NotifierClient) {
+	if c == nil {
+		return
+	}
+	c.notifierMu.Lock()
+	c._notifierClient = nc
+	c.notifierMu.Unlock()
+}
+
+// safely get notifier client instance
+func (c *Client) getNotifierClient() *NotifierClient {
+	if c == nil {
+		return nil
+	}
+	c.notifierMu.Lock()
+	defer c.notifierMu.Unlock()
+	return c._notifierClient
+}
+
 var _mux sync.Mutex // thread-safety for accessing resolver map in DialContext()
 
 // Client represents a gRPC client's connection and entry point,
@@ -276,6 +296,9 @@ type Client struct {
 	notifierReconnectActive atomic.Bool
 
 	zOnce sync.Once
+
+	// guard notifier client access to avoid races across callbacks/reconnect/close
+	notifierMu sync.Mutex
 }
 
 // safely replace the current endpoints slice
@@ -1131,21 +1154,23 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		}
 	}
 
+	nc := c.getNotifierClient()
+	doConnection := nc != nil
+
 	// finally, run notifier client to subscribe for notification callbacks
 	// the notifier client uses the same client config yaml, but a copy of it to keep the scope separated
 	// within the notifier client config yaml, named xyz-notifier-client.yaml, where xyz is the endpoint service name,
 	// the discovery topicArn as pre-created on aws is stored within, this enables callback for this specific topicArn from notifier server,
 	// note that the service discovery of notifier client is to the notifier server cluster
-	doConnection := c._notifierClient != nil
-
 	if doConnection || util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName+"-notifier-client.yaml")) {
 		if !doConnection {
-			c._notifierClient = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
+			nc = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
+			c.setNotifierClient(nc)
 		}
 
-		if doConnection || c._notifierClient.ConfiguredForNotifierClientDial() {
+		if doConnection || nc.ConfiguredForNotifierClientDial() {
 			if !doConnection {
-				c._notifierClient.ServiceHostOnlineHandler = func(host string, port uint) {
+				nc.ServiceHostOnlineHandler = func(host string, port uint) {
 					if c == nil {
 						return
 					}
@@ -1181,7 +1206,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 					}
 				}
 
-				c._notifierClient.ServiceHostOfflineHandler = func(host string, port uint) {
+				nc.ServiceHostOfflineHandler = func(host string, port uint) {
 					if c == nil {
 						return
 					}
@@ -1202,7 +1227,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 					}
 				}
 
-				c._notifierClient.ServiceAlertStoppedHandler = func(reason string) {
+				nc.ServiceAlertStoppedHandler = func(reason string) {
 					if strings.Contains(strings.ToLower(reason), "transport is closing") {
 						if c == nil {
 							return
@@ -1233,14 +1258,18 @@ func (c *Client) DoNotifierAlertService() (err error) {
 									return
 								}
 								time.Sleep(5 * time.Second)
-								if c._notifierClient != nil {
-									c._notifierClient.Close()
+
+								current := c.getNotifierClient()
+								if current != nil {
+									current.Close()
+									c.setNotifierClient(nil)
 								}
 								if c.closed.Load() {
 									return
 								}
-								if c._notifierClient == nil { // ensure client exists before redial
-									c._notifierClient = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
+
+								if c.getNotifierClient() == nil { // ensure client exists before redial
+									c.setNotifierClient(NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath))
 								}
 								if e := c.DoNotifierAlertService(); e != nil {
 									if z != nil {
@@ -1261,24 +1290,27 @@ func (c *Client) DoNotifierAlertService() (err error) {
 				}
 			}
 
-			if c._notifierClient == nil {
+			nc = c.getNotifierClient() // ensure we use the guarded instance
+			if nc == nil {
 				return nil
 			}
 
 			// dial notifier client to notifier server endpoint and begin service operations
-			if err = c._notifierClient.Dial(); err != nil {
-				if c._notifierClient != nil {
+			if err = nc.Dial(); err != nil {
+				if nc != nil {
 					errorf("!!! Notifier Client Service Dial Failed: %s !!!", err.Error())
-					c._notifierClient.Close()
+					nc.Close()
 				}
+				c.setNotifierClient(nil)
 				c.notifierReconnectActive.Store(false)
 				return err
 			} else {
-				if err = c._notifierClient.Subscribe(c._notifierClient.ConfiguredSNSDiscoveryTopicArn()); err != nil {
-					if c._notifierClient != nil {
+				if err = nc.Subscribe(nc.ConfiguredSNSDiscoveryTopicArn()); err != nil {
+					if nc != nil {
 						errorf("!!! Notifier Client Service Subscribe Failed: %s !!!", err.Error())
-						c._notifierClient.Close()
+						nc.Close()
 					}
+					c.setNotifierClient(nil)
 					c.notifierReconnectActive.Store(false)
 					return err
 				} else {
