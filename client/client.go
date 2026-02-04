@@ -1360,13 +1360,6 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 			log.Printf(msg, args...)
 		}
 	}
-	errorf := func(msg string, args ...interface{}) {
-		if z != nil {
-			z.Errorf(msg, args...)
-		} else {
-			log.Printf(msg, args...)
-		}
-	}
 	warnf := func(msg string, args ...interface{}) {
 		if z != nil {
 			z.Warnf(msg, args...)
@@ -1400,13 +1393,14 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 			return ctx.Err()
 		case <-ticker.C:
 			if status, _, e := rest.GET(healthUrl, nil); e != nil {
-				errorf("Web Server Health Check Failed: %s", e.Error())
-				return fmt.Errorf("Web Server Health Check Failed: %s", e.Error())
+				warnf("Web Server Health Check Failed: %s", e.Error())
+				continue
 			} else if status == 200 {
 				printf("Web Server Health OK")
 				return nil
 			} else {
-				warnf("Web Server Not Ready!")
+				// non-200 is also retried until timeout instead of failing fast
+				warnf("Web Server Not Ready (status %d), retrying...", status)
 			}
 		}
 	}
@@ -1422,13 +1416,6 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	printf := func(msg string, args ...interface{}) {
 		if z != nil {
 			z.Printf(msg, args...)
-		} else {
-			log.Printf(msg, args...)
-		}
-	}
-	errorf := func(msg string, args ...interface{}) {
-		if z != nil {
-			z.Errorf(msg, args...)
 		} else {
 			log.Printf(msg, args...)
 		}
@@ -1477,16 +1464,14 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			}
 
 			if status, e := c.HealthProbe("", perAttempt); e != nil {
-				errorf("Health Status Check Failed: %s", e.Error())
-				result <- "Health Status Check Failed: " + e.Error()
-				return
+				// treat transient health probe errors as retryable until timeout
+				warnf("Health Status Check Not Ready Yet: %s", e.Error())
 			} else {
 				if status == grpc_health_v1.HealthCheckResponse_SERVING {
 					printf("Serving Status Detected")
 					result <- "OK"
 					return
 				}
-
 				warnf("Not Serving!")
 			}
 
