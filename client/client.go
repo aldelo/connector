@@ -97,7 +97,7 @@ func cacheGetLiveServiceEndpoints(key, version string, force ...bool) []*service
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	if _cache == nil {
-		return nil
+		return []*serviceEndpoint{}
 	}
 	return _cache.GetLiveServiceEndpoints(key, version, force...)
 }
@@ -1141,24 +1141,11 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		}
 
 		if doConnection || c._notifierClient.ConfiguredForNotifierClientDial() {
-			/*
-				use default logging for the commented out handlers
-
-				c._notifierClient.BeforeClientDialHandler
-				c._notifierClient.AfterClientDialHandler
-				c._notifierClient.BeforeClientCloseHandler
-				c._notifierClient.AfterClientCloseHandler
-
-				c._notifierClient.UnaryClientInterceptorHandlers
-				c._notifierClient.StreamClientInterceptorHandlers
-
-				c._notifierClient.ServiceAlertStartedHandler
-
-				c._notifierClient.ServiceAlertSkippedHandler
-			*/
-
 			if !doConnection {
 				c._notifierClient.ServiceHostOnlineHandler = func(host string, port uint) {
+					if c == nil {
+						return
+					}
 					if c._config != nil {
 						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
 							cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
@@ -1192,12 +1179,15 @@ func (c *Client) DoNotifierAlertService() (err error) {
 				}
 
 				c._notifierClient.ServiceHostOfflineHandler = func(host string, port uint) {
+					if c == nil {
+						return
+					}
 					if c._config != nil {
 						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
 							cachePurgeServiceEndpointByHostAndPort(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), host, port)
 						}
 
-						c.setEndpoints(cacheGetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true)) // CHANGED
+						c.setEndpoints(cacheGetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true))
 
 						if e := c.UpdateLoadBalanceResolver(); e != nil {
 							if z != nil {
@@ -1211,6 +1201,9 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 				c._notifierClient.ServiceAlertStoppedHandler = func(reason string) {
 					if strings.Contains(strings.ToLower(reason), "transport is closing") {
+						if c == nil {
+							return
+						}
 						if c.closed.Load() {
 							return
 						}
@@ -1242,6 +1235,9 @@ func (c *Client) DoNotifierAlertService() (err error) {
 								}
 								if c.closed.Load() {
 									return
+								}
+								if c._notifierClient == nil { // ensure client exists before redial
+									c._notifierClient = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
 								}
 								if e := c.DoNotifierAlertService(); e != nil {
 									if z != nil {
@@ -1618,10 +1614,12 @@ func (c *Client) Close() {
 
 	if c._sqs != nil {
 		c._sqs.Disconnect()
+		c._sqs = nil
 	}
 
 	if c._sd != nil {
 		c._sd.Disconnect()
+		c._sd = nil
 	}
 
 	if conn := c.clearConnection(); conn != nil {
