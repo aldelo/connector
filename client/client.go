@@ -833,7 +833,8 @@ func (c *Client) Dial(ctx context.Context) error {
 		c._z.Printf("... gRPC Service @ " + target + " [" + c.RemoteAddress() + "] Connected")
 
 		if c.WaitForServerReady {
-			if e := c.waitForEndpointReady(ctxWithTimeout, time.Duration(dialSec)*time.Second); e != nil {
+			healthCtx, healthCancel := context.WithTimeout(ctx, time.Duration(dialSec)*time.Second)
+			if e := c.waitForEndpointReady(healthCtx, time.Duration(dialSec)*time.Second); e != nil {
 				// health probe failed
 				if closedConn := c.clearConnection(); closedConn != nil {
 					_ = closedConn.Close()
@@ -841,14 +842,16 @@ func (c *Client) Dial(ctx context.Context) error {
 				if seg != nil {
 					_ = seg.Seg.AddError(fmt.Errorf("gRPC Service Server Not Ready: " + e.Error()))
 				}
+				healthCancel()
 				return fmt.Errorf("gRPC Service Server Not Ready: " + e.Error())
 			}
+			healthCancel()
 		}
 
 		// dial successful, now start web server for notification callbacks (webhook)
 		if c.WebServerConfig != nil && util.LenTrim(c.WebServerConfig.ConfigFileName) > 0 {
 			c._z.Printf("Starting Http Web Server...")
-			startWebServerFail := make(chan bool)
+			startWebServerErr := make(chan error, 1)
 
 			go func() {
 				//
@@ -856,7 +859,7 @@ func (c *Client) Dial(ctx context.Context) error {
 				//
 				if err := c.startWebServer(); err != nil {
 					c._z.Errorf("Serve Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
-					startWebServerFail <- true
+					startWebServerErr <- err
 				} else {
 					c._z.Printf("... Http Web Server Quit Command Received")
 				}
@@ -866,8 +869,8 @@ func (c *Client) Dial(ctx context.Context) error {
 			time.Sleep(150 * time.Millisecond)
 
 			select {
-			case <-startWebServerFail:
-				c._z.Errorf("... Http Web Server Fail to Start")
+			case <-startWebServerErr:
+				c._z.Errorf("... Http Web Server Fail to Start: %v", err)
 			default:
 				// wait short time to check if web server was started up successfully
 				if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
@@ -1466,15 +1469,12 @@ func (c *Client) setupHealthManualChecker() {
 		return
 	}
 
-	c.connMu.RLock()
+	c.connMu.Lock()
 	conn := c._conn
-	c.connMu.RUnlock()
 	if conn == nil {
+		c.connMu.Unlock()
 		return
 	}
-
-	c.connMu.Lock()
-	defer c.connMu.Unlock()
 
 	// handle potential init error; keep state consistent
 	hc, err := health.NewHealthClient(conn)
@@ -1485,9 +1485,11 @@ func (c *Client) setupHealthManualChecker() {
 		} else {
 			log.Printf("Init health client failed: %v", err)
 		}
+		c.connMu.Unlock()
 		return
 	}
 	c._healthManualChecker = hc
+	c.connMu.Unlock()
 }
 
 // HealthProbe manually checks service serving health status
