@@ -883,17 +883,32 @@ func (c *Client) Dial(ctx context.Context) error {
 				if err := c.startWebServer(); err != nil {
 					c._z.Errorf("Serve Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
 					startWebServerErr <- err
-				} else {
-					c._z.Printf("... Http Web Server Quit Command Received")
+					return
 				}
+				startWebServerErr <- nil
 			}()
 
 			// give slight time delay to allow time slice for non blocking code to complete in goroutine above
 			time.Sleep(150 * time.Millisecond)
 
 			select {
-			case <-startWebServerErr:
-				c._z.Errorf("... Http Web Server Fail to Start: %v", err)
+			case webErr := <-startWebServerErr: // capture real goroutine error
+				if webErr != nil { // fail fast with the actual error
+					if seg != nil {
+						_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr))
+					}
+					return fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr)
+				}
+				// success path continues to readiness check
+				if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+					// web server error
+					c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
+					if seg != nil {
+						_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
+					}
+					return e // propagate readiness failure
+				}
+				c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
 			default:
 				// wait short time to check if web server was started up successfully
 				if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
@@ -902,6 +917,7 @@ func (c *Client) Dial(ctx context.Context) error {
 					if seg != nil {
 						_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
 					}
+					return e // propagate readiness failure
 				} else {
 					// web server ok
 					c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
@@ -1136,6 +1152,10 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 	if c.closed.Load() {
 		return fmt.Errorf("Client is closed")
+	}
+
+	if c._config == nil { // guard against nil config (prevents panic if called before Dial)
+		return fmt.Errorf("Client config not loaded; call Dial() first")
 	}
 
 	z := c.ZLog()
@@ -1634,15 +1654,15 @@ func (c *Client) Close() {
 	}
 
 	// clean up notifier client connection
-	if c._notifierClient != nil {
-		if c._notifierClient.NotifierClientAlertServicesStarted() {
-			if err := c._notifierClient.Unsubscribe(); err != nil {
+	if nc := c.getNotifierClient(); nc != nil { // use guarded getter to avoid races
+		if nc.NotifierClientAlertServicesStarted() {
+			if err := nc.Unsubscribe(); err != nil {
 				errorf("!!! Notifier Client Alert Services Unsubscribe Failed: " + err.Error() + " !!!")
 			}
 		}
 
-		c._notifierClient.Close()
-		c._notifierClient = nil
+		nc.Close()
+		c.setNotifierClient(nil) // synchronized setter
 	}
 	c.notifierReconnectActive.Store(false)
 
@@ -1761,6 +1781,10 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 	host, portStr, err := net.SplitHostPort(directIpPort)
 	if err != nil {
 		return fmt.Errorf("Direct Connect target must include host and port (got %q): %v", directIpPort, err)
+	}
+
+	if util.LenTrim(host) == 0 { // reject empty host early
+		return fmt.Errorf("Direct Connect target host is empty (got %q)", directIpPort)
 	}
 
 	p, convErr := strconv.Atoi(portStr)
