@@ -1285,37 +1285,39 @@ func (c *Client) DoNotifierAlertService() (err error) {
 			return nil
 		}
 
-		if doConnection || nc.ConfiguredForNotifierClientDial() {
-			nc = c.getNotifierClient() // ensure we use the guarded instance
-			if nc == nil {
-				return nil
-			}
-
-			// dial notifier client to notifier server endpoint and begin service operations
-			if err = nc.Dial(); err != nil {
-				if nc != nil {
-					errorf("!!! Notifier Client Service Dial Failed: %s !!!", err.Error())
-					nc.Close()
-				}
-				c.setNotifierClient(nil)
-				c.notifierReconnectActive.Store(false)
-				return err
-			} else {
-				if err = nc.Subscribe(nc.ConfiguredSNSDiscoveryTopicArn()); err != nil {
-					if nc != nil {
-						errorf("!!! Notifier Client Service Subscribe Failed: %s !!!", err.Error())
-						nc.Close()
-					}
-					c.setNotifierClient(nil)
-					c.notifierReconnectActive.Store(false)
-					return err
-				} else {
-					printf("~~~ Notifier Client Service Started ~~~")
-				}
-			}
-		} else {
+		// Require notifier client to be configured before dialing, even when reusing an existing instance.
+		if !nc.ConfiguredForNotifierClientDial() {
 			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial ###")
+			return nil
 		}
+
+		nc = c.getNotifierClient() // ensure we use the guarded instance
+		if nc == nil {
+			return nil
+		}
+
+		// dial notifier client to notifier server endpoint and begin service operations
+		if err = nc.Dial(); err != nil {
+			if nc != nil {
+				errorf("!!! Notifier Client Service Dial Failed: %s !!!", err.Error())
+				nc.Close()
+			}
+			c.setNotifierClient(nil)
+			c.notifierReconnectActive.Store(false)
+			return err
+		}
+
+		if err = nc.Subscribe(nc.ConfiguredSNSDiscoveryTopicArn()); err != nil {
+			if nc != nil {
+				errorf("!!! Notifier Client Service Subscribe Failed: %s !!!", err.Error())
+				nc.Close()
+			}
+			c.setNotifierClient(nil)
+			c.notifierReconnectActive.Store(false)
+			return err
+		}
+
+		printf("~~~ Notifier Client Service Started ~~~")
 	}
 
 	return nil
@@ -1431,6 +1433,13 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		return fmt.Errorf("Health Status Check Failed: client is closed")
 	}
 
+	// Honor caller cancellation immediately before work starts.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {
 		if z != nil {
@@ -1459,27 +1468,29 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	interval := 250 * time.Millisecond
 	maxPerAttempt := 2 * time.Second
 
-	result := make(chan string, 1)
+	result := make(chan error, 1)
+
 	go func() {
 		defer close(result)
 		for {
+			// Highest-priority cancellation check inside loop.
+			select {
+			case <-ctx.Done():
+				result <- ctx.Err()
+				return
+			default:
+			}
+
 			if c.closed.Load() { // stop immediately if client closed mid-wait
-				result <- "Health Status Check Failed: client is closed"
+				result <- fmt.Errorf("Health Status Check Failed: client is closed")
 				return
 			}
 
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				warnf("Health Status Check Timeout")
-				result <- "Health Status Check Failed: Timeout"
+				result <- fmt.Errorf("Health Status Check Failed: Timeout")
 				return
-			}
-
-			select {
-			case <-ctx.Done():
-				result <- ctx.Err().Error()
-				return
-			default:
 			}
 
 			// bail out early if connection already shut down
@@ -1490,7 +1501,7 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			}
 			c.connMu.RUnlock()
 			if state == connectivity.Shutdown {
-				result <- "Health Status Check Failed: client connection is shutdown"
+				result <- fmt.Errorf("Health Status Check Failed: client connection is shutdown")
 				return
 			}
 
@@ -1502,12 +1513,11 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			if status, e := c.HealthProbe("", perAttempt); e != nil {
 				// treat transient health probe errors as retryable until timeout
 				warnf("Health Status Check Not Ready Yet: %s", e.Error())
+			} else if status == grpc_health_v1.HealthCheckResponse_SERVING {
+				printf("Serving Status Detected")
+				result <- nil
+				return
 			} else {
-				if status == grpc_health_v1.HealthCheckResponse_SERVING {
-					printf("Serving Status Detected")
-					result <- "OK"
-					return
-				}
 				warnf("Not Serving!")
 			}
 
@@ -1519,20 +1529,13 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		}
 	}()
 
-	errInfo, ok := <-result
+	err := <-result
 	printf("Heath Status Check Finalized...")
 
-	if !ok {
-		return fmt.Errorf("Health Status Check Failed: unknown error")
+	if err != nil {
+		return err // return concrete error (including ctx.Err)
 	}
-
-	if errInfo == "OK" {
-		// success - server service health = serving
-		return nil
-	}
-
-	// failure
-	return fmt.Errorf(errInfo)
+	return nil
 }
 
 // setupHealthManualChecker sets up the HealthChecker for manual use by HealthProbe method
