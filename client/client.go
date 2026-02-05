@@ -322,6 +322,106 @@ func (c *Client) endpointsSnapshot() []*serviceEndpoint {
 	return out
 }
 
+// helper to (re)wire notifier handlers every time before dial
+func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
+	if c == nil || nc == nil || c._config == nil {
+		return
+	}
+
+	nc.ServiceHostOnlineHandler = func(host string, port uint) {
+		if c == nil || c.closed.Load() || c._config == nil {
+			return
+		}
+		cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
+		if cacheExpSeconds == 0 {
+			cacheExpSeconds = 300
+		}
+
+		svcKey := strings.ToLower(c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
+		cacheAddServiceEndpoints(svcKey, []*serviceEndpoint{
+			{
+				SdType:      c._config.Target.ServiceDiscoveryType,
+				Host:        host,
+				Port:        port,
+				InstanceId:  "",
+				ServiceId:   "",
+				Version:     c._config.Target.InstanceVersion,
+				CacheExpire: time.Now().Add(time.Duration(cacheExpSeconds) * time.Second),
+			},
+		})
+		c.setEndpoints(cacheGetLiveServiceEndpoints(svcKey, c._config.Target.InstanceVersion, true))
+		_ = c.UpdateLoadBalanceResolver()
+	}
+
+	nc.ServiceHostOfflineHandler = func(host string, port uint) {
+		if c == nil || c.closed.Load() || c._config == nil {
+			return
+		}
+		svcKey := strings.ToLower(c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
+		cachePurgeServiceEndpointByHostAndPort(svcKey, host, port)
+		c.setEndpoints(cacheGetLiveServiceEndpoints(svcKey, c._config.Target.InstanceVersion, true))
+		_ = c.UpdateLoadBalanceResolver()
+	}
+
+	nc.ServiceAlertStoppedHandler = func(reason string) {
+		if !strings.Contains(strings.ToLower(reason), "transport is closing") {
+			if z := c.ZLog(); z != nil {
+				z.Printf("--- Notifier Client Service Disconnected Normally: %s ---", reason)
+			} else {
+				log.Printf("--- Notifier Client Service Disconnected Normally: %s ---", reason)
+			}
+			return
+		}
+
+		if c == nil || c.closed.Load() {
+			return
+		}
+		if !c.notifierReconnectActive.CompareAndSwap(false, true) {
+			if z := c.ZLog(); z != nil {
+				z.Warnf("Notifier reconnect already in progress; skipping duplicate attempt")
+			} else {
+				log.Printf("Notifier reconnect already in progress; skipping duplicate attempt")
+			}
+			return
+		}
+
+		if z := c.ZLog(); z != nil {
+			z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+		} else {
+			log.Printf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
+		}
+
+		go func() {
+			defer c.notifierReconnectActive.Store(false)
+			for {
+				if c.closed.Load() {
+					return
+				}
+				time.Sleep(5 * time.Second)
+
+				if current := c.getNotifierClient(); current != nil {
+					current.Close()
+					c.setNotifierClient(nil)
+				}
+				if c.closed.Load() {
+					return
+				}
+
+				// let DoNotifierAlertService create and wire a fresh client
+				if err := c.DoNotifierAlertService(); err != nil {
+					if z := c.ZLog(); z != nil {
+						z.Errorf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", err.Error())
+					} else {
+						log.Printf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", err.Error())
+					}
+					continue
+				}
+				return
+			}
+		}()
+	}
+}
+
 // serviceEndpoint represents a specific service endpoint connection target
 type serviceEndpoint struct {
 	SdType string // srv, api, direct
@@ -1190,134 +1290,14 @@ func (c *Client) DoNotifierAlertService() (err error) {
 			c.setNotifierClient(nc)
 		}
 
+		// always (re)wire handlers, even on reconnects
+		c.configureNotifierHandlers(nc)
+
+		if nc == nil {
+			return nil
+		}
+
 		if doConnection || nc.ConfiguredForNotifierClientDial() {
-			if !doConnection {
-				nc.ServiceHostOnlineHandler = func(host string, port uint) {
-					if c == nil {
-						return
-					}
-					if c.closed.Load() {
-						return
-					}
-					if c._config != nil {
-						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
-							cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
-							if cacheExpSeconds == 0 {
-								cacheExpSeconds = 300
-							}
-
-							_cache.AddServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), []*serviceEndpoint{
-								{
-									SdType:      c._config.Target.ServiceDiscoveryType,
-									Host:        host,
-									Port:        port,
-									InstanceId:  "", // not used
-									ServiceId:   "", // not used
-									Version:     c._config.Target.InstanceVersion,
-									CacheExpire: time.Now().Add(time.Duration(cacheExpSeconds) * time.Second),
-								},
-							})
-
-							c.setEndpoints(cacheGetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true))
-
-							if e := c.UpdateLoadBalanceResolver(); e != nil {
-								if z != nil {
-									z.Errorf(e.Error())
-								} else {
-									log.Printf(e.Error())
-								}
-							}
-						}
-					}
-				}
-
-				nc.ServiceHostOfflineHandler = func(host string, port uint) {
-					if c == nil {
-						return
-					}
-					if c.closed.Load() {
-						return
-					}
-					if c._config != nil {
-						if util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.NamespaceName) > 0 {
-							cachePurgeServiceEndpointByHostAndPort(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), host, port)
-						}
-
-						c.setEndpoints(cacheGetLiveServiceEndpoints(strings.ToLower(c._config.Target.ServiceName+"."+c._config.Target.NamespaceName), c._config.Target.InstanceVersion, true))
-
-						if e := c.UpdateLoadBalanceResolver(); e != nil {
-							if z != nil {
-								z.Errorf(e.Error())
-							} else {
-								log.Printf(e.Error())
-							}
-						}
-					}
-				}
-
-				nc.ServiceAlertStoppedHandler = func(reason string) {
-					if strings.Contains(strings.ToLower(reason), "transport is closing") {
-						if c == nil {
-							return
-						}
-						if c.closed.Load() {
-							return
-						}
-						// guard to avoid overlapping reconnect loops
-						if !c.notifierReconnectActive.CompareAndSwap(false, true) {
-							if z != nil {
-								z.Warnf("Notifier reconnect already in progress; skipping duplicate attempt")
-							} else {
-								log.Printf("Notifier reconnect already in progress; skipping duplicate attempt")
-							}
-							return
-						}
-
-						if z != nil {
-							z.Warnf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
-						} else {
-							log.Printf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
-						}
-
-						go func() { // reconnect asynchronously to avoid blocking callback
-							defer c.notifierReconnectActive.Store(false)
-							for {
-								if c.closed.Load() {
-									return
-								}
-								time.Sleep(5 * time.Second)
-
-								current := c.getNotifierClient()
-								if current != nil {
-									current.Close()
-									c.setNotifierClient(nil)
-								}
-								if c.closed.Load() {
-									return
-								}
-
-								if c.getNotifierClient() == nil { // ensure client exists before redial
-									c.setNotifierClient(NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath))
-								}
-								if e := c.DoNotifierAlertService(); e != nil {
-									if z != nil {
-										z.Errorf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", e.Error())
-									} else {
-										log.Printf("... Reconnect Notifier Server Failed: %s (Will Retry in 5 Seconds)", e.Error())
-									}
-									continue
-								}
-								return
-							}
-						}()
-					} else if z != nil {
-						z.Printf("--- Notifier Client Service Disconnected Normally: %s ---", reason)
-					} else {
-						log.Printf("--- Notifier Client Service Disconnected Normally: %s ---", reason)
-					}
-				}
-			}
-
 			nc = c.getNotifierClient() // ensure we use the guarded instance
 			if nc == nil {
 				return nil
