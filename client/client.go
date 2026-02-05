@@ -1373,35 +1373,43 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 	if len(timeoutDuration) > 0 {
 		timeout = timeoutDuration[0]
 	}
-	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(2500 * time.Millisecond)
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	healthUrl := c.WebServerConfig.WebServerLocalAddress + "/health"
 
 	for {
-		if time.Now().After(deadline) {
-			warnf("Web Server Health Check Timeout")
-			return fmt.Errorf("Web Server Health Check Failed: Timeout")
-		}
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-timer.C:
+			warnf("Web Server Health Check Timeout")
+			return fmt.Errorf("Web Server Health Check Failed: Timeout")
 		case <-ticker.C:
 			if c.closed.Load() { // break out if client was closed during wait
 				return fmt.Errorf("Web Server Health Check Failed: client is closed")
 			}
-			remaining := time.Until(deadline)
+
+			remaining := time.Until(time.Now().Add(timeout))
 			perAttempt := remaining
 			if perAttempt > 2*time.Second { // cap per-attempt to 2s
 				perAttempt = 2 * time.Second
-			} else if perAttempt <= 0 {
+			}
+			if perAttempt <= 0 {
 				perAttempt = 250 * time.Millisecond
 			}
 
 			reqCtx, cancel := context.WithTimeout(ctx, perAttempt)
-			req, _ := http.NewRequestWithContext(reqCtx, http.MethodGet, healthUrl, nil)
+			req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, healthUrl, nil)
+			if err != nil {
+				cancel()
+				warnf("Web Server Health Check Failed: %s", err.Error())
+				continue
+			}
+
 			resp, e := (&http.Client{Timeout: perAttempt}).Do(req)
 			if resp != nil {
 				_ = resp.Body.Close()
@@ -1416,6 +1424,7 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 				printf("Web Server Health OK")
 				return nil
 			}
+
 			// non-200 is also retried until timeout instead of failing fast
 			statusCode := 0
 			if resp != nil {
