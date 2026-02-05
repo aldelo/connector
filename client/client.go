@@ -982,49 +982,31 @@ func (c *Client) Dial(ctx context.Context) error {
 				//
 				// start http web server
 				//
-				if err := c.startWebServer(); err != nil {
-					c._z.Errorf("Serve Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
-					startWebServerErr <- err
-					return
-				}
-				startWebServerErr <- nil
+				startWebServerErr <- c.startWebServer()
 			}()
 
-			// give slight time delay to allow time slice for non blocking code to complete in goroutine above
-			time.Sleep(150 * time.Millisecond)
+			// wait for readiness first; propagate deterministic readiness failures
+			if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+				c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
+				if seg != nil {
+					_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
+				}
+				return e
+			}
 
+			// after readiness, non-blockingly capture any immediate Serve error if it already occurred
 			select {
-			case webErr := <-startWebServerErr: // capture real goroutine error
-				if webErr != nil { // fail fast with the actual error
+			case webErr := <-startWebServerErr:
+				if webErr != nil {
 					if seg != nil {
 						_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr))
 					}
 					return fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr)
 				}
-				// success path continues to readiness check
-				if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
-					// web server error
-					c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
-					if seg != nil {
-						_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
-					}
-					return e // propagate readiness failure
-				}
-				c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
 			default:
-				// wait short time to check if web server was started up successfully
-				if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
-					// web server error
-					c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
-					if seg != nil {
-						_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
-					}
-					return e // propagate readiness failure
-				} else {
-					// web server ok
-					c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
-				}
 			}
+
+			c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
 		}
 
 		//
@@ -2361,6 +2343,11 @@ func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req 
 		} else {
 			seg = xray.NewSegment("GrpcClient-UnaryRPC-" + method)
 		}
+
+		if seg == nil || seg.Seg == nil { // guard against nil segment to prevent panic
+			return invoker(ctx, method, req, reply, cc, opts...)
+		}
+
 		defer seg.Close()
 		defer func() {
 			if err != nil {
@@ -2429,6 +2416,11 @@ func (c *Client) streamXRayTracerHandler(
 		} else {
 			seg = xray.NewSegment("GrpcClient-" + streamType + "-" + method)
 		}
+
+		if seg == nil || seg.Seg == nil { // guard against nil segment to prevent panic
+			return streamer(ctx, desc, cc, method, opts...)
+		}
+
 		defer seg.Close()
 		defer func() {
 			if err != nil {
