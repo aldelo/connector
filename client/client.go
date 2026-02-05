@@ -1049,6 +1049,9 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 	if c == nil {
 		return 0, fmt.Errorf("Client Object Nil")
 	}
+	if c.closed.Load() { // guard against use-after-close
+		return 0, fmt.Errorf("GetLiveEndpointsCount requires open client")
+	}
 
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {
@@ -1150,6 +1153,9 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 func (c *Client) UpdateLoadBalanceResolver() error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
+	}
+	if c.closed.Load() { // guard against use-after-close
+		return fmt.Errorf("UpdateLoadBalanceResolver requires open client")
 	}
 
 	z := c.ZLog()
@@ -1339,6 +1345,9 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
+	if c.closed.Load() { // stop probing after client close
+		return fmt.Errorf("Web Server Health Check Failed: client is closed")
+	}
 
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {
@@ -1380,6 +1389,9 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			if c.closed.Load() { // break out if client was closed during wait
+				return fmt.Errorf("Web Server Health Check Failed: client is closed")
+			}
 			remaining := time.Until(deadline)
 			perAttempt := remaining
 			if perAttempt > 2*time.Second { // cap per-attempt to 2s
@@ -1419,6 +1431,9 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
+	if c.closed.Load() { // avoid waiting when client already closed
+		return fmt.Errorf("Health Status Check Failed: client is closed")
+	}
 
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {
@@ -1452,6 +1467,11 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	go func() {
 		defer close(result)
 		for {
+			if c.closed.Load() { // stop immediately if client closed mid-wait
+				result <- "Health Status Check Failed: client is closed"
+				return
+			}
+
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				warnf("Health Status Check Timeout")
@@ -1464,6 +1484,18 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 				result <- ctx.Err().Error()
 				return
 			default:
+			}
+
+			// bail out early if connection already shut down
+			c.connMu.RLock()
+			state := connectivity.Shutdown
+			if c._conn != nil {
+				state = c._conn.GetState()
+			}
+			c.connMu.RUnlock()
+			if state == connectivity.Shutdown {
+				result <- "Health Status Check Failed: client connection is shutdown"
+				return
 			}
 
 			perAttempt := remaining
