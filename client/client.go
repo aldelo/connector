@@ -1381,6 +1381,9 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 
 	healthUrl := c.WebServerConfig.WebServerLocalAddress + "/health"
 
+	// CHANGED: compute a fixed deadline so remaining time shrinks across retries
+	deadline := time.Now().Add(timeout)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1393,13 +1396,15 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 				return fmt.Errorf("Web Server Health Check Failed: client is closed")
 			}
 
-			remaining := time.Until(time.Now().Add(timeout))
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				warnf("Web Server Health Check Timeout")
+				return fmt.Errorf("Web Server Health Check Failed: Timeout")
+			}
+
 			perAttempt := remaining
 			if perAttempt > 2*time.Second { // cap per-attempt to 2s
 				perAttempt = 2 * time.Second
-			}
-			if perAttempt <= 0 {
-				perAttempt = 250 * time.Millisecond
 			}
 
 			reqCtx, cancel := context.WithTimeout(ctx, perAttempt)
