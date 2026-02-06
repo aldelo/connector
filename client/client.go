@@ -512,6 +512,15 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		return []grpc.DialOption{}, fmt.Errorf("Config Data Not Loaded")
 	}
 
+	logger := c.ZLog() // ensure logger is initialized
+	logPrintf := func(msg string) {
+		if logger != nil {
+			logger.Printf(msg)
+		} else {
+			log.Printf(msg)
+		}
+	}
+
 	//
 	// config client options
 	//
@@ -618,12 +627,12 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	// Build interceptor chains from a fresh local slice to avoid duplicate appends across re-dials.
 	unaryInts := append([]grpc.UnaryClientInterceptor{}, c.UnaryClientInterceptors...)
 	if c._config.Grpc.CircuitBreakerEnabled {
-		c._z.Printf("Setup Unary Circuit Breaker Interceptor")
+		logPrintf("Setup Unary Circuit Breaker Interceptor")
 		unaryInts = append(unaryInts, c.unaryCircuitBreakerHandler)
 	}
 
 	if xray.XRayServiceOn() {
-		c._z.Printf("Setup Unary XRay Tracer Interceptor")
+		logPrintf("Setup Unary XRay Tracer Interceptor")
 		//c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryXRayTracerHandler)
 		unaryInts = append(unaryInts, tracer.TracerUnaryClientInterceptor(c._config.Target.AppName+"-Client"))
 	}
@@ -639,12 +648,12 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	// Build stream interceptors from a fresh local slice to avoid duplicate appends across re-dials.
 	streamInts := append([]grpc.StreamClientInterceptor{}, c.StreamClientInterceptors...)
 	if c._config.Grpc.CircuitBreakerEnabled {
-		c._z.Printf("Setup Stream Circuit Breaker Interceptor")
+		logPrintf("Setup Stream Circuit Breaker Interceptor")
 		streamInts = append(streamInts, c.streamCircuitBreakerHandler)
 	}
 
 	if xray.XRayServiceOn() {
-		c._z.Printf("Setup Stream XRay Tracer Interceptor")
+		logPrintf("Setup Stream XRay Tracer Interceptor")
 		streamInts = append(streamInts, c.streamXRayTracerHandler)
 	}
 
@@ -2202,14 +2211,37 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
 
-	c._z.Printf("In - Unary Circuit Breaker Handler: " + method)
+	logger := c.ZLog()
+	logPrintf := func(msg string) {
+		if logger != nil {
+			logger.Printf(msg)
+		} else {
+			log.Printf(msg)
+		}
+	}
+	logErrorf := func(msg string) {
+		if logger != nil {
+			logger.Errorf(msg)
+		} else {
+			log.Printf(msg)
+		}
+	}
+	logWarnf := func(msg string) {
+		if logger != nil {
+			logger.Warnf(msg)
+		} else {
+			log.Printf(msg)
+		}
+	}
+
+	logPrintf("In - Unary Circuit Breaker Handler: " + method)
 
 	c.cbMu.RLock()
 	cb := c._circuitBreakers[method]
 	c.cbMu.RUnlock()
 
 	if cb == nil {
-		c._z.Printf("... Creating Circuit Breaker for: " + method)
+		logPrintf("... Creating Circuit Breaker for: " + method)
 
 		z := &data.ZapLog{
 			DisableLogger:   false,
@@ -2239,26 +2271,26 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 		c._circuitBreakers[method] = cb
 		c.cbMu.Unlock()
 
-		c._z.Printf("... Circuit Breaker Created for: " + method)
+		logPrintf("... Circuit Breaker Created for: " + method)
 	} else {
-		c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
+		logPrintf("... Using Cached Circuit Breaker Command: " + method)
 	}
 
 	_, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
+		logPrintf("Run Circuit Breaker Action for: " + method + "...")
 
 		err = invoker(ctx, method, req, reply, cc, opts...)
 
 		if err != nil {
-			c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+			logErrorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
 		} else {
-			c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
+			logPrintf("... Circuit Breaker Action for " + method + " Invoked")
 		}
 		return nil, err
 
 	}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
-		c._z.Warnf("... Error = " + errIn.Error())
+		logWarnf("Circuit Breaker Action for " + method + " Fallback...")
+		logWarnf("... Error = " + errIn.Error())
 
 		return nil, errIn
 	}, nil)
@@ -2284,14 +2316,37 @@ func (c *Client) streamCircuitBreakerHandler(
 		return streamer(ctx, desc, cc, method, opts...)
 	}
 
-	c._z.Printf("In - Stream Circuit Breaker Handler: " + method)
+	logger := c.ZLog()
+	logPrintf := func(msg string) {
+		if logger != nil {
+			logger.Printf(msg)
+		} else {
+			log.Printf(msg)
+		}
+	}
+	logErrorf := func(msg string) {
+		if logger != nil {
+			logger.Errorf(msg)
+		} else {
+			log.Printf(msg)
+		}
+	}
+	logWarnf := func(msg string) {
+		if logger != nil {
+			logger.Warnf(msg)
+		} else {
+			log.Printf(msg)
+		}
+	}
+
+	logPrintf("In - Stream Circuit Breaker Handler: " + method)
 
 	c.cbMu.RLock()
 	cb := c._circuitBreakers[method]
 	c.cbMu.RUnlock()
 
 	if cb == nil {
-		c._z.Printf("... Creating Circuit Breaker for: " + method)
+		logPrintf("... Creating Circuit Breaker for: " + method)
 
 		z := &data.ZapLog{
 			DisableLogger:   false,
@@ -2310,8 +2365,8 @@ func (c *Client) streamCircuitBreakerHandler(
 			z)
 
 		if e != nil {
-			c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
-			c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+			logErrorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+			logErrorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
 			return streamer(ctx, desc, cc, method, opts...)
 		}
 
@@ -2322,25 +2377,25 @@ func (c *Client) streamCircuitBreakerHandler(
 		c._circuitBreakers[method] = cb
 		c.cbMu.Unlock()
 
-		c._z.Printf("... Circuit Breaker Created for: " + method)
+		logPrintf("... Circuit Breaker Created for: " + method)
 	} else {
-		c._z.Printf("... Using Cached Circuit Breaker Command: " + method)
+		logPrintf("... Using Cached Circuit Breaker Command: " + method)
 	}
 
 	gres, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		c._z.Printf("Run Circuit Breaker Action for: " + method + "...")
+		logPrintf("Run Circuit Breaker Action for: " + method + "...")
 
 		dataOut, err = streamer(ctx, desc, cc, method, opts...)
 
 		if err != nil {
-			c._z.Errorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+			logErrorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
 		} else {
-			c._z.Printf("... Circuit Breaker Action for " + method + " Invoked")
+			logPrintf("... Circuit Breaker Action for " + method + " Invoked")
 		}
 		return dataOut, err
 	}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		c._z.Warnf("Circuit Breaker Action for " + method + " Fallback...")
-		c._z.Warnf("... Error = " + errIn.Error())
+		logWarnf("Circuit Breaker Action for " + method + " Fallback...")
+		logWarnf("... Error = " + errIn.Error())
 
 		return nil, errIn
 	}, nil)
