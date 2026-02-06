@@ -302,6 +302,9 @@ type Client struct {
 
 	// guard notifier client access to avoid races across callbacks/reconnect/close
 	notifierMu sync.Mutex
+
+	webServer     *ws.WebServer // track started web server for shutdown
+	webServerStop chan struct{} // signal channel to stop web server
 }
 
 // safely replace the current endpoints slice
@@ -399,7 +402,19 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 				if c.closed.Load() {
 					return
 				}
-				time.Sleep(5 * time.Second)
+				select { // allow prompt exit instead of fixed sleep
+				case <-time.After(5 * time.Second):
+				case <-func() <-chan struct{} {
+					done := make(chan struct{})
+					go func() {
+						if c.closed.Load() {
+							close(done)
+						}
+					}()
+					return done
+				}():
+					return
+				}
 
 				if current := c.getNotifierClient(); current != nil {
 					current.Close()
@@ -1699,6 +1714,12 @@ func (c *Client) Close() {
 	if c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
 		c.WebServerConfig.CleanUp()
 	}
+	if c.webServer != nil { // stop web server if running
+		if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
+			_ = stopper.Shutdown(context.Background())
+		}
+		c.webServer = nil
+	}
 
 	// clean up notifier client connection
 	if nc := c.getNotifierClient(); nc != nil { // use guarded getter to avoid races
@@ -2564,11 +2585,22 @@ func (c *Client) startWebServer() error {
 	}
 	log.Println("Web Server Host Starting On: " + c.WebServerConfig.WebServerLocalAddress)
 
-	// serve web server
-	if err := server.Serve(); err != nil {
-		server.RemoveDNSRecordset()
-		return fmt.Errorf("Start Web Server Failed: (Serve Error) %s", err)
-	}
+	// keep reference so Close() can stop it
+	c.webServer = server
+	c.webServerStop = make(chan struct{})
+
+	// serve asynchronously so Dial can continue; capture error for logging
+	go func() {
+		defer close(c.webServerStop) // signal completion/shutdown
+		if err := server.Serve(); err != nil {
+			server.RemoveDNSRecordset()
+			if z := c.ZLog(); z != nil {
+				z.Errorf("Start Web Server Failed: (Serve Error) %s", err)
+			} else {
+				log.Printf("Start Web Server Failed: (Serve Error) %s", err)
+			}
+		}
+	}()
 
 	return nil
 }
