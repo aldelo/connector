@@ -289,12 +289,14 @@ type Client struct {
 	_notifierClient *NotifierClient
 
 	// zap logger instead of standard log
-	_z *data.ZapLog
+	_z  *data.ZapLog
+	zMu sync.Mutex
 
 	closed atomic.Bool
 
 	// guard to avoid spawning overlapping notifier reconnect loops
 	notifierReconnectActive atomic.Bool
+	notifierStartMu         sync.Mutex
 
 	zOnce sync.Once
 
@@ -468,14 +470,17 @@ func (c *Client) readConfig() error {
 	}
 
 	// setup logger
+	c.zMu.Lock()
 	c._z = &data.ZapLog{
 		DisableLogger:   !c._config.Target.ZapLogEnabled,
 		OutputToConsole: c._config.Target.ZapLogOutputConsole,
 		AppName:         c._config.AppName,
 	}
 	if e := c._z.Init(); e != nil {
+		c.zMu.Unlock()
 		return fmt.Errorf("Init ZapLog Failed: %s", e.Error())
 	}
+	c.zMu.Unlock()
 
 	cacheDisableLogging(!c._config.Target.ZapLogEnabled)
 
@@ -658,29 +663,30 @@ func (c *Client) ZLog() *data.ZapLog {
 		return nil
 	}
 
-	c.zOnce.Do(func() {
-		if c._z != nil {
-			return
-		}
+	c.zMu.Lock()
+	defer c.zMu.Unlock()
 
-		appName := "Default-BeforeConfigLoad"
-		disableLogger := true
-		outputConsole := true
+	if c._z != nil {
+		return c._z
+	}
 
-		if c._config != nil {
-			appName = c._config.AppName
-			disableLogger = !c._config.Target.ZapLogEnabled
-			outputConsole = c._config.Target.ZapLogOutputConsole
-		}
+	appName := "Default-BeforeConfigLoad"
+	disableLogger := true
+	outputConsole := true
 
-		z := &data.ZapLog{
-			DisableLogger:   disableLogger,
-			OutputToConsole: outputConsole,
-			AppName:         appName,
-		}
-		_ = z.Init()
-		c._z = z
-	})
+	if c._config != nil {
+		appName = c._config.AppName
+		disableLogger = !c._config.Target.ZapLogEnabled
+		outputConsole = c._config.Target.ZapLogOutputConsole
+	}
+
+	z := &data.ZapLog{
+		DisableLogger:   disableLogger,
+		OutputToConsole: outputConsole,
+		AppName:         appName,
+	}
+	_ = z.Init()
+	c._z = z
 
 	return c._z
 }
@@ -994,7 +1000,7 @@ func (c *Client) Dial(ctx context.Context) error {
 				return e
 			}
 
-			// after readiness, non-blockingly capture any immediate Serve error if it already occurred
+			// after readiness, non-blocking capture any immediate Serve error if it already occurred
 			select {
 			case webErr := <-startWebServerErr:
 				if webErr != nil {
@@ -1250,6 +1256,9 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
+
+	c.notifierStartMu.Lock()
+	defer c.notifierStartMu.Unlock()
 
 	if c.closed.Load() {
 		return fmt.Errorf("Client is closed")
