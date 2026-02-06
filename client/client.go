@@ -1006,6 +1006,17 @@ func (c *Client) Dial(ctx context.Context) error {
 			default:
 			}
 
+			// keep observing the server goroutine so late startup failures are not silent
+			go func() {
+				if webErr := <-startWebServerErr; webErr != nil {
+					if z := c.ZLog(); z != nil {
+						z.Errorf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
+					} else {
+						log.Printf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
+					}
+				}
+			}()
+
 			c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
 		}
 
@@ -1365,7 +1376,7 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 
 	healthUrl := c.WebServerConfig.WebServerLocalAddress + "/health"
 
-	// CHANGED: compute a fixed deadline so remaining time shrinks across retries
+	// compute a fixed deadline so remaining time shrinks across retries
 	deadline := time.Now().Add(timeout)
 
 	for {
