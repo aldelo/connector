@@ -1525,6 +1525,12 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		}
 	}
 
+	// default health-check target to configured service name when available
+	serviceName := ""
+	if c._config != nil && util.LenTrim(c._config.Target.ServiceName) > 0 {
+		serviceName = c._config.Target.ServiceName
+	}
+
 	timeout := 5 * time.Second
 	if len(timeoutDuration) > 0 {
 		timeout = timeoutDuration[0]
@@ -1567,7 +1573,7 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			perAttempt = maxPerAttempt
 		}
 
-		if status, e := c.HealthProbe("", perAttempt); e != nil {
+		if status, e := c.HealthProbe(serviceName, perAttempt); e != nil {
 			warnf("Health Status Check Not Ready Yet: %s", e.Error())
 		} else if status == grpc_health_v1.HealthCheckResponse_SERVING {
 			printf("Serving Status Detected")
@@ -1704,8 +1710,6 @@ func (c *Client) Close() {
 		return
 	}
 
-	c.closed.Store(true)
-
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {
 		if z != nil {
@@ -1727,6 +1731,9 @@ func (c *Client) Close() {
 		c.BeforeClientClose(c)
 		printf("... Before gRPC Client Close End")
 	}
+
+	// mark closed after BeforeClientClose so hooks can operate on an open client
+	c.closed.Store(true)
 
 	defer func() {
 		if c.AfterClientClose != nil {
