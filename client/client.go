@@ -1478,16 +1478,13 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		// guard against empty discovery topic ARN to avoid failed subscribes and dangling client
 		arn := nc.ConfiguredSNSDiscoveryTopicArn()
 		if !nc.ConfiguredForNotifierClientDial() || util.LenTrim(arn) == 0 {
-			// close the client to avoid leaks, but don't store it
+			// close the client to avoid leaks
 			if nc != nil {
 				nc.Close()
 			}
 			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
-			// do NOT store a half-initialized notifier client
-			if !doConnection {
-				// if we created a new one, ensure it's not stored
-				c.setNotifierClient(nil)
-			}
+			// clear the stored client to avoid keeping a half-initialized notifier client
+			c.setNotifierClient(nil)
 			return nil
 		}
 
@@ -2958,22 +2955,17 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		}
 	}()
 
-	// forward result to caller only if serveErr was provided, avoiding goroutine leak
-	if serveErr != nil {
-		go func() {
-			if err := <-internalServeErr; err != nil {
-				select {
-				case serveErr <- err:
-				default:
-				}
-			} else {
-				select {
-				case serveErr <- nil:
-				default:
-				}
+	// always forward result from internalServeErr to avoid blocking the serve goroutine
+	// if serveErr is nil, we still need to drain internalServeErr
+	go func() {
+		err := <-internalServeErr
+		if serveErr != nil {
+			select {
+			case serveErr <- err:
+			default:
 			}
-		}()
-	}
+		}
+	}()
 
 	return nil
 }
