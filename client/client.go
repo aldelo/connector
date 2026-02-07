@@ -704,6 +704,27 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	return
 }
 
+func (c *Client) stopWebServerFast(timeout time.Duration) { // fast shutdown helper for dial failures
+	if c == nil {
+		return
+	}
+	if c.webServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
+			_ = stopper.Shutdown(ctx)
+		}
+		cancel()
+
+		if c.webServerStop != nil {
+			select {
+			case <-c.webServerStop:
+			case <-time.After(timeout + time.Second):
+			}
+		}
+		c.webServer = nil
+	}
+}
+
 // ZLog access internal zap logger
 func (c *Client) ZLog() *data.ZapLog {
 	if c == nil {
@@ -871,6 +892,29 @@ func (c *Client) Dial(ctx context.Context) error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	cleanupConn := false // track gRPC conn cleanup on failure
+	cleanupWeb := false  // track web server cleanup on failure
+	cleanupSd := false   // track CloudMap cleanup on failure
+	cleanupSqs := false  // track SQS cleanup on failure
+	defer func() { // unified cleanup for partial failures
+		if cleanupWeb {
+			c.stopWebServerFast(5 * time.Second)
+		}
+		if cleanupConn {
+			if closedConn := c.clearConnection(); closedConn != nil {
+				_ = closedConn.Close()
+			}
+		}
+		if cleanupSqs && c._sqs != nil {
+			c._sqs.Disconnect()
+			c._sqs = nil
+		}
+		if cleanupSd && c._sd != nil {
+			c._sd.Disconnect()
+			c._sd = nil
+		}
+	}()
+
 	c.closed.Store(false)
 	c.setConnection(nil, "")
 
@@ -902,6 +946,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			c._z.Errorf("Get SQS Queue Adapter Failed: %s", e.Error())
 			c._sqs = nil
 		}
+		cleanupSqs = c._sqs != nil
 	} else {
 		c._sqs = nil
 	}
@@ -913,20 +958,22 @@ func (c *Client) Dial(ctx context.Context) error {
 	if err := c.connectSd(); err != nil {
 		return err
 	}
+	cleanupSd = c._sd != nil
 
 	// discover service endpoints
 	if err := c.discoverEndpoints(true); err != nil {
 		return err
-	} else if len(c._endpoints) == 0 {
+	}
+	eps := c.endpointsSnapshot() // protect _endpoints read
+	if len(eps) == 0 {
 		return fmt.Errorf("No Service Endpoints Discovered for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
 	}
 
-	c._z.Printf("... Service Discovery for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + " Found " + strconv.Itoa(len(c._endpoints)) + " Endpoints:")
+	c._z.Printf("... Service Discovery for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + " Found " + strconv.Itoa(len(eps)) + " Endpoints:")
 
 	// get endpoint addresses
-	endpointAddrs := []string{}
-
-	for i, ep := range c._endpoints {
+	endpointAddrs := make([]string, 0, len(eps))
+	for i, ep := range eps {
 		endpointAddrs = append(endpointAddrs, fmt.Sprintf("%s:%s", ep.Host, util.UintToStr(ep.Port)))
 
 		info := strconv.Itoa(i+1) + ") "
@@ -1010,6 +1057,7 @@ func (c *Client) Dial(ctx context.Context) error {
 		c._z.Printf("Dial Successful")
 
 		c.setConnection(conn, target)
+		cleanupConn = true
 
 		c._z.Printf("Remote Address = " + target)
 
@@ -1022,6 +1070,7 @@ func (c *Client) Dial(ctx context.Context) error {
 				if closedConn := c.clearConnection(); closedConn != nil {
 					_ = closedConn.Close()
 				}
+				cleanupConn = false
 				if seg != nil {
 					_ = seg.Seg.AddError(fmt.Errorf("gRPC Service Server Not Ready: " + e.Error()))
 				}
@@ -1043,6 +1092,7 @@ func (c *Client) Dial(ctx context.Context) error {
 				}
 				return fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
 			}
+			cleanupWeb = true
 
 			// wait for readiness first; propagate deterministic readiness failures
 			if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
@@ -1086,6 +1136,10 @@ func (c *Client) Dial(ctx context.Context) error {
 		//
 		// dial completed
 		//
+		cleanupConn = false // success, keep connection open
+		cleanupWeb = false
+		cleanupSd = false
+		cleanupSqs = false
 		return nil
 	}
 }
@@ -1866,20 +1920,24 @@ func (c *Client) connectSd() error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	if c._sd != nil { // ensure previous CloudMap client is disconnected before reconfiguring
+		c._sd.Disconnect()
+		c._sd = nil
+	}
+
 	// skip CloudMap wiring when using direct discovery to avoid unnecessary AWS dependency
 	if strings.EqualFold(c._config.Target.ServiceDiscoveryType, "direct") {
-		c._sd = nil
 		return nil
 	}
 
 	if util.LenTrim(c._config.Target.NamespaceName) > 0 && util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.Region) > 0 {
-		c._sd = &cloudmap.CloudMap{
+		cm := &cloudmap.CloudMap{
 			AwsRegion: awsregion.GetAwsRegion(c._config.Target.Region),
 		}
-
-		if err := c._sd.Connect(); err != nil {
+		if err := cm.Connect(); err != nil {
 			return fmt.Errorf("Connect SD Failed: %s", err.Error())
 		}
+		c._sd = cm
 	} else {
 		c._sd = nil
 	}
