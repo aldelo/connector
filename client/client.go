@@ -18,6 +18,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -727,6 +728,11 @@ func (c *Client) stopWebServerFast(timeout time.Duration) { // fast shutdown hel
 			_ = stopper.Shutdown(ctx)
 		}
 		cancel()
+
+		// ensure CleanUp hook (eg, Route53) is invoked on fast-stop to avoid DNS leaks
+		if c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
+			c.WebServerConfig.CleanUp()
+		}
 
 		if c.webServerStop != nil {
 			select {
@@ -2875,6 +2881,15 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		}()
 
 		if err := server.Serve(); err != nil {
+			// treat graceful shutdown as success, not an error
+			if errors.Is(err, http.ErrServerClosed) {
+				select {
+				case serveErr <- nil:
+				default:
+				}
+				return
+			}
+
 			server.RemoveDNSRecordset()
 			if z := c.ZLog(); z != nil {
 				z.Errorf("Start Web Server Failed: (Serve Error) %s", err)
