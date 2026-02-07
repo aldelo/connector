@@ -1494,8 +1494,8 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		}
 
 		if c.closed.Load() { // bail right before dial
-			// release reconnect guard on early exit
-			c.notifierReconnectActive.Store(false)
+			nc.Close()
+			c.setNotifierClient(nil)
 			return fmt.Errorf("Client is closed")
 		}
 
