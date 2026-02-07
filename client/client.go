@@ -1314,7 +1314,8 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		connState = c._conn.GetState()
 	}
 	c.connMu.RUnlock()
-	if !connReady || connState == connectivity.Ready {
+
+	if !connReady || connState == connectivity.Shutdown {
 		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return fmt.Errorf("UpdateLoadBalanceResolver Requires Current Client Connection Already Established First")
