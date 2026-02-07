@@ -1459,7 +1459,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	if doConnection || util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName+"-notifier-client.yaml")) {
 		if !doConnection {
 			nc = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
-			c.setNotifierClient(nc)
+			// do NOT store the client yet; check config validity first to avoid half-initialized storage
 		}
 
 		// always (re)wire handlers, even on reconnects
@@ -1471,20 +1471,29 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 		if c.closed.Load() { // bail if closed after wiring handlers
 			nc.Close()
-			c.setNotifierClient(nil)
+			// no need to clear from c since we haven't stored it yet
 			return fmt.Errorf("Client is closed")
 		}
 
 		// guard against empty discovery topic ARN to avoid failed subscribes and dangling client
 		arn := nc.ConfiguredSNSDiscoveryTopicArn()
 		if !nc.ConfiguredForNotifierClientDial() || util.LenTrim(arn) == 0 {
-			// ensure an existing notifier client is cleanly closed instead of silently dropped
+			// close the client to avoid leaks, but don't store it
 			if nc != nil {
 				nc.Close()
 			}
 			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
-			c.setNotifierClient(nil) // avoid keeping a half-initialized notifier client
+			// do NOT store a half-initialized notifier client
+			if !doConnection {
+				// if we created a new one, ensure it's not stored
+				c.setNotifierClient(nil)
+			}
 			return nil
+		}
+
+		// only store the client after validation passes
+		if !doConnection {
+			c.setNotifierClient(nc)
 		}
 
 		nc = c.getNotifierClient() // ensure we use the guarded instance
@@ -1683,6 +1692,13 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	maxPerAttempt := 2 * time.Second
 
 	for {
+		// check context cancellation early to avoid unnecessary work
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		// cancellation/timeout checks each loop.
 		if c.closed.Load() {
 			return fmt.Errorf("Health Status Check Failed: client is closed")
@@ -1690,12 +1706,6 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		if time.Now().After(deadline) {
 			warnf("Health Status Check Timeout")
 			return fmt.Errorf("Health Status Check Failed: Timeout")
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
 		}
 
 		c.connMu.RLock()
@@ -1709,6 +1719,7 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		if conn == nil {
 			return fmt.Errorf("Health Status Check Failed: client connection is nil")
 		}
+		// fail fast when connection enters Shutdown state
 		if state == connectivity.Shutdown {
 			return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
 		}
@@ -2857,12 +2868,7 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		return fmt.Errorf("Start Web Server Failed: server already running")
 	}
 
-	// Make serveErr safe/usable even if caller passed nil.
-	if serveErr == nil {
-		serveErr = make(chan error, 1)
-	}
-
-	// always buffer the channel we write to, even if caller passed unbuffered
+	// always use a buffered channel internally to avoid blocking the serve goroutine
 	internalServeErr := make(chan error, 1)
 
 	server := ws.NewWebServer(c.WebServerConfig.AppName, c.WebServerConfig.ConfigFileName, c.WebServerConfig.CustomConfigPath)
@@ -2952,20 +2958,22 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		}
 	}()
 
-	// forward result to caller without risking blocking the serve goroutine
-	go func() {
-		if err := <-internalServeErr; err != nil {
-			select {
-			case serveErr <- err:
-			default:
+	// forward result to caller only if serveErr was provided, avoiding goroutine leak
+	if serveErr != nil {
+		go func() {
+			if err := <-internalServeErr; err != nil {
+				select {
+				case serveErr <- err:
+				default:
+				}
+			} else {
+				select {
+				case serveErr <- nil:
+				default:
+				}
 			}
-		} else {
-			select {
-			case serveErr <- nil:
-			default:
-			}
-		}
-	}()
+		}()
+	}
 
 	return nil
 }
