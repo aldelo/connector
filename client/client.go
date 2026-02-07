@@ -1471,14 +1471,14 @@ func (c *Client) DoNotifierAlertService() (err error) {
 
 		if c.closed.Load() { // bail if closed after wiring handlers
 			nc.Close()
-			// no need to clear from c since we haven't stored it yet
+			// no need to clear from c since we haven't stored a new client yet in this code path
 			return fmt.Errorf("Client is closed")
 		}
 
 		// guard against empty discovery topic ARN to avoid failed subscribes and dangling client
 		arn := nc.ConfiguredSNSDiscoveryTopicArn()
 		if !nc.ConfiguredForNotifierClientDial() || util.LenTrim(arn) == 0 {
-			// close the client to avoid leaks
+			// close the client to avoid leaks (either newly created or existing from reconnect)
 			if nc != nil {
 				nc.Close()
 			}
