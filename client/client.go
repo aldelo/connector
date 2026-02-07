@@ -850,6 +850,10 @@ func (c *Client) Ready() bool {
 
 // Dial will dial grpc service and establish client connection
 func (c *Client) Dial(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
@@ -1017,14 +1021,15 @@ func (c *Client) Dial(ctx context.Context) error {
 		// dial successful, now start web server for notification callbacks (webhook)
 		if c.WebServerConfig != nil && util.LenTrim(c.WebServerConfig.ConfigFileName) > 0 {
 			c._z.Printf("Starting Http Web Server...")
-			startWebServerErr := make(chan error, 1)
+			serveErrCh := make(chan error, 1)
 
-			go func() {
-				//
-				// start http web server
-				//
-				startWebServerErr <- c.startWebServer()
-			}()
+			// start server and capture immediate config/start errors
+			if err := c.startWebServer(serveErrCh); err != nil {
+				if seg != nil {
+					_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err))
+				}
+				return fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
+			}
 
 			// wait for readiness first; propagate deterministic readiness failures
 			if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
@@ -1036,8 +1041,10 @@ func (c *Client) Dial(ctx context.Context) error {
 			}
 
 			// after readiness, non-blocking capture any immediate Serve error if it already occurred
+			consumed := false
 			select {
-			case webErr := <-startWebServerErr:
+			case webErr := <-serveErrCh:
+				consumed = true
 				if webErr != nil {
 					if seg != nil {
 						_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr))
@@ -1048,15 +1055,17 @@ func (c *Client) Dial(ctx context.Context) error {
 			}
 
 			// keep observing the server goroutine so late startup failures are not silent
-			go func() {
-				if webErr := <-startWebServerErr; webErr != nil {
-					if z := c.ZLog(); z != nil {
-						z.Errorf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
-					} else {
-						log.Printf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
+			if !consumed {
+				go func() {
+					if webErr := <-serveErrCh; webErr != nil {
+						if z := c.ZLog(); z != nil {
+							z.Errorf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
+						} else {
+							log.Printf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
+						}
 					}
-				}
-			}()
+				}()
+			}
 
 			c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
 		}
@@ -1392,6 +1401,10 @@ func (c *Client) DoNotifierAlertService() (err error) {
 // waitForWebServerReady is called after web server is expected to start,
 // this function will wait a short time for web server startup success or timeout
 func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
@@ -1485,6 +1498,10 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 
 // waitForEndpointReady is called after Dial to check if target service is ready as reported by health probe
 func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
@@ -2601,7 +2618,7 @@ type WebServerConfig struct {
 	CleanUp func()
 }
 
-func (c *Client) startWebServer() error {
+func (c *Client) startWebServer(serveErr chan<- error) error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
@@ -2684,6 +2701,13 @@ func (c *Client) startWebServer() error {
 			} else {
 				log.Printf("Start Web Server Failed: (Serve Error) %s", err)
 			}
+			if serveErr != nil {
+				serveErr <- err
+			}
+			return
+		}
+		if serveErr != nil {
+			serveErr <- nil
 		}
 	}()
 
