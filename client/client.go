@@ -1108,9 +1108,10 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 	}
 
 	if c._config.Target.ServiceDiscoveryType == "direct" {
-		printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
-		return 0, nil
+		count := len(c.endpointsSnapshot())
+		printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct = %d",
+			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, count)
+		return count, nil
 	}
 
 	printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Started...", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
@@ -1404,69 +1405,62 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 		timeout = timeoutDuration[0]
 	}
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	healthUrl := c.WebServerConfig.WebServerLocalAddress + "/health"
 
-	// compute a fixed deadline so remaining time shrinks across retries
-	deadline := time.Now().Add(timeout)
-
 	for {
+		// unified cancellation / timeout check before each attempt.
+		if c.closed.Load() {
+			return fmt.Errorf("Web Server Health Check Failed: client is closed")
+		}
+		if time.Now().After(deadline) {
+			warnf("Web Server Health Check Timeout")
+			return fmt.Errorf("Web Server Health Check Failed: Timeout")
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-timer.C:
-			warnf("Web Server Health Check Timeout")
-			return fmt.Errorf("Web Server Health Check Failed: Timeout")
 		case <-ticker.C:
-			if c.closed.Load() { // break out if client was closed during wait
-				return fmt.Errorf("Web Server Health Check Failed: client is closed")
-			}
-
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				warnf("Web Server Health Check Timeout")
-				return fmt.Errorf("Web Server Health Check Failed: Timeout")
-			}
-
-			perAttempt := remaining
-			if perAttempt > 2*time.Second { // cap per-attempt to 2s
-				perAttempt = 2 * time.Second
-			}
-
-			reqCtx, cancel := context.WithTimeout(ctx, perAttempt)
-			req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, healthUrl, nil)
-			if err != nil {
-				cancel()
-				warnf("Web Server Health Check Failed: %s", err.Error())
-				continue
-			}
-
-			resp, e := (&http.Client{Timeout: perAttempt}).Do(req)
-			if resp != nil {
-				_ = resp.Body.Close()
-			}
-			cancel()
-
-			if e != nil {
-				warnf("Web Server Health Check Failed: %s", e.Error())
-				continue
-			}
-			if resp != nil && resp.StatusCode == 200 {
-				printf("Web Server Health OK")
-				return nil
-			}
-
-			// non-200 is also retried until timeout instead of failing fast
-			statusCode := 0
-			if resp != nil {
-				statusCode = resp.StatusCode
-			}
-			warnf("Web Server Not Ready (status %d), retrying...", statusCode)
 		}
+
+		remaining := time.Until(deadline)
+		perAttempt := remaining
+		if perAttempt > 2*time.Second {
+			perAttempt = 2 * time.Second
+		}
+
+		reqCtx, cancel := context.WithTimeout(ctx, perAttempt)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, healthUrl, nil)
+		if err != nil {
+			cancel()
+			warnf("Web Server Health Check Failed: %s", err.Error())
+			continue
+		}
+
+		resp, e := (&http.Client{Timeout: perAttempt}).Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		cancel()
+
+		if e != nil {
+			warnf("Web Server Health Check Failed: %s", e.Error())
+			continue
+		}
+		if resp != nil && resp.StatusCode == 200 {
+			printf("Web Server Health OK")
+			return nil
+		}
+
+		// non-200 is also retried until timeout instead of failing fast
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		warnf("Web Server Not Ready (status %d), retrying...", statusCode)
 	}
 }
 
@@ -1477,13 +1471,6 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	}
 	if c.closed.Load() { // avoid waiting when client already closed
 		return fmt.Errorf("Health Status Check Failed: client is closed")
-	}
-
-	// Honor caller cancellation immediately before work starts.
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
 	}
 
 	z := c.ZLog()
@@ -1502,86 +1489,69 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		}
 	}
 
-	var timeout time.Duration
+	timeout := 5 * time.Second
 	if len(timeoutDuration) > 0 {
 		timeout = timeoutDuration[0]
-	} else {
-		timeout = 5 * time.Second
 	}
 
-	// use a deadline-aware loop without fixed oversleep
 	deadline := time.Now().Add(timeout)
 	interval := 250 * time.Millisecond
 	maxPerAttempt := 2 * time.Second
 
-	result := make(chan error, 1)
-
-	go func() {
-		defer close(result)
-		for {
-			// Highest-priority cancellation check inside loop.
-			select {
-			case <-ctx.Done():
-				result <- ctx.Err()
-				return
-			default:
-			}
-
-			if c.closed.Load() { // stop immediately if client closed mid-wait
-				result <- fmt.Errorf("Health Status Check Failed: client is closed")
-				return
-			}
-
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				warnf("Health Status Check Timeout")
-				result <- fmt.Errorf("Health Status Check Failed: Timeout")
-				return
-			}
-
-			// bail out early if connection already shut down
-			c.connMu.RLock()
-			state := connectivity.Shutdown
-			if c._conn != nil {
-				state = c._conn.GetState()
-			}
-			c.connMu.RUnlock()
-			if state == connectivity.Shutdown {
-				result <- fmt.Errorf("Health Status Check Failed: client connection is shutdown")
-				return
-			}
-
-			perAttempt := remaining
-			if perAttempt > maxPerAttempt {
-				perAttempt = maxPerAttempt
-			}
-
-			if status, e := c.HealthProbe("", perAttempt); e != nil {
-				// treat transient health probe errors as retryable until timeout
-				warnf("Health Status Check Not Ready Yet: %s", e.Error())
-			} else if status == grpc_health_v1.HealthCheckResponse_SERVING {
-				printf("Serving Status Detected")
-				result <- nil
-				return
-			} else {
-				warnf("Not Serving!")
-			}
-
-			sleep := interval
-			if sleep > remaining {
-				sleep = remaining
-			}
-			time.Sleep(sleep)
+	for {
+		// immediate cancellation/timeout checks each loop.
+		if c.closed.Load() {
+			return fmt.Errorf("Health Status Check Failed: client is closed")
 		}
-	}()
+		if time.Now().After(deadline) {
+			warnf("Health Status Check Timeout")
+			return fmt.Errorf("Health Status Check Failed: Timeout")
+		}
 
-	err := <-result
-	printf("Heath Status Check Finalized...")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 
-	if err != nil {
-		return err // return concrete error (including ctx.Err)
+		c.connMu.RLock()
+		state := connectivity.Shutdown
+		if c._conn != nil {
+			state = c._conn.GetState()
+		}
+		c.connMu.RUnlock()
+
+		if state == connectivity.Shutdown {
+			return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
+		}
+
+		remaining := time.Until(deadline)
+		perAttempt := remaining
+		if perAttempt > maxPerAttempt {
+			perAttempt = maxPerAttempt
+		}
+
+		if status, e := c.HealthProbe("", perAttempt); e != nil {
+			warnf("Health Status Check Not Ready Yet: %s", e.Error())
+		} else if status == grpc_health_v1.HealthCheckResponse_SERVING {
+			printf("Serving Status Detected")
+			printf("Heath Status Check Finalized...")
+			return nil
+		} else {
+			warnf("Not Serving!")
+		}
+
+		sleep := interval
+		if sleep > remaining {
+			sleep = remaining
+		}
+
+		select { // sleep that honors ctx/close to avoid stale waits.
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sleep):
+		}
 	}
-	return nil
 }
 
 // setupHealthManualChecker sets up the HealthChecker for manual use by HealthProbe method
@@ -1728,6 +1698,10 @@ func (c *Client) Close() {
 	if c.webServer != nil { // stop web server if running
 		if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
 			_ = stopper.Shutdown(context.Background())
+		}
+		// wait for serve goroutine to exit if we have a signal channel.
+		if c.webServerStop != nil {
+			<-c.webServerStop
 		}
 		c.webServer = nil
 	}
