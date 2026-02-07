@@ -332,12 +332,16 @@ func (c *Client) setEndpoints(eps []*serviceEndpoint) {
 
 // snapshot current endpoints (shallow copy) under read lock
 func (c *Client) endpointsSnapshot() []*serviceEndpoint {
-	c.endpointsMu.RLock()
-	defer c.endpointsMu.RUnlock()
+	c.endpointsMu.Lock()
+	defer c.endpointsMu.Unlock()
 
 	live := pruneExpiredEndpoints(c._endpoints)
-	out := make([]*serviceEndpoint, len(live))
+	// write back pruned endpoints so shared state stays trimmed
+	if len(live) != len(c._endpoints) {
+		c._endpoints = live
+	}
 
+	out := make([]*serviceEndpoint, len(live))
 	copy(out, live)
 	return out
 }
@@ -1372,6 +1376,9 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	c.notifierStartMu.Lock()
 	defer c.notifierStartMu.Unlock()
 
+	// always release reconnect guard on exit to avoid latch on early returns
+	defer c.notifierReconnectActive.Store(false)
+
 	if c.closed.Load() {
 		return fmt.Errorf("Client is closed")
 	}
@@ -1430,15 +1437,13 @@ func (c *Client) DoNotifierAlertService() (err error) {
 				nc.Close()
 			}
 			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
-			c.setNotifierClient(nil)               // avoid keeping a half-initialized notifier client
-			c.notifierReconnectActive.Store(false) // ensure reconnect guard is released on config skip
+			c.setNotifierClient(nil) // avoid keeping a half-initialized notifier client
 			return nil
 		}
 
 		nc = c.getNotifierClient() // ensure we use the guarded instance
 		if nc == nil {
 			// release reconnect guard if instance vanished
-			c.notifierReconnectActive.Store(false)
 			return nil
 		}
 
@@ -1455,7 +1460,6 @@ func (c *Client) DoNotifierAlertService() (err error) {
 				nc.Close()
 			}
 			c.setNotifierClient(nil)
-			c.notifierReconnectActive.Store(false)
 			return err
 		}
 
@@ -1465,7 +1469,6 @@ func (c *Client) DoNotifierAlertService() (err error) {
 				nc.Close()
 			}
 			c.setNotifierClient(nil)
-			c.notifierReconnectActive.Store(false)
 			return err
 		}
 
