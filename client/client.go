@@ -99,10 +99,20 @@ func cacheAddServiceEndpoints(key string, eps []*serviceEndpoint) {
 func cacheGetLiveServiceEndpoints(key, version string, force ...bool) []*serviceEndpoint {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
+
 	if _cache == nil {
 		return []*serviceEndpoint{}
 	}
-	return _cache.GetLiveServiceEndpoints(key, version, force...)
+
+	eps := _cache.GetLiveServiceEndpoints(key, version, force...)
+	if len(eps) == 0 {
+		return []*serviceEndpoint{}
+	}
+
+	out := make([]*serviceEndpoint, len(eps)) // copy to avoid aliasing races
+	copy(out, eps)
+
+	return out
 }
 
 func cachePurgeServiceEndpointByHostAndPort(key, host string, port uint) {
@@ -1463,6 +1473,12 @@ func (c *Client) DoNotifierAlertService() (err error) {
 			return err
 		}
 
+		if c.closed.Load() { // abort if client was closed during/after dial
+			nc.Close()
+			c.setNotifierClient(nil)
+			return fmt.Errorf("Client is closed")
+		}
+
 		if err = nc.Subscribe(arn); err != nil {
 			if nc != nil {
 				errorf("!!! Notifier Client Service Subscribe Failed: %s !!!", err.Error())
@@ -1470,6 +1486,13 @@ func (c *Client) DoNotifierAlertService() (err error) {
 			}
 			c.setNotifierClient(nil)
 			return err
+		}
+
+		if c.closed.Load() { // abort if client closed after subscribe
+			nc.Unsubscribe()
+			nc.Close()
+			c.setNotifierClient(nil)
+			return fmt.Errorf("Client is closed")
 		}
 
 		printf("~~~ Notifier Client Service Started ~~~")
@@ -1648,11 +1671,16 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		}
 
 		c.connMu.RLock()
+		conn := c._conn
 		state := connectivity.Shutdown
-		if c._conn != nil {
-			state = c._conn.GetState()
+		if conn != nil {
+			state = conn.GetState()
 		}
 		c.connMu.RUnlock()
+
+		if conn == nil || state == connectivity.Shutdown { // fail fast if conn vanished mid-wait
+			return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
+		}
 
 		if state == connectivity.Shutdown {
 			return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
