@@ -343,13 +343,22 @@ func (c *Client) setEndpoints(eps []*serviceEndpoint) {
 
 // snapshot current endpoints (shallow copy) under read lock
 func (c *Client) endpointsSnapshot() []*serviceEndpoint {
-	c.endpointsMu.Lock()
-	defer c.endpointsMu.Unlock()
+	if c == nil {
+		return nil
+	}
+
+	// fast read under RLock
+	c.endpointsMu.RLock()
+	current := make([]*serviceEndpoint, len(c._endpoints))
+	copy(current, c._endpoints)
+	c.endpointsMu.RUnlock()
 
 	live := pruneExpiredEndpoints(c._endpoints)
 	// write back pruned endpoints so shared state stays trimmed
-	if len(live) != len(c._endpoints) {
+	if len(live) != len(current) {
+		c.endpointsMu.Lock()
 		c._endpoints = live
+		c.endpointsMu.Unlock()
 	}
 
 	out := make([]*serviceEndpoint, len(live))
@@ -1658,22 +1667,8 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	interval := 250 * time.Millisecond
 	maxPerAttempt := 2 * time.Second
 
-	// fail fast if connection is already nil or shutdown before looping.
-	c.connMu.RLock()
-	connState := connectivity.Shutdown
-	if c._conn != nil {
-		connState = c._conn.GetState()
-	}
-	c.connMu.RUnlock()
-	if connState == connectivity.Shutdown {
-		return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
-	}
-	if connState == connectivity.TransientFailure {
-		return fmt.Errorf("Health Status Check Failed: client connection in transient failure")
-	}
-
 	for {
-		// immediate cancellation/timeout checks each loop.
+		// cancellation/timeout checks each loop.
 		if c.closed.Load() {
 			return fmt.Errorf("Health Status Check Failed: client is closed")
 		}
@@ -1703,7 +1698,9 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
 		}
 		if state == connectivity.TransientFailure {
-			return fmt.Errorf("Health Status Check Failed: client connection in transient failure")
+			warnf("Health Status Check: connection in transient failure; retrying until deadline...")
+			time.Sleep(interval)
+			continue
 		}
 
 		remaining := time.Until(deadline)
@@ -1822,7 +1819,11 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 	printf("Health Probe - Manual Check Begin...")
 	defer printf("... Health Probe - Manual Check End")
 
-	return hc.Check(serviceName, timeoutDuration...)
+	status, err := hc.Check(serviceName, timeoutDuration...)
+	if err != nil {
+		return status, fmt.Errorf("Health Probe Failed: %w", err) // preserve root cause
+	}
+	return status, nil
 }
 
 // GetState returns the current grpc client connection's state
