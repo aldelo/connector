@@ -331,6 +331,7 @@ type Client struct {
 
 	webServer     *ws.WebServer // track started web server for shutdown
 	webServerStop chan struct{} // signal channel to stop web server
+	webServerMu   sync.Mutex
 }
 
 // safely replace the current endpoints slice
@@ -465,6 +466,7 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 				}
 
 				if current := c.getNotifierClient(); current != nil {
+					current.Close() // close leaked notifier connection before dropping it
 					c.setNotifierClient(nil)
 				}
 				if c.closed.Load() {
@@ -731,6 +733,10 @@ func (c *Client) stopWebServerFast(timeout time.Duration) { // fast shutdown hel
 	if c == nil {
 		return
 	}
+
+	c.webServerMu.Lock()
+	defer c.webServerMu.Unlock()
+
 	if c.webServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
@@ -1896,6 +1902,8 @@ func (c *Client) Close() {
 	if c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
 		c.WebServerConfig.CleanUp()
 	}
+
+	c.webServerMu.Lock()
 	if c.webServer != nil { // stop web server if running
 		// add timeout to avoid indefinite hang on Shutdown.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1914,6 +1922,7 @@ func (c *Client) Close() {
 		}
 		c.webServer = nil
 	}
+	c.webServerMu.Unlock()
 
 	// clean up notifier client connection
 	if nc := c.getNotifierClient(); nc != nil { // use guarded getter to avoid races
@@ -2023,20 +2032,27 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 
 	cacheExpires := time.Now().Add(time.Duration(cacheExpSeconds) * time.Second)
 
+	var err error
 	switch c._config.Target.ServiceDiscoveryType {
 	case "direct":
-		return c.setDirectConnectEndpoint(cacheExpires, c._config.Target.DirectConnectIpPort)
+		err = c.setDirectConnectEndpoint(cacheExpires, c._config.Target.DirectConnectIpPort)
 	case "srv":
 		fallthrough
 	case "a":
-		return c.setDnsDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceDiscoveryType == "srv", c._config.Target.ServiceName,
+		err = c.setDnsDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceDiscoveryType == "srv", c._config.Target.ServiceName,
 			c._config.Target.NamespaceName, c._config.Target.InstancePort, forceRefresh)
 	case "api":
-		return c.setApiDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceName, c._config.Target.NamespaceName, c._config.Target.InstanceVersion,
+		err = c.setApiDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceName, c._config.Target.NamespaceName, c._config.Target.InstanceVersion,
 			int64(c._config.Target.SdInstanceMaxResult), c._config.Target.SdTimeout, forceRefresh)
 	default:
-		return fmt.Errorf("Unexpected Service Discovery Type: " + c._config.Target.ServiceDiscoveryType)
+		err = fmt.Errorf("Unexpected Service Discovery Type: " + c._config.Target.ServiceDiscoveryType)
 	}
+
+	if err != nil {
+		c.setEndpoints(nil) // drop stale endpoints on discovery failure
+		return err
+	}
+	return nil
 }
 
 func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort string) error {
@@ -2833,6 +2849,9 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		return fmt.Errorf("Start Web Server Failed: Web Server Routes Not Set (Count Zero)")
 	}
 
+	c.webServerMu.Lock() // serialize start
+	defer c.webServerMu.Unlock()
+
 	// Prevent double-start on the same Client instance.
 	if c.webServer != nil {
 		return fmt.Errorf("Start Web Server Failed: server already running")
@@ -2889,6 +2908,7 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		defer close(c.webServerStop) // signal completion/shutdown
 		defer func() {
 			if r := recover(); r != nil {
+				server.RemoveDNSRecordset()
 				if z := c.ZLog(); z != nil {
 					z.Errorf("Start Web Server panic: %v", r)
 				} else {
