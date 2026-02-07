@@ -402,17 +402,23 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 		go func() {
 			defer c.notifierReconnectActive.Store(false)
 
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+
 			for {
-				select { // allow prompt exit instead of fixed sleep
-				case <-time.After(5 * time.Second):
+				if c.closed.Load() {
+					return
+				}
+
+				select {
+				case <-ticker.C:
 				case <-func() <-chan struct{} {
-					done := make(chan struct{})
-					go func() {
-						if c.closed.Load() {
-							close(done)
-						}
-					}()
-					return done
+					if !c.closed.Load() {
+						return nil
+					}
+					ch := make(chan struct{})
+					close(ch)
+					return ch
 				}():
 					return
 				}
@@ -1339,9 +1345,11 @@ func (c *Client) DoNotifierAlertService() (err error) {
 			return fmt.Errorf("Client is closed")
 		}
 
-		// Require notifier client to be configured before dialing, even when reusing an existing instance.
-		if !nc.ConfiguredForNotifierClientDial() {
-			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial ###")
+		// guard against empty discovery topic ARN to avoid failed subscribes and dangling client
+		arn := nc.ConfiguredSNSDiscoveryTopicArn()
+		if !nc.ConfiguredForNotifierClientDial() || util.LenTrim(arn) == 0 {
+			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
+			c.setNotifierClient(nil) // avoid keeping a half-initialized notifier client
 			return nil
 		}
 
@@ -1365,7 +1373,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 			return err
 		}
 
-		if err = nc.Subscribe(nc.ConfiguredSNSDiscoveryTopicArn()); err != nil {
+		if err = nc.Subscribe(arn); err != nil {
 			if nc != nil {
 				errorf("!!! Notifier Client Service Subscribe Failed: %s !!!", err.Error())
 				nc.Close()
