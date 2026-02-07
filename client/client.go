@@ -383,6 +383,7 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 		if c == nil || c.closed.Load() {
 			return
 		}
+
 		if !c.notifierReconnectActive.CompareAndSwap(false, true) {
 			if z := c.ZLog(); z != nil {
 				z.Warnf("Notifier reconnect already in progress; skipping duplicate attempt")
@@ -400,10 +401,8 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 
 		go func() {
 			defer c.notifierReconnectActive.Store(false)
+
 			for {
-				if c.closed.Load() {
-					return
-				}
 				select { // allow prompt exit instead of fixed sleep
 				case <-time.After(5 * time.Second):
 				case <-func() <-chan struct{} {
@@ -415,6 +414,10 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 					}()
 					return done
 				}():
+					return
+				}
+
+				if c.closed.Load() { // re-check closed immediately
 					return
 				}
 
@@ -1332,6 +1335,10 @@ func (c *Client) DoNotifierAlertService() (err error) {
 			return nil
 		}
 
+		if c.closed.Load() { // bail if closed after wiring handlers
+			return fmt.Errorf("Client is closed")
+		}
+
 		// Require notifier client to be configured before dialing, even when reusing an existing instance.
 		if !nc.ConfiguredForNotifierClientDial() {
 			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial ###")
@@ -1341,6 +1348,10 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		nc = c.getNotifierClient() // ensure we use the guarded instance
 		if nc == nil {
 			return nil
+		}
+
+		if c.closed.Load() { // bail right before dial
+			return fmt.Errorf("Client is closed")
 		}
 
 		// dial notifier client to notifier server endpoint and begin service operations
@@ -1546,10 +1557,19 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			sleep = remaining
 		}
 
-		select { // sleep that honors ctx/close to avoid stale waits.
+		select { // honor ctx/closed during sleep
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(sleep):
+		case <-func() <-chan struct{} {
+			if !c.closed.Load() {
+				return nil // no signal, keep waiting
+			}
+			ch := make(chan struct{})
+			close(ch)
+			return ch
+		}():
+			return fmt.Errorf("Health Status Check Failed: client is closed")
 		}
 	}
 }
@@ -2639,6 +2659,16 @@ func (c *Client) startWebServer() error {
 	// serve asynchronously so Dial can continue; capture error for logging
 	go func() {
 		defer close(c.webServerStop) // signal completion/shutdown
+		defer func() {
+			if r := recover(); r != nil {
+				if z := c.ZLog(); z != nil {
+					z.Errorf("Start Web Server panic: %v", r)
+				} else {
+					log.Printf("Start Web Server panic: %v", r)
+				}
+			}
+		}()
+
 		if err := server.Serve(); err != nil {
 			server.RemoveDNSRecordset()
 			if z := c.ZLog(); z != nil {
