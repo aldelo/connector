@@ -50,6 +50,7 @@ import (
 	ws "github.com/aldelo/connector/webserver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -57,6 +58,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/stats"
+	"google.golang.org/grpc/status"
 )
 
 // client side cache
@@ -1947,7 +1949,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 			if convErr != nil || pInt <= 0 || pInt > 65535 {
 				return fmt.Errorf("SRV Port From Service Discovery Not Valid (%q): %v", pStr, convErr)
 			}
-			host = h
+			host = strings.TrimSuffix(strings.ToLower(h), ".")
 			port = uint(pInt)
 		} else {
 			// a
@@ -1973,6 +1975,10 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	}
 
 	live := pruneExpiredEndpoints(endpoints)
+	if len(live) == 0 { // fail fast on empty discovery result
+		return fmt.Errorf("Service Discovery By DNS returned no endpoints for %s.%s (srv=%v)", serviceName, namespaceName, srv)
+	}
+
 	c.setEndpoints(live)
 	cacheAddServiceEndpoints(serviceName+"."+namespaceName, live)
 
@@ -2062,6 +2068,10 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	}
 
 	live := pruneExpiredEndpoints(endpoints)
+	if len(live) == 0 { // fail fast on empty discovery result
+		return fmt.Errorf("Service Discovery By API returned no endpoints for %s.%s (version=%s)", serviceName, namespaceName, version)
+	}
+
 	c.setEndpoints(live)
 	cacheAddServiceEndpoints(serviceName+"."+namespaceName, live)
 
@@ -2206,6 +2216,10 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	if c.closed.Load() { // guard use-after-close
+		return status.Error(codes.Unavailable, "client is closed")
+	}
+
 	// guard against nil _config
 	if c._config == nil || !c._config.Grpc.CircuitBreakerEnabled {
 		return invoker(ctx, method, req, reply, cc, opts...)
@@ -2309,6 +2323,10 @@ func (c *Client) streamCircuitBreakerHandler(
 
 	if c == nil {
 		return nil, fmt.Errorf("Client Object Nil")
+	}
+
+	if c.closed.Load() { // guard use-after-close
+		return nil, status.Error(codes.Unavailable, "client is closed")
 	}
 
 	// guard against nil _config to avoid panic
