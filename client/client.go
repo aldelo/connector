@@ -1668,6 +1668,9 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	if connState == connectivity.Shutdown {
 		return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
 	}
+	if connState == connectivity.TransientFailure {
+		return fmt.Errorf("Health Status Check Failed: client connection in transient failure")
+	}
 
 	for {
 		// immediate cancellation/timeout checks each loop.
@@ -1693,12 +1696,14 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		}
 		c.connMu.RUnlock()
 
-		if conn == nil || state == connectivity.Shutdown { // fail fast if conn vanished mid-wait
-			return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
+		if conn == nil {
+			return fmt.Errorf("Health Status Check Failed: client connection is nil")
 		}
-
 		if state == connectivity.Shutdown {
 			return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
+		}
+		if state == connectivity.TransientFailure {
+			return fmt.Errorf("Health Status Check Failed: client connection in transient failure")
 		}
 
 		remaining := time.Until(deadline)
@@ -2093,7 +2098,11 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, "", forceRefresh))
 	if len(found) > 0 {
 		c.setEndpoints(found)
-		c._z.Printf("Using DNS Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
+		if z != nil {
+			z.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
+		} else {
+			log.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
+		}
 		for _, v := range c.endpointsSnapshot() {
 			printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
 		}
@@ -2824,6 +2833,9 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		serveErr = make(chan error, 1)
 	}
 
+	// always buffer the channel we write to, even if caller passed unbuffered
+	internalServeErr := make(chan error, 1)
+
 	server := ws.NewWebServer(c.WebServerConfig.AppName, c.WebServerConfig.ConfigFileName, c.WebServerConfig.CustomConfigPath)
 
 	/* EXAMPLE
@@ -2874,7 +2886,7 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 				}
 				// surface panic to dial path so startup does not silently succeed
 				select {
-				case serveErr <- fmt.Errorf("start web server panic: %v", r):
+				case internalServeErr <- fmt.Errorf("start web server panic: %v", r):
 				default:
 				}
 			}
@@ -2884,7 +2896,7 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 			// treat graceful shutdown as success, not an error
 			if errors.Is(err, http.ErrServerClosed) {
 				select {
-				case serveErr <- nil:
+				case internalServeErr <- nil:
 				default:
 				}
 				return
@@ -2898,15 +2910,30 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 			}
 			// non-blocking send protects against accidental nil/closed channel.
 			select {
-			case serveErr <- err:
+			case internalServeErr <- err:
 			default:
 			}
 			return
 		}
 
 		select {
-		case serveErr <- nil:
+		case internalServeErr <- nil:
 		default:
+		}
+	}()
+
+	// forward result to caller without risking blocking the serve goroutine
+	go func() {
+		if err := <-internalServeErr; err != nil {
+			select {
+			case serveErr <- err:
+			default:
+			}
+		} else {
+			select {
+			case serveErr <- nil:
+			default:
+			}
 		}
 	}()
 
