@@ -353,7 +353,7 @@ func (c *Client) endpointsSnapshot() []*serviceEndpoint {
 	copy(current, c._endpoints)
 	c.endpointsMu.RUnlock()
 
-	live := pruneExpiredEndpoints(c._endpoints)
+	live := pruneExpiredEndpoints(current)
 	// write back pruned endpoints so shared state stays trimmed
 	if len(live) != len(current) {
 		c.endpointsMu.Lock()
@@ -1467,7 +1467,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		arn := nc.ConfiguredSNSDiscoveryTopicArn()
 		if !nc.ConfiguredForNotifierClientDial() || util.LenTrim(arn) == 0 {
 			// ensure an existing notifier client is cleanly closed instead of silently dropped
-			if doConnection && nc != nil {
+			if nc != nil {
 				nc.Close()
 			}
 			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
@@ -1535,6 +1535,9 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
+	if c.WebServerConfig == nil { // guard nil config to avoid panic
+		return fmt.Errorf("Web Server Config Not Set")
+	}
 	if c.closed.Load() { // stop probing after client close
 		return fmt.Errorf("Web Server Health Check Failed: client is closed")
 	}
@@ -1560,7 +1563,7 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 	}
 
 	timeout := 5 * time.Second
-	if len(timeoutDuration) > 0 {
+	if len(timeoutDuration) > 0 && timeoutDuration[0] > 0 {
 		timeout = timeoutDuration[0]
 	}
 
