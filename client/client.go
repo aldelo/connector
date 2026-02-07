@@ -1413,7 +1413,12 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	// always release reconnect guard on exit to avoid latch on early returns
 	defer c.notifierReconnectActive.Store(false)
 
+	// if the client is closed, eagerly clean up any existing notifier client to avoid leaks
 	if c.closed.Load() {
+		if existing := c.getNotifierClient(); existing != nil {
+			existing.Close()
+			c.setNotifierClient(nil)
+		}
 		return fmt.Errorf("Client is closed")
 	}
 
@@ -1459,7 +1464,8 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		}
 
 		if c.closed.Load() { // bail if closed after wiring handlers
-			c.notifierReconnectActive.Store(false)
+			nc.Close()
+			c.setNotifierClient(nil)
 			return fmt.Errorf("Client is closed")
 		}
 
