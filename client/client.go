@@ -1364,6 +1364,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		}
 
 		if c.closed.Load() { // bail if closed after wiring handlers
+			c.notifierReconnectActive.Store(false)
 			return fmt.Errorf("Client is closed")
 		}
 
@@ -1375,16 +1376,21 @@ func (c *Client) DoNotifierAlertService() (err error) {
 				nc.Close()
 			}
 			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
-			c.setNotifierClient(nil) // avoid keeping a half-initialized notifier client
+			c.setNotifierClient(nil)               // avoid keeping a half-initialized notifier client
+			c.notifierReconnectActive.Store(false) // ensure reconnect guard is released on config skip
 			return nil
 		}
 
 		nc = c.getNotifierClient() // ensure we use the guarded instance
 		if nc == nil {
+			// release reconnect guard if instance vanished
+			c.notifierReconnectActive.Store(false)
 			return nil
 		}
 
 		if c.closed.Load() { // bail right before dial
+			// release reconnect guard on early exit
+			c.notifierReconnectActive.Store(false)
 			return fmt.Errorf("Client is closed")
 		}
 
@@ -1556,6 +1562,17 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	deadline := time.Now().Add(timeout)
 	interval := 250 * time.Millisecond
 	maxPerAttempt := 2 * time.Second
+
+	// fail fast if connection is already nil or shutdown before looping.
+	c.connMu.RLock()
+	connState := connectivity.Shutdown
+	if c._conn != nil {
+		connState = c._conn.GetState()
+	}
+	c.connMu.RUnlock()
+	if connState == connectivity.Shutdown {
+		return fmt.Errorf("Health Status Check Failed: client connection is shutdown")
+	}
 
 	for {
 		// immediate cancellation/timeout checks each loop.
@@ -1765,12 +1782,20 @@ func (c *Client) Close() {
 		c.WebServerConfig.CleanUp()
 	}
 	if c.webServer != nil { // stop web server if running
+		// add timeout to avoid indefinite hang on Shutdown.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
-			_ = stopper.Shutdown(context.Background())
+			_ = stopper.Shutdown(ctx)
 		}
-		// wait for serve goroutine to exit if we have a signal channel.
+		cancel()
+
+		// avoid indefinite block if webServerStop never closes.
 		if c.webServerStop != nil {
-			<-c.webServerStop
+			select {
+			case <-c.webServerStop:
+			case <-time.After(6 * time.Second):
+				errorf("web server shutdown timed out")
+			}
 		}
 		c.webServer = nil
 	}
@@ -2667,6 +2692,16 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		return fmt.Errorf("Start Web Server Failed: Web Server Routes Not Set (Count Zero)")
 	}
 
+	// Prevent double-start on the same Client instance.
+	if c.webServer != nil {
+		return fmt.Errorf("Start Web Server Failed: server already running")
+	}
+
+	// Make serveErr safe/usable even if caller passed nil.
+	if serveErr == nil {
+		serveErr = make(chan error, 1)
+	}
+
 	server := ws.NewWebServer(c.WebServerConfig.AppName, c.WebServerConfig.ConfigFileName, c.WebServerConfig.CustomConfigPath)
 
 	/* EXAMPLE
@@ -2716,11 +2751,9 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 					log.Printf("Start Web Server panic: %v", r)
 				}
 				// surface panic to dial path so startup does not silently succeed
-				if serveErr != nil {
-					select {
-					case serveErr <- fmt.Errorf("start web server panic: %v", r):
-					default:
-					}
+				select {
+				case serveErr <- fmt.Errorf("start web server panic: %v", r):
+				default:
 				}
 			}
 		}()
@@ -2732,13 +2765,17 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 			} else {
 				log.Printf("Start Web Server Failed: (Serve Error) %s", err)
 			}
-			if serveErr != nil {
-				serveErr <- err
+			// non-blocking send protects against accidental nil/closed channel.
+			select {
+			case serveErr <- err:
+			default:
 			}
 			return
 		}
-		if serveErr != nil {
-			serveErr <- nil
+
+		select {
+		case serveErr <- nil:
+		default:
 		}
 	}()
 
