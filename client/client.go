@@ -1370,6 +1370,10 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		// guard against empty discovery topic ARN to avoid failed subscribes and dangling client
 		arn := nc.ConfiguredSNSDiscoveryTopicArn()
 		if !nc.ConfiguredForNotifierClientDial() || util.LenTrim(arn) == 0 {
+			// ensure an existing notifier client is cleanly closed instead of silently dropped
+			if doConnection && nc != nil {
+				nc.Close()
+			}
 			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
 			c.setNotifierClient(nil) // avoid keeping a half-initialized notifier client
 			return nil
@@ -2710,6 +2714,13 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 					z.Errorf("Start Web Server panic: %v", r)
 				} else {
 					log.Printf("Start Web Server panic: %v", r)
+				}
+				// surface panic to dial path so startup does not silently succeed
+				if serveErr != nil {
+					select {
+					case serveErr <- fmt.Errorf("start web server panic: %v", r):
+					default:
+					}
 				}
 			}
 		}()
