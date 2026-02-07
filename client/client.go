@@ -455,7 +455,6 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 				}
 
 				if current := c.getNotifierClient(); current != nil {
-					current.Close()
 					c.setNotifierClient(nil)
 				}
 				if c.closed.Load() {
@@ -1199,8 +1198,13 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 
 	c.connMu.RLock()
 	connReady := c._conn != nil
+	connState := connectivity.Shutdown
+	if c._conn != nil {
+		connState = c._conn.GetState()
+	}
 	c.connMu.RUnlock()
-	if !connReady {
+
+	if !connReady || connState == connectivity.Shutdown {
 		errorf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return 0, fmt.Errorf("GetLiveEndpointsCount requires current client connection already established first")
@@ -1305,8 +1309,12 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 
 	c.connMu.RLock()
 	connReady := c._conn != nil
+	connState := connectivity.Shutdown
+	if c._conn != nil {
+		connState = c._conn.GetState()
+	}
 	c.connMu.RUnlock()
-	if !connReady {
+	if !connReady || connState == connectivity.Ready {
 		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		return fmt.Errorf("UpdateLoadBalanceResolver Requires Current Client Connection Already Established First")
@@ -2048,6 +2056,15 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	z := c.ZLog()
+	printf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+
 	if util.LenTrim(serviceName) == 0 {
 		return fmt.Errorf("Service Name Not Defined in Config (SRV / A SD)")
 	}
@@ -2071,7 +2088,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 		c.setEndpoints(found)
 		c._z.Printf("Using DNS Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
 		for _, v := range c.endpointsSnapshot() {
-			c._z.Printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
+			printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
 		}
 		return nil
 	}
@@ -2147,6 +2164,15 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	z := c.ZLog()
+	printf := func(msg string, args ...interface{}) {
+		if z != nil {
+			z.Printf(msg, args...)
+		} else {
+			log.Printf(msg, args...)
+		}
+	}
+
 	if c._sd == nil {
 		return fmt.Errorf("Service Discovery Client Not Connected")
 	}
@@ -2168,9 +2194,9 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, version, forceRefresh))
 	if len(found) > 0 {
 		c.setEndpoints(found)
-		c._z.Printf("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
+		printf("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
 		for _, v := range c.endpointsSnapshot() {
-			c._z.Printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
+			printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
 		}
 		return nil
 	}
