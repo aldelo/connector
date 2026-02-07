@@ -1714,7 +1714,21 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		}
 		if state == connectivity.TransientFailure {
 			warnf("Health Status Check: connection in transient failure; retrying until deadline...")
-			time.Sleep(interval)
+			// honor ctx/close while backing off to avoid hanging shutdown.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(interval):
+			case <-func() <-chan struct{} {
+				if !c.closed.Load() {
+					return nil
+				}
+				ch := make(chan struct{})
+				close(ch)
+				return ch
+			}():
+				return fmt.Errorf("Health Status Check Failed: client is closed")
+			}
 			continue
 		}
 
@@ -1988,6 +2002,11 @@ func (c *Client) RemoteAddress() string {
 func (c *Client) connectSd() error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
+	}
+
+	// guard against missing config to avoid nil deref when connectSd is called directly.
+	if c._config == nil {
+		return fmt.Errorf("Config Data Not Loaded")
 	}
 
 	if c._sd != nil { // ensure previous CloudMap client is disconnected before reconfiguring
