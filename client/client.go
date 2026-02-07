@@ -119,6 +119,14 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 		return
 	}
 
+	// refuse to bind a new connection when the client is already closed.
+	if c.closed.Load() {
+		if conn != nil {
+			_ = conn.Close() // avoid leak and zombie connection
+		}
+		return
+	}
+
 	c.connMu.Lock()
 	old := c._conn
 	c._conn = conn
@@ -189,7 +197,12 @@ func (c *Client) setNotifierClient(nc *NotifierClient) {
 	if c == nil {
 		return
 	}
+
 	c.notifierMu.Lock()
+	// close old notifier if it differs from the new one
+	if c._notifierClient != nil && c._notifierClient != nc {
+		c._notifierClient.Close()
+	}
 	c._notifierClient = nc
 	c.notifierMu.Unlock()
 }
