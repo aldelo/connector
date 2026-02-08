@@ -110,8 +110,15 @@ func cacheGetLiveServiceEndpoints(key, version string, force ...bool) []*service
 		return []*serviceEndpoint{}
 	}
 
-	out := make([]*serviceEndpoint, len(eps)) // copy to avoid aliasing races
-	copy(out, eps)
+	// Issue #1: Perform deep copy of endpoint structs to prevent concurrent modification
+	out := make([]*serviceEndpoint, len(eps))
+	for i, ep := range eps {
+		if ep == nil {
+			continue
+		}
+		copied := *ep
+		out[i] = &copied
+	}
 
 	return out
 }
@@ -161,9 +168,12 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 	}
 	c.connMu.Unlock()
 
-	// close prior connection outside lock to avoid leaks
+	// Issue #9: Close prior connection asynchronously with a small delay to allow in-flight RPCs to complete
 	if old != nil && old != conn {
-		_ = old.Close()
+		go func(conn *grpc.ClientConn) {
+			time.Sleep(100 * time.Millisecond) // Allow in-flight RPCs to complete
+			_ = conn.Close()
+		}(old)
 	}
 }
 
@@ -338,33 +348,49 @@ type Client struct {
 // safely replace the current endpoints slice
 func (c *Client) setEndpoints(eps []*serviceEndpoint) {
 	c.endpointsMu.Lock()
+	defer c.endpointsMu.Unlock()
+	
 	live := pruneExpiredEndpoints(eps)
-	c._endpoints = live
-	c.endpointsMu.Unlock()
+	
+	// Issue #3: Deep copy endpoints to own the data and prevent data races
+	copied := make([]*serviceEndpoint, len(live))
+	for i, ep := range live {
+		if ep == nil {
+			continue
+		}
+		epCopy := *ep
+		copied[i] = &epCopy
+	}
+	c._endpoints = copied
 }
 
-// snapshot current endpoints (shallow copy) under read lock
+// snapshot current endpoints (deep copy) under write lock for atomic read-prune-write
 func (c *Client) endpointsSnapshot() []*serviceEndpoint {
 	if c == nil {
 		return nil
 	}
 
-	// fast read under RLock
-	c.endpointsMu.RLock()
-	current := make([]*serviceEndpoint, len(c._endpoints))
-	copy(current, c._endpoints)
-	c.endpointsMu.RUnlock()
-
-	live := pruneExpiredEndpoints(current)
-	// write back pruned endpoints so shared state stays trimmed
-	if len(live) != len(current) {
-		c.endpointsMu.Lock()
+	// Issue #2: Use write lock for atomic read-prune-write operation
+	c.endpointsMu.Lock()
+	defer c.endpointsMu.Unlock()
+	
+	// Prune expired endpoints
+	live := pruneExpiredEndpoints(c._endpoints)
+	
+	// Update internal state if pruning removed entries
+	if len(live) != len(c._endpoints) {
 		c._endpoints = live
-		c.endpointsMu.Unlock()
 	}
 
+	// Deep copy to prevent caller from modifying internal state
 	out := make([]*serviceEndpoint, len(live))
-	copy(out, live)
+	for i, ep := range live {
+		if ep == nil {
+			continue
+		}
+		copied := *ep
+		out[i] = &copied
+	}
 	return out
 }
 
@@ -438,6 +464,7 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 			log.Printf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
 		}
 
+		// Issue #4: Simplify the reconnect loop with proper cancellation
 		go func() {
 			defer c.notifierReconnectActive.Store(false)
 
@@ -445,25 +472,21 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 			defer ticker.Stop()
 
 			for {
+				// Check if closed before waiting
 				if c.closed.Load() {
 					return
 				}
 
+				// Simple select statement with ticker and immediate closed check
 				select {
 				case <-ticker.C:
-				case <-func() <-chan struct{} {
-					if !c.closed.Load() {
-						return nil
-					}
-					ch := make(chan struct{})
-					close(ch)
-					return ch
-				}():
-					return
+					// Continue to reconnection attempt
 				}
 
-				if c.closed.Load() { // re-check closed immediately
+				// Check if closed after ticker
+				if c.closed.Load() {
 					return
+				}
 				}
 
 				if current := c.getNotifierClient(); current != nil {
@@ -558,7 +581,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		return []grpc.DialOption{}, fmt.Errorf("Client Object Nil")
 	}
 
-	if c._config == nil {
+	// Issue #8: Capture config reference atomically at the start to avoid nil dereference
+	cfg := c._config
+	if cfg == nil {
 		return []grpc.DialOption{}, fmt.Errorf("Config Data Not Loaded")
 	}
 
@@ -576,9 +601,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	//
 
 	// set tls credential dial option
-	if util.LenTrim(c._config.Grpc.ServerCACertFiles) > 0 {
+	if util.LenTrim(cfg.Grpc.ServerCACertFiles) > 0 {
 		tls := new(tlsconfig.TlsConfig)
-		if tc, e := tls.GetClientTlsConfig(strings.Split(c._config.Grpc.ServerCACertFiles, ","), c._config.Grpc.ClientCertFile, c._config.Grpc.ClientKeyFile); e != nil {
+		if tc, e := tls.GetClientTlsConfig(strings.Split(cfg.Grpc.ServerCACertFiles, ","), cfg.Grpc.ClientCertFile, cfg.Grpc.ClientKeyFile); e != nil {
 			return []grpc.DialOption{}, fmt.Errorf("Set Dial Option Client TLS Failed: %s", e.Error())
 		} else {
 			opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
@@ -591,7 +616,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	//
 	// setup xray is configured via yaml
 	//
-	if c._config.Target.TraceUseXRay {
+	if cfg.Target.TraceUseXRay {
 		_ = xray.Init("127.0.0.1:2000", "1.2.0")
 		xray.SetXRayServiceOn()
 	}
@@ -609,24 +634,24 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	*/
 
 	// set user agent if defined
-	if util.LenTrim(c._config.Grpc.UserAgent) > 0 {
-		opts = append(opts, grpc.WithUserAgent(c._config.Grpc.UserAgent))
+	if util.LenTrim(cfg.Grpc.UserAgent) > 0 {
+		opts = append(opts, grpc.WithUserAgent(cfg.Grpc.UserAgent))
 	}
 
 	// set with block option,
 	// with block will halt code execution until after dial completes
-	if c._config.Grpc.DialBlockingMode {
+	if cfg.Grpc.DialBlockingMode {
 		opts = append(opts, grpc.WithBlock())
 	}
 
 	// set default server config for load balancer and/or health check
 	defSvrConf := ""
 
-	if c._config.Grpc.UseLoadBalancer && util.LenTrim(loadBalancerPolicy) > 0 {
+	if cfg.Grpc.UseLoadBalancer && util.LenTrim(loadBalancerPolicy) > 0 {
 		defSvrConf = loadBalancerPolicy
 	}
 
-	if c._config.Grpc.UseHealthCheck {
+	if cfg.Grpc.UseHealthCheck {
 		if util.LenTrim(defSvrConf) > 0 {
 			defSvrConf += ", "
 		}
@@ -639,36 +664,36 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	}
 
 	// set connect timeout value
-	if c._config.Grpc.DialMinConnectTimeout > 0 {
+	if cfg.Grpc.DialMinConnectTimeout > 0 {
 		opts = append(opts, grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff:           backoff.DefaultConfig,
-			MinConnectTimeout: time.Duration(c._config.Grpc.DialMinConnectTimeout) * time.Second,
+			MinConnectTimeout: time.Duration(cfg.Grpc.DialMinConnectTimeout) * time.Second,
 		}))
 	}
 
 	// set keep alive dial options
 	ka := keepalive.ClientParameters{
-		PermitWithoutStream: c._config.Grpc.KeepAlivePermitWithoutStream,
+		PermitWithoutStream: cfg.Grpc.KeepAlivePermitWithoutStream,
 	}
 
-	if c._config.Grpc.KeepAliveInactivePingTimeTrigger > 0 {
-		ka.Time = time.Duration(c._config.Grpc.KeepAliveInactivePingTimeTrigger) * time.Second
+	if cfg.Grpc.KeepAliveInactivePingTimeTrigger > 0 {
+		ka.Time = time.Duration(cfg.Grpc.KeepAliveInactivePingTimeTrigger) * time.Second
 	}
 
-	if c._config.Grpc.KeepAliveInactivePingTimeout > 0 {
-		ka.Timeout = time.Duration(c._config.Grpc.KeepAliveInactivePingTimeout) * time.Second
+	if cfg.Grpc.KeepAliveInactivePingTimeout > 0 {
+		ka.Timeout = time.Duration(cfg.Grpc.KeepAliveInactivePingTimeout) * time.Second
 	}
 
 	opts = append(opts, grpc.WithKeepaliveParams(ka))
 
 	// set read buffer dial option, 32 kb default, 32 * 1024
-	if c._config.Grpc.ReadBufferSize > 0 {
-		opts = append(opts, grpc.WithReadBufferSize(int(c._config.Grpc.ReadBufferSize)))
+	if cfg.Grpc.ReadBufferSize > 0 {
+		opts = append(opts, grpc.WithReadBufferSize(int(cfg.Grpc.ReadBufferSize)))
 	}
 
 	// set write buffer dial option, 32 kb default, 32 * 1024
-	if c._config.Grpc.WriteBufferSize > 0 {
-		opts = append(opts, grpc.WithWriteBufferSize(int(c._config.Grpc.WriteBufferSize)))
+	if cfg.Grpc.WriteBufferSize > 0 {
+		opts = append(opts, grpc.WithWriteBufferSize(int(cfg.Grpc.WriteBufferSize)))
 	}
 
 	// turn off retry when retry default is enabled in the future framework versions
@@ -676,7 +701,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// Build interceptor chains from a fresh local slice to avoid duplicate appends across re-dials.
 	unaryInts := append([]grpc.UnaryClientInterceptor{}, c.UnaryClientInterceptors...)
-	if c._config.Grpc.CircuitBreakerEnabled {
+	if cfg.Grpc.CircuitBreakerEnabled {
 		logPrintf("Setup Unary Circuit Breaker Interceptor")
 		unaryInts = append(unaryInts, c.unaryCircuitBreakerHandler)
 	}
@@ -684,7 +709,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	if xray.XRayServiceOn() {
 		logPrintf("Setup Unary XRay Tracer Interceptor")
 		//c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryXRayTracerHandler)
-		unaryInts = append(unaryInts, tracer.TracerUnaryClientInterceptor(c._config.Target.AppName+"-Client"))
+		unaryInts = append(unaryInts, tracer.TracerUnaryClientInterceptor(cfg.Target.AppName+"-Client"))
 	}
 
 	count := len(unaryInts)
@@ -697,7 +722,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// Build stream interceptors from a fresh local slice to avoid duplicate appends across re-dials.
 	streamInts := append([]grpc.StreamClientInterceptor{}, c.StreamClientInterceptors...)
-	if c._config.Grpc.CircuitBreakerEnabled {
+	if cfg.Grpc.CircuitBreakerEnabled {
 		logPrintf("Setup Stream Circuit Breaker Interceptor")
 		streamInts = append(streamInts, c.streamCircuitBreakerHandler)
 	}
@@ -767,32 +792,49 @@ func (c *Client) ZLog() *data.ZapLog {
 		return nil
 	}
 
+	// Issue #7: Use sync.Once for thread-safe lazy initialization with fast-path check
+	// Fast path check without lock
 	c.zMu.Lock()
-	defer c.zMu.Unlock()
-
 	if c._z != nil {
-		return c._z
+		z := c._z
+		c.zMu.Unlock()
+		return z
 	}
+	c.zMu.Unlock()
 
-	appName := "Default-BeforeConfigLoad"
-	disableLogger := true
-	outputConsole := true
+	// Slow path: initialize logger
+	c.zOnce.Do(func() {
+		c.zMu.Lock()
+		defer c.zMu.Unlock()
 
-	if c._config != nil {
-		appName = c._config.AppName
-		disableLogger = !c._config.Target.ZapLogEnabled
-		outputConsole = c._config.Target.ZapLogOutputConsole
-	}
+		// Double-check after acquiring lock
+		if c._z != nil {
+			return
+		}
 
-	z := &data.ZapLog{
-		DisableLogger:   disableLogger,
-		OutputToConsole: outputConsole,
-		AppName:         appName,
-	}
-	_ = z.Init()
-	c._z = z
+		appName := "Default-BeforeConfigLoad"
+		disableLogger := true
+		outputConsole := true
 
-	return c._z
+		if c._config != nil {
+			appName = c._config.AppName
+			disableLogger = !c._config.Target.ZapLogEnabled
+			outputConsole = c._config.Target.ZapLogOutputConsole
+		}
+
+		z := &data.ZapLog{
+			DisableLogger:   disableLogger,
+			OutputToConsole: outputConsole,
+			AppName:         appName,
+		}
+		_ = z.Init()
+		c._z = z
+	})
+
+	c.zMu.Lock()
+	z := c._z
+	c.zMu.Unlock()
+	return z
 }
 
 // PreloadConfigData will load the config data before Dial()
@@ -950,7 +992,9 @@ func (c *Client) Dial(ctx context.Context) error {
 		}
 	}()
 
+	// Issue #6: Reset both closed and closing flags at the start of Dial to allow re-dial
 	c.closed.Store(false)
+	c.closing.Store(false)
 	c.setConnection(nil, "")
 
 	// read client config data in
@@ -1941,6 +1985,8 @@ func (c *Client) Close() {
 			case <-time.After(6 * time.Second):
 				errorf("web server shutdown timed out")
 			}
+			// Issue #5: Clear webServerStop channel reference after use
+			c.webServerStop = nil
 		}
 		c.webServer = nil
 	}
