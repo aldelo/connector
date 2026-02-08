@@ -62,6 +62,22 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Issue #16: Define constants for magic numbers
+const (
+	defaultCacheExpireSeconds         = 300
+	defaultDialTimeoutSeconds         = 5
+	defaultHealthCheckInterval        = 250 * time.Millisecond
+	defaultWebServerCheckInterval     = 500 * time.Millisecond
+	defaultNotifierReconnectDelay     = 5 * time.Second
+	maxTCPPort                        = 65535
+	defaultMaxDiscoveryResults        = 100
+	connectionCloseDelay              = 100 * time.Millisecond
+	webServerShutdownTimeout          = 5 * time.Second
+	webServerStopChannelTimeout       = 6 * time.Second
+	deregisterInstanceCheckInterval   = 250 * time.Millisecond
+	deregisterInstanceMaxRetries      = 20
+)
+
 // client side cache
 var (
 	_cache  *Cache
@@ -171,7 +187,7 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 	// Issue #9: Close prior connection asynchronously with a small delay to allow in-flight RPCs to complete
 	if old != nil && old != conn {
 		go func(conn *grpc.ClientConn) {
-			time.Sleep(100 * time.Millisecond) // Allow in-flight RPCs to complete
+			time.Sleep(connectionCloseDelay) // Allow in-flight RPCs to complete
 			_ = conn.Close()
 		}(old)
 	}
@@ -238,7 +254,13 @@ func (c *Client) getNotifierClient() *NotifierClient {
 	return c._notifierClient
 }
 
-var _mux sync.Mutex // thread-safety for accessing resolver map in DialContext()
+// Issue #19: Document global mutex _mux
+// _mux is a global mutex used to serialize gRPC DialContext calls across all client instances.
+// This is necessary because gRPC's internal resolver registration is not thread-safe.
+// Concurrent calls to grpc.DialContext can cause race conditions in the resolver map.
+// Performance impact: Dial operations are serialized, but this only affects startup/reconnect,
+// not normal RPC operations which proceed concurrently after dial completes.
+var _mux sync.Mutex
 
 // Client represents a gRPC client's connection and entry point,
 // also provides optional gin based web server upon dial
@@ -406,7 +428,7 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 		}
 		cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
 		if cacheExpSeconds == 0 {
-			cacheExpSeconds = 300
+			cacheExpSeconds = defaultCacheExpireSeconds
 		}
 
 		svcKey := strings.ToLower(c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
@@ -468,7 +490,7 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 		go func() {
 			defer c.notifierReconnectActive.Store(false)
 
-			ticker := time.NewTicker(5 * time.Second)
+			ticker := time.NewTicker(defaultNotifierReconnectDelay)
 			defer ticker.Stop()
 
 			for {
@@ -975,7 +997,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	cleanupSqs := false  // track SQS cleanup on failure
 	defer func() { // unified cleanup for partial failures
 		if cleanupWeb {
-			c.stopWebServerFast(5 * time.Second)
+			c.stopWebServerFast(webServerShutdownTimeout)
 		}
 		if cleanupConn {
 			if closedConn := c.clearConnection(); closedConn != nil {
@@ -1571,8 +1593,11 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	}
 
 	if c.closed.Load() { // abort if client closed after subscribe
-		nc.Unsubscribe()
-		nc.Close()
+		// Issue #10: Add nil check before calling methods on nc
+		if nc != nil {
+			nc.Unsubscribe()
+			nc.Close()
+		}
 		c.setNotifierClient(nil)
 		return fmt.Errorf("Client is closed")
 	}
@@ -1624,7 +1649,7 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 	}
 
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(defaultWebServerCheckInterval)
 	defer ticker.Stop()
 
 	healthUrl := c.WebServerConfig.WebServerLocalAddress + "/health"
@@ -1723,7 +1748,7 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	}
 
 	deadline := time.Now().Add(timeout)
-	interval := 250 * time.Millisecond
+	interval := defaultHealthCheckInterval
 	maxPerAttempt := 2 * time.Second
 
 	for {
@@ -2239,11 +2264,23 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 			// srv
 			h, pStr, splitErr := net.SplitHostPort(v)
 			if splitErr != nil {
-				return fmt.Errorf("SRV Host or Port From Service Discovery Not Valid (%q): %v", v, splitErr)
+				// Issue #14: Warn and skip invalid entry instead of failing entire operation
+				if z != nil {
+					z.Warnf("Skipping invalid SRV entry %q: %v", v, splitErr)
+				} else {
+					log.Printf("WARNING: Skipping invalid SRV entry %q: %v", v, splitErr)
+				}
+				continue
 			}
 			pInt, convErr := strconv.Atoi(pStr)
 			if convErr != nil || pInt <= 0 || pInt > 65535 {
-				return fmt.Errorf("SRV Port From Service Discovery Not Valid (%q): %v", pStr, convErr)
+				// Issue #14: Warn and skip invalid port instead of failing entire operation
+				if z != nil {
+					z.Warnf("Skipping invalid SRV port %q from %q: %v", pStr, v, convErr)
+				} else {
+					log.Printf("WARNING: Skipping invalid SRV port %q from %q: %v", pStr, v, convErr)
+				}
+				continue
 			}
 			host = strings.TrimSuffix(strings.ToLower(h), ".")
 			port = uint(pInt)
@@ -2252,9 +2289,16 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 			host = v
 			// Validate that A records resolve to IPs; reject CNAME/malformed answers.
 			if net.ParseIP(host) == nil {
-				return fmt.Errorf("Service Discovery By DNS returned non-IP host for A record: %q", host)
+				// Issue #14: Warn and skip non-IP host instead of failing entire operation
+				if z != nil {
+					z.Warnf("Skipping non-IP A record entry: %q", host)
+				} else {
+					log.Printf("WARNING: Skipping non-IP A record entry: %q", host)
+				}
+				continue
 			}
 			if instancePort == 0 || instancePort > 65535 {
+				// This is a config error, not a per-entry issue, so still fail
 				return fmt.Errorf("Configured Instance Port Not Valid: %d", instancePort)
 			}
 			port = instancePort
@@ -2506,7 +2550,7 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		}
 
 		tryCount := 0
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(deregisterInstanceCheckInterval)
 
 		for {
 			status, e := registry.GetOperationStatus(c._sd, operationId, timeoutDuration...)
@@ -2520,10 +2564,10 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 				return nil
 			}
 
-			if tryCount < 20 {
+			if tryCount < deregisterInstanceMaxRetries {
 				tryCount++
 				logprintf("... Checking De-Register Instance '%s:%s-%s' Completion Status, Attempt %d (100ms)", p.Host, util.UintToStr(p.Port), p.InstanceId, tryCount)
-				time.Sleep(250 * time.Millisecond)
+				time.Sleep(deregisterInstanceCheckInterval)
 				continue
 			}
 
