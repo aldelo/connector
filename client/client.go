@@ -509,7 +509,6 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 				if c.closed.Load() {
 					return
 				}
-				}
 
 				if current := c.getNotifierClient(); current != nil {
 					current.Close() // close leaked notifier connection before dropping it
@@ -785,26 +784,37 @@ func (c *Client) stopWebServerFast(timeout time.Duration) { // fast shutdown hel
 	c.webServerMu.Lock()
 	defer c.webServerMu.Unlock()
 
-	if c.webServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
-			_ = stopper.Shutdown(ctx)
-		}
-		cancel()
+	c.shutdownWebServerLocked(timeout, true)
+}
 
-		// ensure CleanUp hook (eg, Route53) is invoked on fast-stop to avoid DNS leaks
-		if c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
-			c.WebServerConfig.CleanUp()
-		}
-
-		if c.webServerStop != nil {
-			select {
-			case <-c.webServerStop:
-			case <-time.After(timeout + time.Second):
-			}
-		}
-		c.webServer = nil
+// Issue #18: Extract common web server shutdown logic
+// shutdownWebServerLocked is a shared helper to shutdown the web server (must be called with webServerMu held)
+// If callCleanup is true, invokes WebServerConfig.CleanUp (typically for Route53 DNS cleanup)
+func (c *Client) shutdownWebServerLocked(timeout time.Duration, callCleanup bool) {
+	if c.webServer == nil {
+		return
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
+		_ = stopper.Shutdown(ctx)
+	}
+	cancel()
+
+	// invoke cleanup hook if requested (e.g., Route53 DNS cleanup)
+	if callCleanup && c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
+		c.WebServerConfig.CleanUp()
+	}
+
+	// wait for server goroutine to signal completion or timeout
+	if c.webServerStop != nil {
+		select {
+		case <-c.webServerStop:
+		case <-time.After(timeout + time.Second):
+		}
+		c.webServerStop = nil
+	}
+	c.webServer = nil
 }
 
 // ZLog access internal zap logger
@@ -857,6 +867,34 @@ func (c *Client) ZLog() *data.ZapLog {
 	z := c._z
 	c.zMu.Unlock()
 	return z
+}
+
+// Issue #17: Consolidate logging patterns - create helper methods for consistent logging
+// logPrintf logs an info message using the configured logger or standard log
+func (c *Client) logPrintf(msg string, args ...interface{}) {
+	if z := c.ZLog(); z != nil {
+		z.Printf(msg, args...)
+	} else {
+		log.Printf(msg, args...)
+	}
+}
+
+// logErrorf logs an error message using the configured logger or standard log
+func (c *Client) logErrorf(msg string, args ...interface{}) {
+	if z := c.ZLog(); z != nil {
+		z.Errorf(msg, args...)
+	} else {
+		log.Printf("ERROR: "+msg, args...)
+	}
+}
+
+// logWarnf logs a warning message using the configured logger or standard log
+func (c *Client) logWarnf(msg string, args ...interface{}) {
+	if z := c.ZLog(); z != nil {
+		z.Warnf(msg, args...)
+	} else {
+		log.Printf("WARN: "+msg, args...)
+	}
 }
 
 // PreloadConfigData will load the config data before Dial()
@@ -1995,26 +2033,8 @@ func (c *Client) Close() {
 	}
 
 	c.webServerMu.Lock()
-	if c.webServer != nil { // stop web server if running
-		// add timeout to avoid indefinite hang on Shutdown.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
-			_ = stopper.Shutdown(ctx)
-		}
-		cancel()
-
-		// avoid indefinite block if webServerStop never closes.
-		if c.webServerStop != nil {
-			select {
-			case <-c.webServerStop:
-			case <-time.After(6 * time.Second):
-				errorf("web server shutdown timed out")
-			}
-			// Issue #5: Clear webServerStop channel reference after use
-			c.webServerStop = nil
-		}
-		c.webServer = nil
-	}
+	// Issue #18: Use shared shutdown helper
+	c.shutdownWebServerLocked(webServerShutdownTimeout, false) // CleanUp already called above
 	c.webServerMu.Unlock()
 
 	// clean up notifier client connection
@@ -2125,7 +2145,7 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 
 	cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
 	if cacheExpSeconds == 0 {
-		cacheExpSeconds = 300
+		cacheExpSeconds = defaultCacheExpireSeconds
 	}
 
 	cacheExpires := time.Now().Add(time.Duration(cacheExpSeconds) * time.Second)
