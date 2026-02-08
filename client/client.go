@@ -1451,89 +1451,83 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	nc := c.getNotifierClient()
 	doConnection := nc != nil
 
+	// if config missing, close any existing notifier instead of leaving a half-open client
+	if !doConnection && !util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName+"-notifier-client.yaml")) {
+		if nc != nil {
+			nc.Close()
+			c.setNotifierClient(nil)
+		}
+		printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
+		return nil
+	}
+
+	if !doConnection {
+		nc = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
+		c.setNotifierClient(nc)
+	}
+
 	// finally, run notifier client to subscribe for notification callbacks
 	// the notifier client uses the same client config yaml, but a copy of it to keep the scope separated
 	// within the notifier client config yaml, named xyz-notifier-client.yaml, where xyz is the endpoint service name,
 	// the discovery topicArn as pre-created on aws is stored within, this enables callback for this specific topicArn from notifier server,
 	// note that the service discovery of notifier client is to the notifier server cluster
-	if doConnection || util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName+"-notifier-client.yaml")) {
-		if !doConnection {
-			nc = NewNotifierClient(c.AppName+"-Notifier-Client", c.ConfigFileName+"-notifier-client", c.CustomConfigPath)
-			c.setNotifierClient(nc)
-		}
 
-		// always (re)wire handlers, even on reconnects
-		c.configureNotifierHandlers(nc)
+	// always (re)wire handlers, even on reconnects
+	c.configureNotifierHandlers(nc)
 
-		if nc == nil {
-			return nil
-		}
-
-		if c.closed.Load() { // bail if closed after wiring handlers
+	if nc == nil || c.closed.Load() {
+		if nc != nil {
 			nc.Close()
 			c.setNotifierClient(nil)
-			return fmt.Errorf("Client is closed")
 		}
-
-		// guard against empty discovery topic ARN to avoid failed subscribes and dangling client
-		arn := nc.ConfiguredSNSDiscoveryTopicArn()
-		if !nc.ConfiguredForNotifierClientDial() || util.LenTrim(arn) == 0 {
-			// ensure an existing notifier client is cleanly closed instead of silently dropped
-			if nc != nil {
-				nc.Close()
-			}
-			printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
-			c.setNotifierClient(nil) // avoid keeping a half-initialized notifier client
-			return nil
-		}
-
-		nc = c.getNotifierClient() // ensure we use the guarded instance
-		if nc == nil {
-			// release reconnect guard if instance vanished
-			return nil
-		}
-
-		if c.closed.Load() { // bail right before dial
-			nc.Close()
-			c.setNotifierClient(nil)
-			return fmt.Errorf("Client is closed")
-		}
-
-		// dial notifier client to notifier server endpoint and begin service operations
-		if err = nc.Dial(); err != nil {
-			if nc != nil {
-				errorf("!!! Notifier Client Service Dial Failed: %s !!!", err.Error())
-				nc.Close()
-			}
-			c.setNotifierClient(nil)
-			return err
-		}
-
-		if c.closed.Load() { // abort if client was closed during/after dial
-			nc.Close()
-			c.setNotifierClient(nil)
-			return fmt.Errorf("Client is closed")
-		}
-
-		if err = nc.Subscribe(arn); err != nil {
-			if nc != nil {
-				errorf("!!! Notifier Client Service Subscribe Failed: %s !!!", err.Error())
-				nc.Close()
-			}
-			c.setNotifierClient(nil)
-			return err
-		}
-
-		if c.closed.Load() { // abort if client closed after subscribe
-			nc.Unsubscribe()
-			nc.Close()
-			c.setNotifierClient(nil)
-			return fmt.Errorf("Client is closed")
-		}
-
-		printf("~~~ Notifier Client Service Started ~~~")
+		return fmt.Errorf("Client is closed")
 	}
 
+	// guard against empty discovery topic ARN to avoid failed subscribes and dangling client
+	arn := nc.ConfiguredSNSDiscoveryTopicArn()
+	if !nc.ConfiguredForNotifierClientDial() || util.LenTrim(arn) == 0 {
+		// ensure an existing notifier client is cleanly closed instead of silently dropped
+		if nc != nil {
+			nc.Close()
+		}
+		c.setNotifierClient(nil) // avoid keeping a half-initialized notifier client
+		printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
+		return nil
+	}
+
+	// dial notifier client to notifier server endpoint and begin service operations
+	if err = nc.Dial(); err != nil {
+		if nc != nil {
+			errorf("!!! Notifier Client Service Dial Failed: %s !!!", err.Error())
+			nc.Close()
+		}
+		c.setNotifierClient(nil)
+		return err
+	}
+
+	if c.closed.Load() { // abort if client was closed during/after dial
+		nc.Close()
+		c.setNotifierClient(nil)
+		return fmt.Errorf("Client is closed")
+	}
+
+	if err = nc.Subscribe(arn); err != nil {
+		if nc != nil {
+			errorf("!!! Notifier Client Service Subscribe Failed: %s !!!", err.Error())
+			nc.Close()
+		}
+		c.setNotifierClient(nil)
+		return err
+	}
+
+	if c.closed.Load() { // abort if client closed after subscribe
+		nc.Unsubscribe()
+		nc.Close()
+		c.setNotifierClient(nil)
+		return fmt.Errorf("Client is closed")
+	}
+
+	printf("~~~ Notifier Client Service Started ~~~")
 	return nil
 }
 
@@ -2084,16 +2078,23 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	// normalize input to avoid surprises with trailing spaces
+	directIpPort = strings.TrimSpace(directIpPort)
+	if len(directIpPort) == 0 {
+		return fmt.Errorf("Direct Connect target must include host and port (got empty)")
+	}
+
 	host, portStr, err := net.SplitHostPort(directIpPort)
 	if err != nil {
 		return fmt.Errorf("Direct Connect target must include host and port (got %q): %v", directIpPort, err)
 	}
 
+	host = strings.TrimSpace(host)
 	if util.LenTrim(host) == 0 { // reject empty host early
 		return fmt.Errorf("Direct Connect target host is empty (got %q)", directIpPort)
 	}
 
-	p, convErr := strconv.Atoi(portStr)
+	p, convErr := strconv.Atoi(strings.TrimSpace(portStr))
 	if convErr != nil {
 		return fmt.Errorf("Direct Connect port invalid (%q): %v", portStr, convErr)
 	}
@@ -2295,8 +2296,14 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	seen := make(map[string]struct{})
 	endpoints := make([]*serviceEndpoint, 0, len(instanceList))
 	for _, v := range instanceList {
+		// validate IP and port
+		if util.LenTrim(v.InstanceIP) == 0 || net.ParseIP(v.InstanceIP) == nil {
+			printf("Skipping API SD instance with invalid IP: %q", v.InstanceIP)
+			continue
+		}
 		if v.InstancePort == 0 || v.InstancePort > 65535 {
-			return fmt.Errorf("Service Discovery Returned Invalid Port for %s:%d", v.InstanceIP, v.InstancePort)
+			printf("Skipping API SD instance with invalid port: %d", v.InstancePort)
+			continue
 		}
 
 		key := fmt.Sprintf("%s:%d", v.InstanceIP, v.InstancePort)
@@ -2363,23 +2370,32 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 		customAttr = nil
 	}
 
-	if instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, false, customAttr, &maxCount, timeoutDuration...); err != nil {
+	instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, false, customAttr, &maxCount, timeoutDuration...)
+	if err != nil {
 		return []*serviceEndpoint{}, fmt.Errorf("Service Discovery By API Failed: " + err.Error())
-	} else {
-		for _, v := range instanceList {
-			unhealthyList = append(unhealthyList, &serviceEndpoint{
-				SdType:      "api",
-				Host:        v.InstanceIP,
-				Port:        v.InstancePort,
-				InstanceId:  v.InstanceId,
-				ServiceId:   v.ServiceId,
-				Version:     v.InstanceVersion,
-				CacheExpire: time.Time{},
-			})
+	}
+
+	for _, v := range instanceList {
+		// validate IP and port
+		if util.LenTrim(v.InstanceIP) == 0 || net.ParseIP(v.InstanceIP) == nil {
+			continue
+		}
+		if v.InstancePort == 0 || v.InstancePort > 65535 {
+			continue
 		}
 
-		return unhealthyList, nil
+		unhealthyList = append(unhealthyList, &serviceEndpoint{
+			SdType:      "api",
+			Host:        v.InstanceIP,
+			Port:        v.InstancePort,
+			InstanceId:  v.InstanceId,
+			ServiceId:   v.ServiceId,
+			Version:     v.InstanceVersion,
+			CacheExpire: time.Time{},
+		})
 	}
+
+	return unhealthyList, nil
 }
 
 // updateHealth will update instance health
@@ -2871,6 +2887,11 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 
 	if len(c.WebServerConfig.WebServerRoutes) == 0 {
 		return fmt.Errorf("Start Web Server Failed: Web Server Routes Not Set (Count Zero)")
+	}
+
+	// require caller to provide a channel so startup errors are observable
+	if serveErr == nil {
+		return fmt.Errorf("Start Web Server Failed: serveErr channel must not be nil")
 	}
 
 	c.webServerMu.Lock() // serialize start
