@@ -1453,13 +1453,14 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	nc := c.getNotifierClient()
 	doConnection := nc != nil
 
-	// if config missing, close any existing notifier instead of leaving a half-open client
-	if !doConnection && !util.FileExists(path.Join(c.CustomConfigPath, c.ConfigFileName+"-notifier-client.yaml")) {
+	// Always verify notifier config file exists; if missing, close and clear any stale client.
+	cfgPath := path.Join(c.CustomConfigPath, c.ConfigFileName+"-notifier-client.yaml")
+	if !util.FileExists(cfgPath) {
 		if nc != nil {
 			nc.Close()
 			c.setNotifierClient(nil)
 		}
-		printf("### Notifier Client Service Skipped, Not Yet Configured for Dial or TopicArn Missing ###")
+		printf("### Notifier Client Service Skipped, config file missing: %s ###", cfgPath)
 		return nil
 	}
 
@@ -2942,7 +2943,13 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 	}
 
 	c.WebServerConfig.WebServerLocalAddress = fmt.Sprintf("%s://%s:%d", httpVerb, server.GetHostAddress(), server.Port())
+
+	// preserve caller-provided cleanup and chain with DNS cleanup.
+	prevCleanup := c.WebServerConfig.CleanUp
 	c.WebServerConfig.CleanUp = func() {
+		if prevCleanup != nil {
+			prevCleanup()
+		}
 		server.RemoveDNSRecordset()
 	}
 	log.Println("Web Server Host Starting On: " + c.WebServerConfig.WebServerLocalAddress)
