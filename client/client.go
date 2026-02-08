@@ -1879,6 +1879,11 @@ func (c *Client) Close() {
 		return
 	}
 
+	// make Close idempotent to avoid double teardown in concurrent/duplicate calls
+	if !c.closed.CompareAndSwap(false, true) {
+		return
+	}
+
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {
 		if z != nil {
