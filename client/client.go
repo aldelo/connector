@@ -1413,11 +1413,13 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		return fmt.Errorf("Client Object Nil")
 	}
 
+	// Fail fast if the client is closed to avoid doing work under lock.
+	if c.closed.Load() {
+		return fmt.Errorf("Client is closed")
+	}
+
 	c.notifierStartMu.Lock()
 	defer c.notifierStartMu.Unlock()
-
-	// always release reconnect guard on exit to avoid latch on early returns
-	defer c.notifierReconnectActive.Store(false)
 
 	// if the client is closed, eagerly clean up any existing notifier client to avoid leaks
 	if c.closed.Load() {
@@ -1475,11 +1477,13 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	// always (re)wire handlers, even on reconnects
 	c.configureNotifierHandlers(nc)
 
-	if nc == nil || c.closed.Load() {
-		if nc != nil {
-			nc.Close()
-			c.setNotifierClient(nil)
-		}
+	// Distinguish missing notifier client from closed state.
+	if nc == nil {
+		return fmt.Errorf("Notifier client not initialized (missing config)")
+	}
+	if c.closed.Load() {
+		nc.Close()
+		c.setNotifierClient(nil)
 		return fmt.Errorf("Client is closed")
 	}
 
@@ -2195,6 +2199,10 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 		} else {
 			// a
 			host = v
+			// Validate that A records resolve to IPs; reject CNAME/malformed answers.
+			if net.ParseIP(host) == nil {
+				return fmt.Errorf("Service Discovery By DNS returned non-IP host for A record: %q", host)
+			}
 			if instancePort == 0 || instancePort > 65535 {
 				return fmt.Errorf("Configured Instance Port Not Valid: %d", instancePort)
 			}
@@ -2891,7 +2899,7 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 
 	// require caller to provide a channel so startup errors are observable
 	if serveErr == nil {
-		return fmt.Errorf("Start Web Server Failed: serveErr channel must not be nil")
+		serveErr = make(chan error, 1)
 	}
 
 	c.webServerMu.Lock() // serialize start
@@ -2900,11 +2908,6 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 	// Prevent double-start on the same Client instance.
 	if c.webServer != nil {
 		return fmt.Errorf("Start Web Server Failed: server already running")
-	}
-
-	// Make serveErr safe/usable even if caller passed nil.
-	if serveErr == nil {
-		serveErr = make(chan error, 1)
 	}
 
 	// always buffer the channel we write to, even if caller passed unbuffered
