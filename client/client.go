@@ -318,7 +318,8 @@ type Client struct {
 	_z  *data.ZapLog
 	zMu sync.Mutex
 
-	closed atomic.Bool
+	closed  atomic.Bool
+	closing atomic.Bool
 
 	// guard to avoid spawning overlapping notifier reconnect loops
 	notifierReconnectActive atomic.Bool
@@ -1879,7 +1880,7 @@ func (c *Client) Close() {
 	}
 
 	// make Close idempotent to avoid double teardown in concurrent/duplicate calls
-	if !c.closed.CompareAndSwap(false, true) {
+	if !c.closing.CompareAndSwap(false, true) {
 		return
 	}
 
@@ -1905,8 +1906,11 @@ func (c *Client) Close() {
 		printf("... Before gRPC Client Close End")
 	}
 
-	// mark closed after BeforeClientClose so hooks can operate on an open client
-	c.closed.Store(true)
+	// now mark closed; this prevents use-after-close while keeping hook observable.
+	if !c.closed.CompareAndSwap(false, true) {
+		// already closed by another goroutine after the hook finished
+		return
+	}
 
 	defer func() {
 		if c.AfterClientClose != nil {
@@ -2970,20 +2974,14 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 					log.Printf("Start Web Server panic: %v", r)
 				}
 				// surface panic to dial path so startup does not silently succeed
-				select {
-				case internalServeErr <- fmt.Errorf("start web server panic: %v", r):
-				default:
-				}
+				internalServeErr <- fmt.Errorf("start web server panic: %v", r)
 			}
 		}()
 
 		if err := server.Serve(); err != nil {
 			// treat graceful shutdown as success, not an error
 			if errors.Is(err, http.ErrServerClosed) {
-				select {
-				case internalServeErr <- nil:
-				default:
-				}
+				internalServeErr <- nil
 				return
 			}
 
@@ -2994,33 +2992,17 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 				log.Printf("Start Web Server Failed: (Serve Error) %s", err)
 			}
 			// non-blocking send protects against accidental nil/closed channel.
-			select {
-			case internalServeErr <- err:
-			default:
-			}
+			internalServeErr <- err
 			return
 		}
 
-		select {
-		case internalServeErr <- nil:
-		default:
-		}
+		internalServeErr <- nil
 	}()
 
-	// forward result to caller without risking blocking the serve goroutine
-	go func() {
-		if err := <-internalServeErr; err != nil {
-			select {
-			case serveErr <- err:
-			default:
-			}
-		} else {
-			select {
-			case serveErr <- nil:
-			default:
-			}
-		}
-	}()
+	// guarantee the caller receives exactly one result, even with unbuffered channels.
+	go func(errCh <-chan error, out chan<- error) {
+		out <- <-errCh
+	}(internalServeErr, serveErr)
 
 	return nil
 }
