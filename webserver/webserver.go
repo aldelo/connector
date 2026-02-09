@@ -119,6 +119,10 @@ func NewWebServer(appName string, configFileName string, customConfigPath string
 //
 // return true if set; false if not set
 func (w *WebServer) SetRouteGroupCustomMiddleware(routeGroupName string, routerFunc []gin.HandlerFunc) bool {
+	if w == nil {
+		return false
+	}
+	
 	if w._ginwebserver == nil {
 		return false
 	}
@@ -151,6 +155,10 @@ func (w *WebServer) SetRouteGroupCustomMiddleware(routeGroupName string, routerF
 
 // ExtractJwtClaims returns map from gin context extract
 func (w *WebServer) ExtractJwtClaims(c *gin.Context) map[string]interface{} {
+	if w == nil {
+		return nil
+	}
+	
 	if w._ginwebserver != nil {
 		return w._ginwebserver.ExtractJwtClaims(c)
 	} else {
@@ -160,6 +168,10 @@ func (w *WebServer) ExtractJwtClaims(c *gin.Context) map[string]interface{} {
 
 // Port returns the web server port configured
 func (w *WebServer) Port() uint {
+	if w == nil {
+		return 0
+	}
+	
 	if w._config != nil {
 		return w._config.WebServer.Port
 	} else {
@@ -169,6 +181,10 @@ func (w *WebServer) Port() uint {
 
 // UseTls indicates if the web server uses tls (https), otherwise, http
 func (w *WebServer) UseTls() bool {
+	if w == nil {
+		return false
+	}
+	
 	if w._config == nil {
 		return false
 	} else {
@@ -179,6 +195,10 @@ func (w *WebServer) UseTls() bool {
 // GetHostAddress returns either the dns based url as configured,
 // if route53 dns url is configured, this function will first create dns recordset for the local ip, then return dns url
 func (w *WebServer) GetHostAddress() string {
+	if w == nil {
+		return util.GetLocalIP()
+	}
+	
 	// remove prior dns registration if any
 	w.RemoveDNSRecordset()
 
@@ -229,6 +249,10 @@ func (w *WebServer) GetHostAddress() string {
 
 // RemoveDNSRecordset will delete dns resource recordset for the currently registered entry from route53 (originally registered via GetHostAddress function)
 func (w *WebServer) RemoveDNSRecordset() {
+	if w == nil {
+		return
+	}
+	
 	if util.LenTrim(w._dnsHostZoneId) > 0 && util.LenTrim(w._dnsIp) > 0 && util.LenTrim(w._dnsUrl) > 0 && w._dnsTtl > 0 {
 		r := &route53.Route53{}
 		if e := r.Connect(); e == nil {
@@ -240,6 +264,10 @@ func (w *WebServer) RemoveDNSRecordset() {
 
 // Serve will setup and start the web server, in blocking mode
 func (w *WebServer) Serve() error {
+	if w == nil {
+		return fmt.Errorf("WebServer Object Nil")
+	}
+	
 	if w._config == nil {
 		return fmt.Errorf("Config Object Not Initialized, Use NewWebServer(...) First")
 	}
