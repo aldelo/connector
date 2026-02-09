@@ -41,13 +41,12 @@ type HostDiscoveryNotification struct {
 func (d *HostDiscoveryNotification) Marshal() (string, error) {
 	if d == nil {
 		return "", nil
-	} else {
-		if buf, err := util.MarshalJSONCompact(d); err != nil {
-			return "", err
-		} else {
-			return buf, nil
-		}
 	}
+	buf, err := util.MarshalJSONCompact(d)
+	if err != nil {
+		return "", err
+	}
+	return buf, nil
 }
 
 func (d *HostDiscoveryNotification) Unmarshal(jsonData string) error {
@@ -57,13 +56,13 @@ func (d *HostDiscoveryNotification) Unmarshal(jsonData string) error {
 
 	if util.LenTrim(jsonData) == 0 {
 		return fmt.Errorf("Unmarshal Requires Json Data")
-	} else {
-		if err := util.UnmarshalJSON(jsonData, d); err != nil {
-			return err
-		} else {
-			return nil
-		}
 	}
+	
+	err := util.UnmarshalJSON(jsonData, d)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 type NotifierClient struct {

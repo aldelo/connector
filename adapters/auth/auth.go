@@ -51,6 +51,8 @@ func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc
 }
 
 func ServerAuthStreamInterceptor(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	// TODO: not implemented at this time
+	// TODO(security): Stream authentication not implemented - all stream RPCs bypass auth validation
+	// WARNING: This interceptor currently allows all stream requests without authentication
+	// Implement proper stream auth before using in production
 	return handler(srv, stream)
 }
