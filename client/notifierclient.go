@@ -57,7 +57,7 @@ func (d *HostDiscoveryNotification) Unmarshal(jsonData string) error {
 	if util.LenTrim(jsonData) == 0 {
 		return fmt.Errorf("Unmarshal Requires Json Data")
 	}
-	
+
 	err := util.UnmarshalJSON(jsonData, d)
 	if err != nil {
 		return err
