@@ -118,22 +118,22 @@ func (h *HealthClient) CheckContext(ctx context.Context, svcName string, timeout
 				}
 				// no-timeout call should not hit this unless server imposed its own deadline
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("health check failed: server/transport deadline exceeded: %w", err)
+					fmt.Errorf("health check failed: server/transport deadline exceeded (%w)", err)
 			case codes.Canceled:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("health check failed: context canceled: %w", err)
+					fmt.Errorf("health check failed: context canceled (%w)", err)
 			case codes.Unavailable:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("health check failed: service unavailable: %w", err)
+					fmt.Errorf("health check failed: service unavailable (%w)", err)
 			case codes.NotFound:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("health check failed: service not found: %w", err)
+					fmt.Errorf("health check failed: service not found (%w)", err)
 			case codes.Unimplemented:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("health check failed: health service unimplemented on server: %w", err)
+					fmt.Errorf("health check failed: health service unimplemented on server (%w)", err)
 			default:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("health check failed: call health server error [%s]: %w", st.Code(), err)
+					fmt.Errorf("health check failed: call health server error [%s] (%w)", st.Code(), err)
 			}
 		}
 
@@ -144,17 +144,17 @@ func (h *HealthClient) CheckContext(ctx context.Context, svcName string, timeout
 					fmt.Errorf("health check failed: timeout exceeded after %s: %w", effectiveTimeout, err)
 			}
 			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-				fmt.Errorf("health check failed: server/transport deadline exceeded: %w", err)
+				fmt.Errorf("health check failed: server/transport deadline exceeded (%w)", err)
 		}
 
 		// report caller/transport cancellation accurately
 		if errors.Is(err, context.Canceled) {
 			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-				fmt.Errorf("health check failed: context canceled: %w", err)
+				fmt.Errorf("health check failed: context canceled (%w)", err)
 		}
 
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-			fmt.Errorf("health check failed: call health server error: %w", err)
+			fmt.Errorf("health check failed: call health server error (%w)", err)
 	}
 
 	if resp == nil {
