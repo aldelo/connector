@@ -931,7 +931,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	cleanupWeb := false  // track web server cleanup on failure
 	cleanupSd := false   // track CloudMap cleanup on failure
 	cleanupSqs := false  // track SQS cleanup on failure
-	defer func() { // unified cleanup for partial failures
+	defer func() {       // unified cleanup for partial failures
 		if cleanupWeb {
 			c.stopWebServerFast(5 * time.Second)
 		}
