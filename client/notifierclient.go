@@ -307,7 +307,7 @@ func (n *NotifierClient) Dial() error {
 	n._subscriberTopicArn = ""
 
 	if err := n._grpcClient.Dial(context.Background()); err != nil {
-		if n._grpcClient != nil && n._grpcClient.ZLog() != nil {
+		if n._grpcClient.ZLog() != nil {
 			n._grpcClient.ZLog().Errorf("!!! Notifier Client Dial Failed: (Connectivity State = %s) %s !!!", n._grpcClient.GetState().String(), err.Error())
 		} else {
 			log.Printf("!!! Notifier Client Dial Failed: %s !!!", err.Error())
