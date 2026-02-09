@@ -697,8 +697,8 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 						//
 						log.Println("Starting gRPC Health Server...")
 
-						if err := s.startHealthChecker(); err != nil {
-							log.Println("!!! gRPC Health Server Fail To Start: " + err.Error() + " !!!")
+						if startErr := s.startHealthChecker(); startErr != nil {
+							log.Println("!!! gRPC Health Server Fail To Start: " + startErr.Error() + " !!!")
 						} else {
 							log.Println("... gRPC Health Server Started")
 						}
@@ -706,8 +706,8 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 						//
 						// serve grpc service
 						//
-						if err := s._grpcServer.Serve(lis); err != nil {
-							log.Fatalf("Serve gRPC Service %s on %s Failed: (Server Halt) %s", s._config.AppName, s._localAddress, err.Error())
+						if serveErr := s._grpcServer.Serve(lis); serveErr != nil {
+							log.Fatalf("Serve gRPC Service %s on %s Failed: (Server Halt) %s", s._config.AppName, s._localAddress, serveErr.Error())
 						} else {
 							log.Println("... gRPC Server Quit Command Received")
 						}
@@ -724,8 +724,8 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 								//
 								// start http web server
 								//
-								if err := s.startWebServer(); err != nil {
-									log.Printf("!!! Serve Http Web Server %s Failed: %s !!!\n", s.WebServerConfig.AppName, err)
+								if webServerErr := s.startWebServer(); webServerErr != nil {
+									log.Printf("!!! Serve Http Web Server %s Failed: %s !!!\n", s.WebServerConfig.AppName, webServerErr)
 									startWebServerFail <- true
 								} else {
 									log.Println("... Http Web Server Quit Command Received")
@@ -757,18 +757,18 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 						var continueProcessing bool
 
 						// on initial health update, set sd instance health status to healthy (true)
-						if err := s.updateHealth(true); err != nil {
-							if strings.Contains(err.Error(), "ServiceNotFound") {
+						if healthErr := s.updateHealth(true); healthErr != nil {
+							if strings.Contains(healthErr.Error(), "ServiceNotFound") {
 								log.Println("~~~ Service Discovery Not Ready - Waiting 45 More Seconds ~~~")
 								time.Sleep(45 * time.Second)
 
-								if err = s.updateHealth(true); err != nil {
-									log.Println("!!! Update Instance Health Status with Service Discovery Failed: (With Retry) " + err.Error() + " !!!")
+								if healthErr = s.updateHealth(true); healthErr != nil {
+									log.Println("!!! Update Instance Health Status with Service Discovery Failed: (With Retry) " + healthErr.Error() + " !!!")
 								} else {
 									continueProcessing = true
 								}
 							} else {
-								log.Println("!!! Update Instance Health Status with Service Discovery Failed: " + err.Error() + " !!!")
+								log.Println("!!! Update Instance Health Status with Service Discovery Failed: " + healthErr.Error() + " !!!")
 							}
 						} else {
 							continueProcessing = true
@@ -1489,7 +1489,7 @@ func (s *Service) updateHealth(healthy bool) error {
 			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout)*time.Second)
 		}
 
-		return registry.UpdateHealthStatus(s._sd, s._config.Instance.Id, s._config.Service.Id, healthy)
+		return registry.UpdateHealthStatus(s._sd, s._config.Instance.Id, s._config.Service.Id, healthy, timeoutDuration...)
 	} else {
 		return nil
 	}
@@ -1588,12 +1588,16 @@ func (s *Service) unsubscribeSNS() {
 // GracefulStop allows existing actions be completed before shutting down gRPC server
 func (s *Service) GracefulStop() {
 	// notify sns of host offline
-	s.publishToSNS(s._config.Topics.SnsDiscoveryTopicArn, "Discovery Push Notification", s.getHostDiscoveryMessage(false), nil)
+	if s._config != nil {
+		s.publishToSNS(s._config.Topics.SnsDiscoveryTopicArn, "Discovery Push Notification", s.getHostDiscoveryMessage(false), nil)
+	}
 
 	// perform unsubscribe if any
 	s.unsubscribeSNS()
 
-	_ = s.deleteServiceHealthReportFromDataStore(s._config.Instance.Id)
+	if s._config != nil {
+		_ = s.deleteServiceHealthReportFromDataStore(s._config.Instance.Id)
+	}
 
 	if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
 		s.WebServerConfig.CleanUp()
@@ -1637,12 +1641,16 @@ func (s *Service) GracefulStop() {
 // ImmediateStop will forcefully shutdown gRPC server regardless of pending actions being processed
 func (s *Service) ImmediateStop() {
 	// notify sns of host offline
-	s.publishToSNS(s._config.Topics.SnsDiscoveryTopicArn, "Discovery Push Notification", s.getHostDiscoveryMessage(false), nil)
+	if s._config != nil {
+		s.publishToSNS(s._config.Topics.SnsDiscoveryTopicArn, "Discovery Push Notification", s.getHostDiscoveryMessage(false), nil)
+	}
 
 	// perform unsubscribe if any
 	s.unsubscribeSNS()
 
-	_ = s.deleteServiceHealthReportFromDataStore(s._config.Instance.Id)
+	if s._config != nil {
+		_ = s.deleteServiceHealthReportFromDataStore(s._config.Instance.Id)
+	}
 
 	if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
 		s.WebServerConfig.CleanUp()
