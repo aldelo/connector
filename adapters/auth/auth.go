@@ -39,13 +39,9 @@ func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc
 		} else {
 			token := strings.TrimPrefix(a[0], "Bearer ")
 
-			// TODO: not implemented at this time
-			if token != "xyz" {
-				return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
-			}
-
-			// continue rpc handler execution upon token validation success
-			return handler(ctx, req)
+			// Auth token validation not implemented - reject all requests until properly configured
+			_ = token // Suppress unused variable warning
+			return nil, status.Errorf(codes.Unimplemented, "Auth Token Validation Not Implemented - Configure ValidateToken handler")
 		}
 	}
 }

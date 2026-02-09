@@ -307,7 +307,11 @@ func (n *NotifierClient) Dial() error {
 	n._subscriberTopicArn = ""
 
 	if err := n._grpcClient.Dial(context.Background()); err != nil {
-		n._grpcClient.ZLog().Errorf("!!! Notifier Client Dial Failed: (Connectivity State = %s) %s !!!", n._grpcClient.GetState().String(), err.Error())
+		if n._grpcClient != nil && n._grpcClient.ZLog() != nil {
+			n._grpcClient.ZLog().Errorf("!!! Notifier Client Dial Failed: (Connectivity State = %s) %s !!!", n._grpcClient.GetState().String(), err.Error())
+		} else {
+			log.Printf("!!! Notifier Client Dial Failed: %s !!!", err.Error())
+		}
 		return err
 	} else {
 		// dial success
@@ -537,7 +541,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 									continue
 								}
 
-								if port <= 0 || port > 65535 {
+								if port == 0 || port > 65535 {
 									n._grpcClient.ZLog().Warnf("!!! Notification Client Received Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "', Recv Loop Skips to Next Cycle !!!")
 
 									if n.ServiceAlertSkippedHandler != nil {
@@ -549,17 +553,26 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 								// check if already received within the last 10 seconds
 								recvKey := fmt.Sprintf("%s:%d", ip, port)
-								if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(time.Now(), t)) <= 10 {
+								now := time.Now()
+								if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(now, t)) <= 10 {
 									// already in map, skip this one
 									n._grpcClient.ZLog().Warnf("*** Notification Client Received Repeated Notification Same Data '" + recvKey + "' Within 10 Seconds Duration, Alert Bypassed ***")
 									continue
 								} else {
-									// add or update to map
+									// add or update to map with TTL-based cleanup
 									if len(recvMap) > 5000 {
-										// if map exceed 5000 entries, reset
-										recvMap = make(map[string]time.Time)
+										// Clean up entries older than 60 seconds to prevent unbounded memory growth
+										for k, v := range recvMap {
+											if util.AbsInt(util.SecondsDiff(now, v)) > 60 {
+												delete(recvMap, k)
+											}
+										}
+										// If still too large after cleanup, reset the map
+										if len(recvMap) > 5000 {
+											recvMap = make(map[string]time.Time)
+										}
 									}
-									recvMap[recvKey] = time.Now()
+									recvMap[recvKey] = now
 								}
 
 								isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
