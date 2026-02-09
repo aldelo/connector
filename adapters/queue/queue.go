@@ -17,7 +17,6 @@ package queue
  */
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -49,14 +48,6 @@ func NewQueueAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2.HttpCl
 	} else {
 		return q, nil
 	}
-}
-
-// small helper to honor timeoutDuration when calling AWS SDK directly
-func contextWithTimeout(timeoutDuration ...time.Duration) (context.Context, context.CancelFunc) {
-	if len(timeoutDuration) > 0 && timeoutDuration[0] > 0 {
-		return context.WithTimeout(context.Background(), timeoutDuration[0])
-	}
-	return context.Background(), func() {}
 }
 
 // composeSnsPolicy builds the policy that allows an SNS topic to send to the queue

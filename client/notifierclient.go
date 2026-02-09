@@ -19,6 +19,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/xray"
 	notifierpb "github.com/aldelo/connector/notifierserver/proto"
@@ -88,7 +89,7 @@ type NotifierClient struct {
 	_grpcClient                  *Client
 	_subscriberID                string
 	_subscriberTopicArn          string
-	_notificationServicesStarted bool
+	_notificationServicesStarted int32 // Use int32 for atomic operations
 
 	//_stopNotificationServices chan bool
 }
@@ -240,13 +241,19 @@ func (n *NotifierClient) NotifierClientAlertServicesStarted() bool {
 		return false
 	}
 
-	return n._notificationServicesStarted
+	return atomic.LoadInt32(&n._notificationServicesStarted) == 1
 }
 
 // PurgeEndpointCache removes current client connection's service name ip port from cache,
 // if current service name ip port not found, entire cache will be purged
 func (n *NotifierClient) PurgeEndpointCache() {
 	if n == nil {
+		return
+	}
+
+	// Reset global cache if client or config is unavailable to prevent accessing nil fields
+	if n._grpcClient == nil || n._grpcClient._config == nil {
+		_cache = new(Cache)
 		return
 	}
 
@@ -302,7 +309,7 @@ func (n *NotifierClient) Dial() error {
 		n._grpcClient.StreamClientInterceptors = n.StreamClientInterceptorHandlers
 	}
 
-	n._notificationServicesStarted = false
+	atomic.StoreInt32(&n._notificationServicesStarted, 0)
 	n._subscriberID = ""
 	n._subscriberTopicArn = ""
 
@@ -321,9 +328,9 @@ func (n *NotifierClient) Close() {
 		return
 	}
 
-	if n._notificationServicesStarted {
+	if atomic.LoadInt32(&n._notificationServicesStarted) == 1 {
 		//n._stopNotificationServices <-true
-		n._notificationServicesStarted = false
+		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 	}
 
 	if n._grpcClient != nil {
@@ -344,7 +351,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 	}
 
 	if n._grpcClient == nil {
-		n._notificationServicesStarted = false
+		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 		n._subscriberID = ""
 		n._subscriberTopicArn = ""
 		err = fmt.Errorf("Notifier Client is Not Initialized, Obtain via NewNotifierClient Factory Func First")
@@ -360,7 +367,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 	}
 
 	if util.LenTrim(topicArn) == 0 {
-		n._notificationServicesStarted = false
+		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 		err = fmt.Errorf("Notifier Client Subscription Requires Target TopicARN")
 		return err
 	}
@@ -385,65 +392,71 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 		}()
 	}
 
-	if nsClient, err := nc.Subscribe(context.Background(), &notifierpb.NotificationSubscriber{
+	var nsClient notifierpb.NotifierService_SubscribeClient
+	nsClient, err = nc.Subscribe(context.Background(), &notifierpb.NotificationSubscriber{
 		Id:    sessionId,
 		Topic: topicArn,
-	}); err != nil {
-		n._notificationServicesStarted = false
+	})
+	if err != nil {
+		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 		n._grpcClient.ZLog().Errorf("!!! Notifier Client Subscribe to TopicArn Failed: " + err.Error() + " !!!")
 		err = fmt.Errorf("Notifier Client Subscribe to TopicArn Failed: %s", err.Error())
 		return err
-	} else {
-		if n.ServiceAlertStartedHandler != nil {
-			n.ServiceAlertStartedHandler()
-		}
+	}
+	
+	if n.ServiceAlertStartedHandler != nil {
+		n.ServiceAlertStartedHandler()
+	}
 
-		//n._stopNotificationServices = make(chan bool)
+	//n._stopNotificationServices = make(chan bool)
 
-		n._grpcClient.ZLog().Printf("+++ Notifier Client Subscribe TopicArn Success +++")
+	n._grpcClient.ZLog().Printf("+++ Notifier Client Subscribe TopicArn Success +++")
 
-		n._notificationServicesStarted = true
-		n._subscriberID = sessionId
-		n._subscriberTopicArn = topicArn
+	atomic.StoreInt32(&n._notificationServicesStarted, 1)
+	n._subscriberID = sessionId
+	n._subscriberTopicArn = topicArn
 
-		ctxDone := nsClient.Context()
-		recvMap := make(map[string]time.Time)
+	ctxDone := nsClient.Context()
+	recvMap := make(map[string]time.Time)
+	cleanupCounter := 0
 
-		for {
-			select {
-			case <-ctxDone.Done():
+	for {
+		select {
+		case <-ctxDone.Done():
+			if n.ServiceAlertStoppedHandler != nil {
+				n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
+			}
+
+			atomic.StoreInt32(&n._notificationServicesStarted, 0)
+
+			n._grpcClient.ZLog().Printf("### Notifier Client Received Context Done Signal ###")
+
+			recvMap = nil
+			err = fmt.Errorf("Notifier Client Context Done")
+			return err
+
+		/*
+			case <-n._stopNotificationServices:
 				if n.ServiceAlertStoppedHandler != nil {
 					n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
 				}
 
-				n._notificationServicesStarted = false
+				atomic.StoreInt32(&n._notificationServicesStarted, 0)
 
-				n._grpcClient.ZLog().Printf("### Notifier Client Received Context Done Signal ###")
+				n._grpcClient.ZLog().Printf("### Notifier Client Received Stop Notification Services Signal ###")
 
 				recvMap = nil
-				err = fmt.Errorf("Notifier Client Context Done")
+				err = fmt.Errorf("Notifier Client Received Stop Notification Signal")
 				return err
+		*/
 
-			/*
-				case <-n._stopNotificationServices:
-					if n.ServiceAlertStoppedHandler != nil {
-						n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
-					}
+		default:
+			// process notification receive event
+			n._grpcClient.ZLog().Printf("~~~ Notifier Client Awaits Notifier Server's Notification Data Arrival ~~~")
 
-					n._notificationServicesStarted = false
-
-					n._grpcClient.ZLog().Printf("### Notifier Client Received Stop Notification Services Signal ###")
-
-					recvMap = nil
-					err = fmt.Errorf("Notifier Client Received Stop Notification Signal")
-					return err
-			*/
-
-			default:
-				// process notification receive event
-				n._grpcClient.ZLog().Printf("~~~ Notifier Client Awaits Notifier Server's Notification Data Arrival ~~~")
-
-				if data, err := nsClient.Recv(); err == nil {
+			var data *notifierpb.NotificationData
+			data, err = nsClient.Recv()
+			if err == nil {
 					n._grpcClient.ZLog().Printf("$$$ Notifier Client Received Notification Data From Server Stream, Ready to Process $$$")
 
 					if data != nil {
@@ -478,36 +491,41 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 						// ensure message was within the last 15 minutes
 						// t1 is utc value
 						// t2 converts to utc for comparison
-						if t1, err := time.Parse(time.RFC3339, data.Timestamp); err != nil {
-							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Parser Not Valid: " + err.Error() + "， Recv Loop Skips to Next Cycle !!!")
+						var t1 time.Time
+						var parseErr error
+						t1, parseErr = time.Parse(time.RFC3339, data.Timestamp)
+						if parseErr != nil {
+							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Parser Not Valid: " + parseErr.Error() + "， Recv Loop Skips to Next Cycle !!!")
 
 							if n.ServiceAlertSkippedHandler != nil {
-								n.ServiceAlertSkippedHandler("Notification Timestamp Parse Error: " + err.Error())
+								n.ServiceAlertSkippedHandler("Notification Timestamp Parse Error: " + parseErr.Error())
 							}
 
 							continue
-						} else {
-							t2 := time.Now().UTC()
+						}
+						
+						t2 := time.Now().UTC()
 
-							if util.AbsDuration(t2.Sub(t1)).Minutes() > 15 {
-								n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Exceeded 15 Minute Limit: Message Timestamp " + util.FormatDateTime(t1) + ", Current Timestamp " + util.FormatDateTime(t2) + ", Recv Loop Skips to Next Cycle !!!")
+						if util.AbsDuration(t2.Sub(t1)).Minutes() > 15 {
+							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Exceeded 15 Minute Limit: Message Timestamp " + util.FormatDateTime(t1) + ", Current Timestamp " + util.FormatDateTime(t2) + ", Recv Loop Skips to Next Cycle !!!")
 
-								if n.ServiceAlertSkippedHandler != nil {
-									n.ServiceAlertSkippedHandler("Notification Expired (Exceeded 15 Minutes): Received " + util.FormatDateTime(t1) + ", Current " + util.FormatDateTime(t2))
-								}
-
-								continue
+							if n.ServiceAlertSkippedHandler != nil {
+								n.ServiceAlertSkippedHandler("Notification Expired (Exceeded 15 Minutes): Received " + util.FormatDateTime(t1) + ", Current " + util.FormatDateTime(t2))
 							}
+
+							continue
 						}
 
 						// unmarshal message to host discovery notification object
 						hostDiscNotification := new(HostDiscoveryNotification)
 
-						if err := hostDiscNotification.Unmarshal(data.Message); err != nil {
-							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Unmarshal Json Failed: " + err.Error() + ", Recv Loop Skips to Next Cycle !!!")
+						var unmarshalErr error
+						unmarshalErr = hostDiscNotification.Unmarshal(data.Message)
+						if unmarshalErr != nil {
+							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Unmarshal Json Failed: " + unmarshalErr.Error() + ", Recv Loop Skips to Next Cycle !!!")
 
 							if n.ServiceAlertSkippedHandler != nil {
-								n.ServiceAlertSkippedHandler("Notification Message Unmarshal Failed: " + err.Error())
+								n.ServiceAlertSkippedHandler("Notification Message Unmarshal Failed: " + unmarshalErr.Error())
 							}
 
 							continue
@@ -549,18 +567,30 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 								// check if already received within the last 10 seconds
 								recvKey := fmt.Sprintf("%s:%d", ip, port)
-								if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(time.Now(), t)) <= 10 {
+								now := time.Now()
+								if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(now, t)) <= 10 {
 									// already in map, skip this one
 									n._grpcClient.ZLog().Warnf("*** Notification Client Received Repeated Notification Same Data '" + recvKey + "' Within 10 Seconds Duration, Alert Bypassed ***")
 									continue
-								} else {
-									// add or update to map
-									if len(recvMap) > 5000 {
-										// if map exceed 5000 entries, reset
-										recvMap = make(map[string]time.Time)
-									}
-									recvMap[recvKey] = time.Now()
 								}
+								
+								cleanupCounter++
+								// Periodically clean up entries older than 60 seconds
+								// Trigger cleanup every 100 entries processed OR when map exceeds 1000 entries
+								if cleanupCounter >= 100 || len(recvMap) > 1000 {
+									cleanupCounter = 0
+									for k, v := range recvMap {
+										if now.Sub(v) > 60*time.Second {
+											delete(recvMap, k)
+										}
+									}
+								}
+								// If still too large after cleanup, reset (lowered from 5000 to 2000 to prevent excessive growth)
+								if len(recvMap) > 2000 {
+									recvMap = make(map[string]time.Time)
+									cleanupCounter = 0
+								}
+								recvMap[recvKey] = now
 
 								isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
 
@@ -605,7 +635,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 							n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Notifier Server Stream EOF")
 						}
 
-						n._notificationServicesStarted = false
+						atomic.StoreInt32(&n._notificationServicesStarted, 0)
 						err = fmt.Errorf("Notifier Client Received EOF, Recv Loop Ending")
 						return err
 
@@ -617,7 +647,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 							n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Notifier Server Stream Error: " + err.Error())
 						}
 
-						n._notificationServicesStarted = false
+						atomic.StoreInt32(&n._notificationServicesStarted, 0)
 						err = fmt.Errorf("Notifier Client Received Error: " + err.Error() + ", Recv Loop Ending")
 						return err
 
@@ -626,7 +656,6 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 			}
 		}
 	}
-}
 
 // Unsubscribe will stop notification alert services and disconnect from subscription on notifier server
 func (n *NotifierClient) Unsubscribe() (err error) {
@@ -642,9 +671,9 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 	n._grpcClient.ZLog().Printf("Notifier Client Unsubscribe Started...")
 
 	// first, stop notification alert services
-	if n._notificationServicesStarted {
+	if atomic.LoadInt32(&n._notificationServicesStarted) == 1 {
 		//n._stopNotificationServices <-true
-		n._notificationServicesStarted = false
+		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 	}
 
 	// second, perform unsubscribe?
