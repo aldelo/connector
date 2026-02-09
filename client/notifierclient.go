@@ -253,9 +253,7 @@ func (n *NotifierClient) PurgeEndpointCache() {
 
 	// Guard against nil _grpcClient or _config to prevent panic
 	if n._grpcClient == nil || n._grpcClient._config == nil {
-		if _cache != nil {
-			_cache = new(Cache)
-		}
+		_cache = new(Cache)
 		return
 	}
 
@@ -420,6 +418,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 	ctxDone := nsClient.Context()
 	recvMap := make(map[string]time.Time)
+	cleanupCounter := 0
 
 	for {
 		select {
@@ -575,8 +574,11 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 									continue
 								}
 								
+								cleanupCounter++
 								// Periodically clean up entries older than 60 seconds
-								if len(recvMap) > 1000 {
+								// Trigger cleanup every 100 entries processed OR when map exceeds 1000 entries
+								if cleanupCounter >= 100 || len(recvMap) > 1000 {
+									cleanupCounter = 0
 									for k, v := range recvMap {
 										if now.Sub(v) > 60*time.Second {
 											delete(recvMap, k)
