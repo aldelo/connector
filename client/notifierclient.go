@@ -251,7 +251,7 @@ func (n *NotifierClient) PurgeEndpointCache() {
 		return
 	}
 
-	// Guard against nil _grpcClient or _config to prevent panic
+	// Reset global cache if client or config is unavailable to prevent accessing nil fields
 	if n._grpcClient == nil || n._grpcClient._config == nil {
 		_cache = new(Cache)
 		return
@@ -585,9 +585,10 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 										}
 									}
 								}
-								// If still too large after cleanup, reset
-								if len(recvMap) > 5000 {
+								// If still too large after cleanup, reset (lowered from 5000 to 2000 to prevent excessive growth)
+								if len(recvMap) > 2000 {
 									recvMap = make(map[string]time.Time)
+									cleanupCounter = 0
 								}
 								recvMap[recvKey] = now
 
