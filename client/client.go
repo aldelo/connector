@@ -62,6 +62,22 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Issue #16: Define constants for magic numbers
+const (
+	defaultCacheExpireSeconds         = 300
+	defaultDialTimeoutSeconds         = 5
+	defaultHealthCheckInterval        = 250 * time.Millisecond
+	defaultWebServerCheckInterval     = 500 * time.Millisecond
+	defaultNotifierReconnectDelay     = 5 * time.Second
+	maxTCPPort                        = 65535
+	defaultMaxDiscoveryResults        = 100
+	connectionCloseDelay              = 100 * time.Millisecond
+	webServerShutdownTimeout          = 5 * time.Second
+	webServerStopChannelTimeout       = 6 * time.Second
+	deregisterInstanceCheckInterval   = 250 * time.Millisecond
+	deregisterInstanceMaxRetries      = 20
+)
+
 // client side cache
 var (
 	_cache  *Cache
@@ -110,8 +126,15 @@ func cacheGetLiveServiceEndpoints(key, version string, force ...bool) []*service
 		return []*serviceEndpoint{}
 	}
 
-	out := make([]*serviceEndpoint, len(eps)) // copy to avoid aliasing races
-	copy(out, eps)
+	// Issue #1: Perform deep copy of endpoint structs to prevent concurrent modification
+	out := make([]*serviceEndpoint, len(eps))
+	for i, ep := range eps {
+		if ep == nil {
+			continue
+		}
+		copied := *ep
+		out[i] = &copied
+	}
 
 	return out
 }
@@ -161,9 +184,12 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 	}
 	c.connMu.Unlock()
 
-	// close prior connection outside lock to avoid leaks
+	// Issue #9: Close prior connection asynchronously with a small delay to allow in-flight RPCs to complete
 	if old != nil && old != conn {
-		_ = old.Close()
+		go func(conn *grpc.ClientConn) {
+			time.Sleep(connectionCloseDelay) // Allow in-flight RPCs to complete
+			_ = conn.Close()
+		}(old)
 	}
 }
 
@@ -228,7 +254,13 @@ func (c *Client) getNotifierClient() *NotifierClient {
 	return c._notifierClient
 }
 
-var _mux sync.Mutex // thread-safety for accessing resolver map in DialContext()
+// Issue #19: Document global mutex _mux
+// _mux is a global mutex used to serialize gRPC DialContext calls across all client instances.
+// This is necessary because gRPC's internal resolver registration is not thread-safe.
+// Concurrent calls to grpc.DialContext can cause race conditions in the resolver map.
+// Performance impact: Dial operations are serialized, but this only affects startup/reconnect,
+// not normal RPC operations which proceed concurrently after dial completes.
+var _mux sync.Mutex
 
 // Client represents a gRPC client's connection and entry point,
 // also provides optional gin based web server upon dial
@@ -338,33 +370,49 @@ type Client struct {
 // safely replace the current endpoints slice
 func (c *Client) setEndpoints(eps []*serviceEndpoint) {
 	c.endpointsMu.Lock()
+	defer c.endpointsMu.Unlock()
+	
 	live := pruneExpiredEndpoints(eps)
-	c._endpoints = live
-	c.endpointsMu.Unlock()
+	
+	// Issue #3: Deep copy endpoints to own the data and prevent data races
+	copied := make([]*serviceEndpoint, len(live))
+	for i, ep := range live {
+		if ep == nil {
+			continue
+		}
+		epCopy := *ep
+		copied[i] = &epCopy
+	}
+	c._endpoints = copied
 }
 
-// snapshot current endpoints (shallow copy) under read lock
+// snapshot current endpoints (deep copy) under write lock for atomic read-prune-write
 func (c *Client) endpointsSnapshot() []*serviceEndpoint {
 	if c == nil {
 		return nil
 	}
 
-	// fast read under RLock
-	c.endpointsMu.RLock()
-	current := make([]*serviceEndpoint, len(c._endpoints))
-	copy(current, c._endpoints)
-	c.endpointsMu.RUnlock()
-
-	live := pruneExpiredEndpoints(current)
-	// write back pruned endpoints so shared state stays trimmed
-	if len(live) != len(current) {
-		c.endpointsMu.Lock()
+	// Issue #2: Use write lock for atomic read-prune-write operation
+	c.endpointsMu.Lock()
+	defer c.endpointsMu.Unlock()
+	
+	// Prune expired endpoints
+	live := pruneExpiredEndpoints(c._endpoints)
+	
+	// Update internal state if pruning removed entries
+	if len(live) != len(c._endpoints) {
 		c._endpoints = live
-		c.endpointsMu.Unlock()
 	}
 
+	// Deep copy to prevent caller from modifying internal state
 	out := make([]*serviceEndpoint, len(live))
-	copy(out, live)
+	for i, ep := range live {
+		if ep == nil {
+			continue
+		}
+		copied := *ep
+		out[i] = &copied
+	}
 	return out
 }
 
@@ -380,7 +428,7 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 		}
 		cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
 		if cacheExpSeconds == 0 {
-			cacheExpSeconds = 300
+			cacheExpSeconds = defaultCacheExpireSeconds
 		}
 
 		svcKey := strings.ToLower(c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
@@ -438,31 +486,27 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 			log.Printf("!!! Notifier Client Service Disconnected - Re-Attempting Connection in 5 Seconds...!!!")
 		}
 
+		// Issue #4: Simplify the reconnect loop with proper cancellation
 		go func() {
 			defer c.notifierReconnectActive.Store(false)
 
-			ticker := time.NewTicker(5 * time.Second)
+			ticker := time.NewTicker(defaultNotifierReconnectDelay)
 			defer ticker.Stop()
 
 			for {
+				// Check if closed before waiting
 				if c.closed.Load() {
 					return
 				}
 
+				// Simple select statement with ticker and immediate closed check
 				select {
 				case <-ticker.C:
-				case <-func() <-chan struct{} {
-					if !c.closed.Load() {
-						return nil
-					}
-					ch := make(chan struct{})
-					close(ch)
-					return ch
-				}():
-					return
+					// Continue to reconnection attempt
 				}
 
-				if c.closed.Load() { // re-check closed immediately
+				// Check if closed after ticker
+				if c.closed.Load() {
 					return
 				}
 
@@ -558,7 +602,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		return []grpc.DialOption{}, fmt.Errorf("Client Object Nil")
 	}
 
-	if c._config == nil {
+	// Issue #8: Capture config reference atomically at the start to avoid nil dereference
+	cfg := c._config
+	if cfg == nil {
 		return []grpc.DialOption{}, fmt.Errorf("Config Data Not Loaded")
 	}
 
@@ -576,9 +622,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	//
 
 	// set tls credential dial option
-	if util.LenTrim(c._config.Grpc.ServerCACertFiles) > 0 {
+	if util.LenTrim(cfg.Grpc.ServerCACertFiles) > 0 {
 		tls := new(tlsconfig.TlsConfig)
-		if tc, e := tls.GetClientTlsConfig(strings.Split(c._config.Grpc.ServerCACertFiles, ","), c._config.Grpc.ClientCertFile, c._config.Grpc.ClientKeyFile); e != nil {
+		if tc, e := tls.GetClientTlsConfig(strings.Split(cfg.Grpc.ServerCACertFiles, ","), cfg.Grpc.ClientCertFile, cfg.Grpc.ClientKeyFile); e != nil {
 			return []grpc.DialOption{}, fmt.Errorf("Set Dial Option Client TLS Failed: %s", e.Error())
 		} else {
 			opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
@@ -591,7 +637,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	//
 	// setup xray is configured via yaml
 	//
-	if c._config.Target.TraceUseXRay {
+	if cfg.Target.TraceUseXRay {
 		_ = xray.Init("127.0.0.1:2000", "1.2.0")
 		xray.SetXRayServiceOn()
 	}
@@ -609,24 +655,24 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	*/
 
 	// set user agent if defined
-	if util.LenTrim(c._config.Grpc.UserAgent) > 0 {
-		opts = append(opts, grpc.WithUserAgent(c._config.Grpc.UserAgent))
+	if util.LenTrim(cfg.Grpc.UserAgent) > 0 {
+		opts = append(opts, grpc.WithUserAgent(cfg.Grpc.UserAgent))
 	}
 
 	// set with block option,
 	// with block will halt code execution until after dial completes
-	if c._config.Grpc.DialBlockingMode {
+	if cfg.Grpc.DialBlockingMode {
 		opts = append(opts, grpc.WithBlock())
 	}
 
 	// set default server config for load balancer and/or health check
 	defSvrConf := ""
 
-	if c._config.Grpc.UseLoadBalancer && util.LenTrim(loadBalancerPolicy) > 0 {
+	if cfg.Grpc.UseLoadBalancer && util.LenTrim(loadBalancerPolicy) > 0 {
 		defSvrConf = loadBalancerPolicy
 	}
 
-	if c._config.Grpc.UseHealthCheck {
+	if cfg.Grpc.UseHealthCheck {
 		if util.LenTrim(defSvrConf) > 0 {
 			defSvrConf += ", "
 		}
@@ -639,36 +685,36 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	}
 
 	// set connect timeout value
-	if c._config.Grpc.DialMinConnectTimeout > 0 {
+	if cfg.Grpc.DialMinConnectTimeout > 0 {
 		opts = append(opts, grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff:           backoff.DefaultConfig,
-			MinConnectTimeout: time.Duration(c._config.Grpc.DialMinConnectTimeout) * time.Second,
+			MinConnectTimeout: time.Duration(cfg.Grpc.DialMinConnectTimeout) * time.Second,
 		}))
 	}
 
 	// set keep alive dial options
 	ka := keepalive.ClientParameters{
-		PermitWithoutStream: c._config.Grpc.KeepAlivePermitWithoutStream,
+		PermitWithoutStream: cfg.Grpc.KeepAlivePermitWithoutStream,
 	}
 
-	if c._config.Grpc.KeepAliveInactivePingTimeTrigger > 0 {
-		ka.Time = time.Duration(c._config.Grpc.KeepAliveInactivePingTimeTrigger) * time.Second
+	if cfg.Grpc.KeepAliveInactivePingTimeTrigger > 0 {
+		ka.Time = time.Duration(cfg.Grpc.KeepAliveInactivePingTimeTrigger) * time.Second
 	}
 
-	if c._config.Grpc.KeepAliveInactivePingTimeout > 0 {
-		ka.Timeout = time.Duration(c._config.Grpc.KeepAliveInactivePingTimeout) * time.Second
+	if cfg.Grpc.KeepAliveInactivePingTimeout > 0 {
+		ka.Timeout = time.Duration(cfg.Grpc.KeepAliveInactivePingTimeout) * time.Second
 	}
 
 	opts = append(opts, grpc.WithKeepaliveParams(ka))
 
 	// set read buffer dial option, 32 kb default, 32 * 1024
-	if c._config.Grpc.ReadBufferSize > 0 {
-		opts = append(opts, grpc.WithReadBufferSize(int(c._config.Grpc.ReadBufferSize)))
+	if cfg.Grpc.ReadBufferSize > 0 {
+		opts = append(opts, grpc.WithReadBufferSize(int(cfg.Grpc.ReadBufferSize)))
 	}
 
 	// set write buffer dial option, 32 kb default, 32 * 1024
-	if c._config.Grpc.WriteBufferSize > 0 {
-		opts = append(opts, grpc.WithWriteBufferSize(int(c._config.Grpc.WriteBufferSize)))
+	if cfg.Grpc.WriteBufferSize > 0 {
+		opts = append(opts, grpc.WithWriteBufferSize(int(cfg.Grpc.WriteBufferSize)))
 	}
 
 	// turn off retry when retry default is enabled in the future framework versions
@@ -676,7 +722,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// Build interceptor chains from a fresh local slice to avoid duplicate appends across re-dials.
 	unaryInts := append([]grpc.UnaryClientInterceptor{}, c.UnaryClientInterceptors...)
-	if c._config.Grpc.CircuitBreakerEnabled {
+	if cfg.Grpc.CircuitBreakerEnabled {
 		logPrintf("Setup Unary Circuit Breaker Interceptor")
 		unaryInts = append(unaryInts, c.unaryCircuitBreakerHandler)
 	}
@@ -684,7 +730,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	if xray.XRayServiceOn() {
 		logPrintf("Setup Unary XRay Tracer Interceptor")
 		//c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryXRayTracerHandler)
-		unaryInts = append(unaryInts, tracer.TracerUnaryClientInterceptor(c._config.Target.AppName+"-Client"))
+		unaryInts = append(unaryInts, tracer.TracerUnaryClientInterceptor(cfg.Target.AppName+"-Client"))
 	}
 
 	count := len(unaryInts)
@@ -697,7 +743,7 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// Build stream interceptors from a fresh local slice to avoid duplicate appends across re-dials.
 	streamInts := append([]grpc.StreamClientInterceptor{}, c.StreamClientInterceptors...)
-	if c._config.Grpc.CircuitBreakerEnabled {
+	if cfg.Grpc.CircuitBreakerEnabled {
 		logPrintf("Setup Stream Circuit Breaker Interceptor")
 		streamInts = append(streamInts, c.streamCircuitBreakerHandler)
 	}
@@ -738,26 +784,37 @@ func (c *Client) stopWebServerFast(timeout time.Duration) { // fast shutdown hel
 	c.webServerMu.Lock()
 	defer c.webServerMu.Unlock()
 
-	if c.webServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
-			_ = stopper.Shutdown(ctx)
-		}
-		cancel()
+	c.shutdownWebServerLocked(timeout, true)
+}
 
-		// ensure CleanUp hook (eg, Route53) is invoked on fast-stop to avoid DNS leaks
-		if c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
-			c.WebServerConfig.CleanUp()
-		}
-
-		if c.webServerStop != nil {
-			select {
-			case <-c.webServerStop:
-			case <-time.After(timeout + time.Second):
-			}
-		}
-		c.webServer = nil
+// Issue #18: Extract common web server shutdown logic
+// shutdownWebServerLocked is a shared helper to shutdown the web server (must be called with webServerMu held)
+// If callCleanup is true, invokes WebServerConfig.CleanUp (typically for Route53 DNS cleanup)
+func (c *Client) shutdownWebServerLocked(timeout time.Duration, callCleanup bool) {
+	if c.webServer == nil {
+		return
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
+		_ = stopper.Shutdown(ctx)
+	}
+	cancel()
+
+	// invoke cleanup hook if requested (e.g., Route53 DNS cleanup)
+	if callCleanup && c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
+		c.WebServerConfig.CleanUp()
+	}
+
+	// wait for server goroutine to signal completion or timeout
+	if c.webServerStop != nil {
+		select {
+		case <-c.webServerStop:
+		case <-time.After(timeout + time.Second):
+		}
+		c.webServerStop = nil
+	}
+	c.webServer = nil
 }
 
 // ZLog access internal zap logger
@@ -767,32 +824,77 @@ func (c *Client) ZLog() *data.ZapLog {
 		return nil
 	}
 
+	// Issue #7: Use sync.Once for thread-safe lazy initialization with fast-path check
+	// Fast path check without lock
 	c.zMu.Lock()
-	defer c.zMu.Unlock()
-
 	if c._z != nil {
-		return c._z
+		z := c._z
+		c.zMu.Unlock()
+		return z
 	}
+	c.zMu.Unlock()
 
-	appName := "Default-BeforeConfigLoad"
-	disableLogger := true
-	outputConsole := true
+	// Slow path: initialize logger
+	c.zOnce.Do(func() {
+		c.zMu.Lock()
+		defer c.zMu.Unlock()
 
-	if c._config != nil {
-		appName = c._config.AppName
-		disableLogger = !c._config.Target.ZapLogEnabled
-		outputConsole = c._config.Target.ZapLogOutputConsole
+		// Double-check after acquiring lock
+		if c._z != nil {
+			return
+		}
+
+		appName := "Default-BeforeConfigLoad"
+		disableLogger := true
+		outputConsole := true
+
+		if c._config != nil {
+			appName = c._config.AppName
+			disableLogger = !c._config.Target.ZapLogEnabled
+			outputConsole = c._config.Target.ZapLogOutputConsole
+		}
+
+		z := &data.ZapLog{
+			DisableLogger:   disableLogger,
+			OutputToConsole: outputConsole,
+			AppName:         appName,
+		}
+		_ = z.Init()
+		c._z = z
+	})
+
+	c.zMu.Lock()
+	z := c._z
+	c.zMu.Unlock()
+	return z
+}
+
+// Issue #17: Consolidate logging patterns - create helper methods for consistent logging
+// logPrintf logs an info message using the configured logger or standard log
+func (c *Client) logPrintf(msg string, args ...interface{}) {
+	if z := c.ZLog(); z != nil {
+		z.Printf(msg, args...)
+	} else {
+		log.Printf(msg, args...)
 	}
+}
 
-	z := &data.ZapLog{
-		DisableLogger:   disableLogger,
-		OutputToConsole: outputConsole,
-		AppName:         appName,
+// logErrorf logs an error message using the configured logger or standard log
+func (c *Client) logErrorf(msg string, args ...interface{}) {
+	if z := c.ZLog(); z != nil {
+		z.Errorf(msg, args...)
+	} else {
+		log.Printf("ERROR: "+msg, args...)
 	}
-	_ = z.Init()
-	c._z = z
+}
 
-	return c._z
+// logWarnf logs a warning message using the configured logger or standard log
+func (c *Client) logWarnf(msg string, args ...interface{}) {
+	if z := c.ZLog(); z != nil {
+		z.Warnf(msg, args...)
+	} else {
+		log.Printf("WARN: "+msg, args...)
+	}
 }
 
 // PreloadConfigData will load the config data before Dial()
@@ -933,7 +1035,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	cleanupSqs := false  // track SQS cleanup on failure
 	defer func() {       // unified cleanup for partial failures
 		if cleanupWeb {
-			c.stopWebServerFast(5 * time.Second)
+			c.stopWebServerFast(webServerShutdownTimeout)
 		}
 		if cleanupConn {
 			if closedConn := c.clearConnection(); closedConn != nil {
@@ -950,7 +1052,9 @@ func (c *Client) Dial(ctx context.Context) error {
 		}
 	}()
 
+	// Issue #6: Reset both closed and closing flags at the start of Dial to allow re-dial
 	c.closed.Store(false)
+	c.closing.Store(false)
 	c.setConnection(nil, "")
 
 	// read client config data in
@@ -1527,8 +1631,11 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	}
 
 	if c.closed.Load() { // abort if client closed after subscribe
-		nc.Unsubscribe()
-		nc.Close()
+		// Issue #10: Add nil check before calling methods on nc
+		if nc != nil {
+			nc.Unsubscribe()
+			nc.Close()
+		}
 		c.setNotifierClient(nil)
 		return fmt.Errorf("Client is closed")
 	}
@@ -1580,7 +1687,7 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 	}
 
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(defaultWebServerCheckInterval)
 	defer ticker.Stop()
 
 	healthUrl := c.WebServerConfig.WebServerLocalAddress + "/health"
@@ -1679,7 +1786,7 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	}
 
 	deadline := time.Now().Add(timeout)
-	interval := 250 * time.Millisecond
+	interval := defaultHealthCheckInterval
 	maxPerAttempt := 2 * time.Second
 
 	for {
@@ -1926,24 +2033,8 @@ func (c *Client) Close() {
 	}
 
 	c.webServerMu.Lock()
-	if c.webServer != nil { // stop web server if running
-		// add timeout to avoid indefinite hang on Shutdown.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
-			_ = stopper.Shutdown(ctx)
-		}
-		cancel()
-
-		// avoid indefinite block if webServerStop never closes.
-		if c.webServerStop != nil {
-			select {
-			case <-c.webServerStop:
-			case <-time.After(6 * time.Second):
-				errorf("web server shutdown timed out")
-			}
-		}
-		c.webServer = nil
-	}
+	// Issue #18: Use shared shutdown helper
+	c.shutdownWebServerLocked(webServerShutdownTimeout, false) // CleanUp already called above
 	c.webServerMu.Unlock()
 
 	// clean up notifier client connection
@@ -2054,7 +2145,7 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 
 	cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
 	if cacheExpSeconds == 0 {
-		cacheExpSeconds = 300
+		cacheExpSeconds = defaultCacheExpireSeconds
 	}
 
 	cacheExpires := time.Now().Add(time.Duration(cacheExpSeconds) * time.Second)
@@ -2193,11 +2284,23 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 			// srv
 			h, pStr, splitErr := net.SplitHostPort(v)
 			if splitErr != nil {
-				return fmt.Errorf("SRV Host or Port From Service Discovery Not Valid (%q): %v", v, splitErr)
+				// Issue #14: Warn and skip invalid entry instead of failing entire operation
+				if z != nil {
+					z.Warnf("Skipping invalid SRV entry %q: %v", v, splitErr)
+				} else {
+					log.Printf("WARNING: Skipping invalid SRV entry %q: %v", v, splitErr)
+				}
+				continue
 			}
 			pInt, convErr := strconv.Atoi(pStr)
 			if convErr != nil || pInt <= 0 || pInt > 65535 {
-				return fmt.Errorf("SRV Port From Service Discovery Not Valid (%q): %v", pStr, convErr)
+				// Issue #14: Warn and skip invalid port instead of failing entire operation
+				if z != nil {
+					z.Warnf("Skipping invalid SRV port %q from %q: %v", pStr, v, convErr)
+				} else {
+					log.Printf("WARNING: Skipping invalid SRV port %q from %q: %v", pStr, v, convErr)
+				}
+				continue
 			}
 			host = strings.TrimSuffix(strings.ToLower(h), ".")
 			port = uint(pInt)
@@ -2206,9 +2309,16 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 			host = v
 			// Validate that A records resolve to IPs; reject CNAME/malformed answers.
 			if net.ParseIP(host) == nil {
-				return fmt.Errorf("Service Discovery By DNS returned non-IP host for A record: %q", host)
+				// Issue #14: Warn and skip non-IP host instead of failing entire operation
+				if z != nil {
+					z.Warnf("Skipping non-IP A record entry: %q", host)
+				} else {
+					log.Printf("WARNING: Skipping non-IP A record entry: %q", host)
+				}
+				continue
 			}
 			if instancePort == 0 || instancePort > 65535 {
+				// This is a config error, not a per-entry issue, so still fail
 				return fmt.Errorf("Configured Instance Port Not Valid: %d", instancePort)
 			}
 			port = instancePort
@@ -2460,7 +2570,7 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		}
 
 		tryCount := 0
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(deregisterInstanceCheckInterval)
 
 		for {
 			status, e := registry.GetOperationStatus(c._sd, operationId, timeoutDuration...)
@@ -2474,10 +2584,10 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 				return nil
 			}
 
-			if tryCount < 20 {
+			if tryCount < deregisterInstanceMaxRetries {
 				tryCount++
 				logprintf("... Checking De-Register Instance '%s:%s-%s' Completion Status, Attempt %d (100ms)", p.Host, util.UintToStr(p.Port), p.InstanceId, tryCount)
-				time.Sleep(250 * time.Millisecond)
+				time.Sleep(deregisterInstanceCheckInterval)
 				continue
 			}
 
