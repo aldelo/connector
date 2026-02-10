@@ -89,8 +89,6 @@ type NotifierClient struct {
 	_subscriberID                string
 	_subscriberTopicArn          string
 	_notificationServicesStarted int32 // Use int32 for atomic operations
-
-	//_stopNotificationServices chan bool
 }
 
 // NewNotifierClient creates a new prepared notifier client for use in service discovery notification
@@ -332,7 +330,6 @@ func (n *NotifierClient) Close() {
 	}
 
 	if atomic.LoadInt32(&n._notificationServicesStarted) == 1 {
-		//n._stopNotificationServices <-true
 		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 	}
 
@@ -411,8 +408,6 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 		n.ServiceAlertStartedHandler()
 	}
 
-	//n._stopNotificationServices = make(chan bool)
-
 	n._grpcClient.ZLog().Printf("+++ Notifier Client Subscribe TopicArn Success +++")
 
 	atomic.StoreInt32(&n._notificationServicesStarted, 1)
@@ -437,21 +432,6 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 			recvMap = nil
 			err = fmt.Errorf("Notifier Client Context Done")
 			return err
-
-		/*
-			case <-n._stopNotificationServices:
-				if n.ServiceAlertStoppedHandler != nil {
-					n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
-				}
-
-				atomic.StoreInt32(&n._notificationServicesStarted, 0)
-
-				n._grpcClient.ZLog().Printf("### Notifier Client Received Stop Notification Services Signal ###")
-
-				recvMap = nil
-				err = fmt.Errorf("Notifier Client Received Stop Notification Signal")
-				return err
-		*/
 
 		default:
 			// process notification receive event
@@ -690,7 +670,6 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 
 	// first, stop notification alert services
 	if atomic.LoadInt32(&n._notificationServicesStarted) == 1 {
-		//n._stopNotificationServices <-true
 		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 	}
 

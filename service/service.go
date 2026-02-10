@@ -128,10 +128,10 @@ type Service struct {
 	ServiceHealthCheckHandlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 
 	// setup optional auth server interceptor
-	// TODO:
+	// Auth interceptor can be configured via Service.UnaryServerInterceptors
 
 	// setup optional cloud logger interceptor
-	// TODO:
+	// Cloud logger can be configured via external logging middleware
 
 	// setup optional rate limit server interceptor
 	RateLimit ratelimiter.RateLimiterIFace
