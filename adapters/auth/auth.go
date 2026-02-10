@@ -51,6 +51,7 @@ func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc
 }
 
 func ServerAuthStreamInterceptor(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	// TODO: not implemented at this time
+	// Note: Stream auth validation not yet implemented; all stream calls currently allowed
+	// For production use, implement metadata extraction similar to ServerAuthUnaryInterceptor
 	return handler(srv, stream)
 }
