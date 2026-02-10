@@ -161,6 +161,17 @@ func UnsubscribeAllTopics() {
 	}
 }
 
+// Shutdown gracefully shuts down the notifier server
+func Shutdown(ctx context.Context) error {
+	if notifierServer != nil {
+		log.Println("Shutdown Invoked")
+		return notifierServer.Shutdown(ctx)
+	} else {
+		log.Println("Shutdown Not Invoked Because notifierServer Object is Nil")
+		return nil
+	}
+}
+
 func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 	if notifierServer == nil {
 		c.String(412, "notifierServer Not Exist")

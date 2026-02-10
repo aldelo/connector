@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	util "github.com/aldelo/common"
+	"github.com/aldelo/common/wrapper/aws/awsregion"
 	data "github.com/aldelo/common/wrapper/viper"
 )
 
@@ -54,81 +55,192 @@ type hashKeyData struct {
 	HashKeySecret string `mapstructure:"hash_key_secret"`
 }
 
-func (c *Config) SetDynamoDBAwsRegion(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.dynamodb_aws_region", s)
-		c.NotifierGatewayData.DynamoDBAwsRegion = s
+func (c *Config) SetDynamoDBAwsRegion(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("AWS region cannot be empty")
+	}
+
+	// Validate it's a known AWS region
+	if awsregion.GetAwsRegion(s) == awsregion.UNKNOWN {
+		return fmt.Errorf("invalid AWS region provided")
+	}
+
+	c._v.Set("notifier_gateway.dynamodb_aws_region", s)
+	c.NotifierGatewayData.DynamoDBAwsRegion = s
+	return nil
 }
 
-func (c *Config) SetDynamoDBUseDax(b bool) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.dynamodb_use_dax", b)
-		c.NotifierGatewayData.DynamoDBUseDax = b
+func (c *Config) SetDynamoDBUseDax(b bool) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c._v.Set("notifier_gateway.dynamodb_use_dax", b)
+	c.NotifierGatewayData.DynamoDBUseDax = b
+	return nil
 }
 
-func (c *Config) SetDynamoDBDaxUrl(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.dynamodb_dax_url", s)
-		c.NotifierGatewayData.DynamoDBDaxUrl = s
+func (c *Config) SetDynamoDBDaxUrl(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	s = strings.TrimSpace(s)
+	// DAX URL can be empty if not using DAX, but if provided should be validated
+
+	c._v.Set("notifier_gateway.dynamodb_dax_url", s)
+	c.NotifierGatewayData.DynamoDBDaxUrl = s
+	return nil
 }
 
-func (c *Config) SetDynamoDBTable(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.dynamodb_table", s)
-		c.NotifierGatewayData.DynamoDBTable = s
+func (c *Config) SetDynamoDBTable(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("DynamoDB table name cannot be empty")
+	}
+
+	c._v.Set("notifier_gateway.dynamodb_table", s)
+	c.NotifierGatewayData.DynamoDBTable = s
+	return nil
 }
 
-func (c *Config) SetDynamoDBTimeoutSeconds(i uint) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.dynamodb_timeout_seconds", i)
-		c.NotifierGatewayData.DynamoDBTimeoutSeconds = i
+func (c *Config) SetDynamoDBTimeoutSeconds(i uint) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	if i == 0 {
+		return fmt.Errorf("DynamoDB timeout must be greater than 0")
+	}
+
+	c._v.Set("notifier_gateway.dynamodb_timeout_seconds", i)
+	c.NotifierGatewayData.DynamoDBTimeoutSeconds = i
+	return nil
 }
 
-func (c *Config) SetDynamoDBActionRetries(i uint) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.dynamodb_action_retries", i)
-		c.NotifierGatewayData.DynamoDBActionRetries = i
+func (c *Config) SetDynamoDBActionRetries(i uint) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	// Action retries can be 0, meaning no retries
+
+	c._v.Set("notifier_gateway.dynamodb_action_retries", i)
+	c.NotifierGatewayData.DynamoDBActionRetries = i
+	return nil
 }
 
-func (c *Config) SetGatewayKey(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.gateway_key", s)
-		c.NotifierGatewayData.GatewayKey = s
+func (c *Config) SetGatewayKey(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	s = strings.TrimSpace(s)
+	// Gateway key can be empty if not using authentication
+
+	c._v.Set("notifier_gateway.gateway_key", s)
+	c.NotifierGatewayData.GatewayKey = s
+	return nil
 }
 
-func (c *Config) SetServiceDiscoveryTimeoutSeconds(i uint) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.service_discovery_timeout_seconds", i)
-		c.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds = i
+func (c *Config) SetServiceDiscoveryTimeoutSeconds(i uint) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	if i == 0 {
+		return fmt.Errorf("service discovery timeout must be greater than 0")
+	}
+
+	c._v.Set("notifier_gateway.service_discovery_timeout_seconds", i)
+	c.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds = i
+	return nil
 }
 
-func (c *Config) SetHealthReportCleanUpFrequencySeconds(i uint) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.health_report_cleanup_frequency_seconds", i)
-		c.NotifierGatewayData.HealthReportCleanUpFrequencySeconds = i
+func (c *Config) SetHealthReportCleanUpFrequencySeconds(i uint) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	// Frequency can be 0, will use default value
+
+	c._v.Set("notifier_gateway.health_report_cleanup_frequency_seconds", i)
+	c.NotifierGatewayData.HealthReportCleanUpFrequencySeconds = i
+	return nil
 }
 
-func (c *Config) SetHealthReportRecordStaleMinutes(i uint) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.health_report_record_stale_minutes", i)
-		c.NotifierGatewayData.HealthReportRecordStaleMinutes = i
+func (c *Config) SetHealthReportRecordStaleMinutes(i uint) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	// Stale minutes can be 0, will use default value
+
+	c._v.Set("notifier_gateway.health_report_record_stale_minutes", i)
+	c.NotifierGatewayData.HealthReportRecordStaleMinutes = i
+	return nil
 }
 
-func (c *Config) SetHashKeys(hk ...hashKeyData) {
-	if c._v != nil {
-		c._v.Set("notifier_gateway.hash_keys", hk)
-		c.NotifierGatewayData.HashKeys = hk
+func (c *Config) SetHashKeys(hk ...hashKeyData) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	// Validate hash keys
+	for _, key := range hk {
+		if strings.TrimSpace(key.HashKeyName) == "" {
+			return fmt.Errorf("hash key name cannot be empty")
+		}
+		if strings.TrimSpace(key.HashKeySecret) == "" {
+			return fmt.Errorf("hash key secret cannot be empty for key: %s", key.HashKeyName)
+		}
+	}
+
+	c._v.Set("notifier_gateway.hash_keys", hk)
+	c.NotifierGatewayData.HashKeys = hk
+	return nil
 }
 
 // Read will load config settings from disk

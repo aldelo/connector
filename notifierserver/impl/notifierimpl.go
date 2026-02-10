@@ -36,11 +36,53 @@ import (
 // ---------------------------------------------------------------------------------------------------------------------
 // define clientEndpoint and clientEndpointMap
 // ---------------------------------------------------------------------------------------------------------------------
+
+const (
+	dataChannelBufferSize  = 100             // Buffer size for client data channels
+	dataChannelSendTimeout = 2 * time.Second // Timeout for sending to client channels
+)
+
 type clientEndpoint struct {
 	ClientId      string                    // required, typically custom created guid or other unique id value, used during unsubscribe
 	TopicArn      string                    // required
 	DataToSend    chan *pb.NotificationData // this field will be initialized by clientEndpointMap.Add (No need to init outside)
 	ClientContext context.Context           // this field should be setup by code outside of clientEndpointMap
+	closed        bool                      // internal flag to track if channel is closed
+	closeMux      sync.Mutex                // protects closed flag
+}
+
+// safeClose safely closes the DataToSend channel if not already closed
+func (ep *clientEndpoint) safeClose() {
+	if ep == nil {
+		return
+	}
+	ep.closeMux.Lock()
+	defer ep.closeMux.Unlock()
+	if !ep.closed && ep.DataToSend != nil {
+		close(ep.DataToSend)
+		ep.closed = true
+	}
+}
+
+// safeSend safely sends data to the channel if not closed
+func (ep *clientEndpoint) safeSend(data *pb.NotificationData, timeout time.Duration) bool {
+	if ep == nil {
+		return false
+	}
+	ep.closeMux.Lock()
+	if ep.closed {
+		ep.closeMux.Unlock()
+		return false
+	}
+	ch := ep.DataToSend
+	ep.closeMux.Unlock()
+
+	select {
+	case ch <- data:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 type clientEndpointMap struct {
@@ -68,7 +110,7 @@ func (m *clientEndpointMap) Add(ep *clientEndpoint) bool {
 		m.Clients = make(map[string][]*clientEndpoint)
 	}
 
-	ep.DataToSend = make(chan *pb.NotificationData, 1)
+	ep.DataToSend = make(chan *pb.NotificationData, dataChannelBufferSize)
 
 	epList := m.Clients[ep.TopicArn]
 	epList = append(epList, ep)
@@ -103,7 +145,7 @@ func (m *clientEndpointMap) RemoveByClientId(clientId string) bool {
 
 	for topicArn, epList := range m.Clients {
 		for epIndex, ep := range epList {
-			if ep != nil && strings.ToUpper(ep.ClientId) == strings.ToUpper(clientId) {
+			if ep != nil && strings.EqualFold(ep.ClientId, clientId) {
 				// found match
 				epListToRemove = epList
 				epIndexToRemove = epIndex
@@ -120,6 +162,12 @@ func (m *clientEndpointMap) RemoveByClientId(clientId string) bool {
 
 	// perform remove action
 	if len(epListToRemove) > 0 && util.LenTrim(topicArnToRemove) > 0 && epIndexToRemove >= 0 {
+		// Close the channel before removing to prevent goroutine leaks
+		ep := epListToRemove[epIndexToRemove]
+		if ep != nil {
+			ep.safeClose()
+		}
+
 		// continue to remove
 		if resultSlice := util.SliceDeleteElement(epListToRemove, epIndexToRemove); resultSlice != nil {
 			if l, ok := resultSlice.([]*clientEndpoint); ok {
@@ -156,6 +204,15 @@ func (m *clientEndpointMap) RemoveByTopicArn(topicArn string) bool {
 		return false
 	}
 
+	// Close all channels for this topic before removing
+	if epList, exists := m.Clients[topicArn]; exists {
+		for _, ep := range epList {
+			if ep != nil {
+				ep.safeClose()
+			}
+		}
+	}
+
 	delete(m.Clients, topicArn)
 
 	return true
@@ -181,7 +238,7 @@ func (m *clientEndpointMap) GetByClientId(clientId string) *clientEndpoint {
 
 	for _, epList := range m.Clients {
 		for _, ep := range epList {
-			if ep != nil && strings.ToUpper(ep.ClientId) == strings.ToUpper(clientId) {
+			if ep != nil && strings.EqualFold(ep.ClientId, clientId) {
 				// found match
 				return ep
 			}
@@ -204,7 +261,7 @@ func (m *clientEndpointMap) GetByTopicArn(topicArn string) []*clientEndpoint {
 	}
 
 	for t, epList := range m.Clients {
-		if strings.ToUpper(t) == strings.ToUpper(topicArn) {
+		if strings.EqualFold(t, topicArn) {
 			return epList
 		}
 	}
@@ -242,6 +299,9 @@ func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend 
 		return false
 	}
 
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return false
 	}
@@ -251,6 +311,9 @@ func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend 
 	} else {
 		return false
 	}
+
+	// Use safeSend which releases the closeMux before the channel operation
+	return targetEp.safeSend(dataToSend, dataChannelSendTimeout)
 }
 
 func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend *pb.NotificationData) bool {
@@ -333,7 +396,7 @@ func (m *clientEndpointMap) ClientsByTopicCount(topicArn string) int {
 	}
 
 	for t, epList := range m.Clients {
-		if strings.ToUpper(t) == strings.ToUpper(topicArn) && epList != nil {
+		if strings.EqualFold(t, topicArn) && epList != nil {
 			return len(epList)
 		}
 	}
@@ -443,7 +506,7 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 	} else {
 		// unsubscribe specific sns topic
 		for _, v := range n.ConfigData.SubscriptionsData {
-			if util.LenTrim(v.SubscriptionArn) > 0 && strings.ToUpper(v.TopicArn) == strings.ToUpper(topicArnToUnsubscribe) {
+			if util.LenTrim(v.SubscriptionArn) > 0 && strings.EqualFold(v.TopicArn, topicArnToUnsubscribe) {
 				_ = notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout)
 			}
 		}
@@ -655,7 +718,7 @@ func (n *NotifierImpl) Unsubscribe(c context.Context, s *pb.NotificationSubscrib
 			removeTopic := false
 
 			for _, v := range n.ConfigData.SubscriptionsData {
-				if v != nil && strings.ToLower(v.TopicArn) == strings.ToLower(s.Topic) && util.LenTrim(v.SubscriptionArn) > 0 {
+				if v != nil && strings.EqualFold(v.TopicArn, s.Topic) && util.LenTrim(v.SubscriptionArn) > 0 {
 					if err := notification.Unsubscribe(n._sns, v.SubscriptionArn, 5*time.Second); err != nil {
 						log.Printf("!!! RPC Unsubscribe SNS Topic '%s' Failed: %s !!!\n", s.Topic, err)
 					} else {
@@ -735,4 +798,31 @@ func (n *NotifierImpl) UpdateSubscriptionArnToTopic(topicArn string, subscriptio
 	} else {
 		return nil
 	}
+}
+
+// Shutdown gracefully shuts down the notifier server
+// It closes all client connections, removes server route from DynamoDB, and disconnects from DynamoDB
+func (n *NotifierImpl) Shutdown(ctx context.Context) error {
+	log.Println("=== Notifier Server Shutdown Started ===")
+
+	if n == nil {
+		return fmt.Errorf("NotifierImpl receiver is nil")
+	}
+
+	// 1. Close all client channels gracefully using RemoveAll
+	if n._clients != nil {
+		log.Println("--- Closing all client channels ---")
+		n._clients.RemoveAll()
+	}
+
+	// 2. Remove server route from DynamoDB
+	if n.ConfigData != nil && util.LenTrim(n.ConfigData.NotifierServerData.ServerKey) > 0 {
+		log.Println("--- Removing server route from DynamoDB ---")
+		if err := n.deleteServerRouteFromDataStore(n.ConfigData.NotifierServerData.ServerKey); err != nil {
+			log.Printf("Warning: failed to remove server route: %v", err)
+		}
+	}
+
+	log.Println("=== Notifier Server Shutdown Completed ===")
+	return nil
 }

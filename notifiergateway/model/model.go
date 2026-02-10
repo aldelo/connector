@@ -226,8 +226,8 @@ func GetServerRouteFromDataStore(serverKey string) (serverUrl string, err error)
 		return "", fmt.Errorf("Get Server Routing From Data Store Failed: Server Key is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
-	sk := fmt.Sprintf("ServerKey^%s", serverKey)
+	pk := fmt.Sprintf(pkPattern, pkPrefix, pkService)
+	sk := fmt.Sprintf(skPattern, serverKey)
 
 	routeInfo := new(serverRoute)
 
@@ -247,8 +247,8 @@ func DeleteServerRouteFromDataStore(serverKey string) error {
 		return fmt.Errorf("Delete Server Routing From Data Store Failed: Server Key is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
-	sk := fmt.Sprintf("ServerKey^%s", serverKey)
+	pk := fmt.Sprintf(pkPattern, pkPrefix, pkService)
+	sk := fmt.Sprintf(skPattern, serverKey)
 
 	if err := _ddbStore.DeleteItemWithRetry(_ddbActionRetries, pk, sk, _ddbStore.TimeOutDuration(_ddbTimeoutSeconds)); err != nil {
 		return fmt.Errorf("Delete Server Routing From Data Store Failed: %s", err)
@@ -266,8 +266,8 @@ func GetInstanceHealthFromDataStore(instanceId string) (lastHealthy string, err 
 		return "", fmt.Errorf("Get Instance Health From Data Store Failed: InstanceId is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
-	sk := fmt.Sprintf("InstanceID^%s", instanceId)
+	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
+	sk := fmt.Sprintf(skHealthPattern, instanceId)
 
 	statusInfo := new(healthStatus)
 
@@ -309,8 +309,8 @@ func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instance
 		return fmt.Errorf("Set Instance Health To Data Store Failed: HostInfo is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
-	sk := fmt.Sprintf("InstanceID^%s", instanceId)
+	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
+	sk := fmt.Sprintf(skHealthPattern, instanceId)
 	timeNowUTC := time.Now().UTC()
 
 	statusInfo := &healthStatus{
@@ -364,7 +364,7 @@ func ListInactiveInstancesFromDataStore() (inactiveInstances []*healthStatus, er
 		return []*healthStatus{}, fmt.Errorf("List Inactive Instances From Data Store Failed: %s", err)
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
+	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
 
 	staleMinutes := GetHealthReportRecordStaleMinutes()
 
