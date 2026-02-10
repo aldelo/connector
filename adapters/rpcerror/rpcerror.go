@@ -84,7 +84,8 @@ func (d RpcErrorDetails) list() (lst []proto.Message) {
 func sliceToProto[T proto.Message](in []T) []proto.Message { // use proto.Message
 	out := make([]proto.Message, 0, len(in))
 	for _, v := range in {
-		if v != nil {
+		// Convert to any first to allow nil check, then back to proto.Message
+		if any(v) != nil {
 			out = append(out, v)
 		}
 	}

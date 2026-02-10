@@ -221,16 +221,6 @@ func (m *clientEndpointMap) RemoveByTopicArn(topicArn string) bool {
 func (m *clientEndpointMap) RemoveAll() {
 	m._mux.Lock()
 	defer m._mux.Unlock()
-
-	// Close all channels before clearing
-	for _, epList := range m.Clients {
-		for _, ep := range epList {
-			if ep != nil {
-				ep.safeClose()
-			}
-		}
-	}
-
 	m.Clients = make(map[string][]*clientEndpoint)
 }
 
@@ -279,6 +269,27 @@ func (m *clientEndpointMap) GetByTopicArn(topicArn string) []*clientEndpoint {
 	return []*clientEndpoint{}
 }
 
+// safeSend safely sends data to a client endpoint's channel with panic recovery
+func (m *clientEndpointMap) safeSend(ep *clientEndpoint, data *pb.NotificationData) (sent bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			sent = false
+			log.Printf("Recovered from send on closed channel: %v", r)
+		}
+	}()
+
+	if ep == nil || ep.DataToSend == nil {
+		return false
+	}
+
+	select {
+	case ep.DataToSend <- data:
+		return true
+	case <-time.After(2 * time.Second):
+		return false // timeout waiting for channel to accept data
+	}
+}
+
 func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend *pb.NotificationData) bool {
 	if util.LenTrim(clientId) == 0 {
 		return false
@@ -295,21 +306,9 @@ func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend 
 		return false
 	}
 
-	// Find the endpoint
-	var targetEp *clientEndpoint
-	for _, epList := range m.Clients {
-		for _, ep := range epList {
-			if ep != nil && strings.EqualFold(ep.ClientId, clientId) {
-				targetEp = ep
-				break
-			}
-		}
-		if targetEp != nil {
-			break
-		}
-	}
-
-	if targetEp == nil {
+	if ep := m.GetByClientId(clientId); ep != nil {
+		return m.safeSend(ep, dataToSend)
+	} else {
 		return false
 	}
 
@@ -341,10 +340,10 @@ func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend 
 		for _, ep := range epList {
 			if ep != nil {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - Before <-dataToSend Assign to ep.DataToSend")
-				if ep.safeSend(dataToSend, dataChannelSendTimeout) {
+				if m.safeSend(ep, dataToSend) {
 					log.Println("Trace: SetDataSendByTopicArn (Loop) - After <-dataToSend Assign to ep.DataToSend")
 				} else {
-					log.Println("Trace: SetDataSendByTopicArn (Loop) - timeout on <-dataToSend Assign to ep.DataToSend")
+					log.Println("Trace: SetDataSendByTopicArn (Loop) - Failed to send data (timeout or closed channel)")
 				}
 			} else {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - ep Nil")
@@ -391,10 +390,6 @@ func (m *clientEndpointMap) TopicsCount() int {
 func (m *clientEndpointMap) ClientsByTopicCount(topicArn string) int {
 	m._mux.Lock()
 	defer m._mux.Unlock()
-
-	if m.Clients == nil {
-		return 0
-	}
 
 	if m.Clients == nil {
 		return 0
@@ -639,9 +634,7 @@ func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.N
 		ClientContext: serverStream.Context(),
 	}
 
-	n._clients._mux.Lock()
 	n._clients.Add(ep)
-	n._clients._mux.Unlock()
 
 	//
 	// start loop for pushing received data to client via server stream
@@ -681,11 +674,7 @@ func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.N
 
 	// at this point, loop ended, we will clean up the client endpoint as the end of the service cycle
 	log.Println("### Notifier Server RPC Subscribe Send Loop Ending, Cleaning Up Client ID '" + ep.ClientId + "' ###")
-	func() {
-		n._clients._mux.Lock()
-		defer n._clients._mux.Unlock()
-		n._clients.RemoveByClientId(ep.ClientId)
-	}()
+	n._clients.RemoveByClientId(ep.ClientId)
 	log.Println("### Notifier Server RPC Subscriber Send Loop Ended ###")
 
 	return nil
@@ -708,9 +697,6 @@ func (n *NotifierImpl) Unsubscribe(c context.Context, s *pb.NotificationSubscrib
 	}
 
 	// find client endpoint for the given subscriber to unsubscribe
-	n._clients._mux.Lock()
-	defer n._clients._mux.Unlock()
-
 	if ep := n._clients.GetByClientId(s.Id); ep != nil {
 		// stop the client endpoint loop service
 		_, cancel := context.WithCancel(ep.ClientContext)
@@ -774,9 +760,6 @@ func (n *NotifierImpl) Broadcast(c context.Context, d *pb.NotificationData) (r *
 		return &pb.NotificationDone{}, fmt.Errorf("RPC Broadcast Requires Client Endpoints")
 	}
 
-	n._clients._mux.Lock()
-	defer n._clients._mux.Unlock()
-
 	if epList := n._clients.GetByTopicArn(d.Topic); len(epList) > 0 {
 		if n._clients.SetDataToSendByTopicArn(d.Topic, d) {
 			// set data to topic clients successful
@@ -785,12 +768,12 @@ func (n *NotifierImpl) Broadcast(c context.Context, d *pb.NotificationData) (r *
 		} else {
 			// set data to topic clients failed
 			log.Println("!!! Notifier Server RPC Broadcast Set Notification Data To Client Endpoints By TopicArn '" + d.Topic + "': Failed !!!")
-			return &pb.NotificationDone{}, fmt.Errorf("RPC Broadcast Set Notification Data To Client Endpoints By TopicArn '%s' Failed", d.Topic)
+			return &pb.NotificationDone{}, fmt.Errorf("RPC broadcast set notification data to client endpoints by TopicArn '%s' failed", d.Topic)
 		}
 	} else {
 		// no client endpoints by topicArn
 		log.Println("### Notifier Server RPC Broadcast Found Zero Client Endpoints By TopicArn '" + d.Topic + "' ###")
-		return &pb.NotificationDone{}, fmt.Errorf("RPC Broadcast Found Zero Client Endpoints By TopicArn '%s'", d.Topic)
+		return &pb.NotificationDone{}, fmt.Errorf("RPC broadcast found zero client endpoints by TopicArn '%s'", d.Topic)
 	}
 }
 
@@ -811,7 +794,7 @@ func (n *NotifierImpl) UpdateSubscriptionArnToTopic(topicArn string, subscriptio
 	n.ConfigData.SetSubscriptionData(topicArn, subscriptionArn)
 
 	if err := n.ConfigData.Save(); err != nil {
-		return fmt.Errorf("SNS Update SubscriptionArn Persist To Config Failed: %w", err)
+		return fmt.Errorf("SNS update subscriptionArn persist to config failed: %w", err)
 	} else {
 		return nil
 	}

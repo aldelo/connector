@@ -19,6 +19,7 @@ package plugins
 import (
 	"context"
 	"fmt"
+	"log"
 
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/hystrixgo"
@@ -252,7 +253,15 @@ func (p *HystrixGoPlugin) Disable(b bool) {
 	defer p.mu.Unlock()
 
 	hystrixGo := p.HystrixGo
-	if hystrixGo != nil {
-		hystrixGo.DisableCircuitBreaker = b
+	if hystrixGo == nil {
+		log.Printf("Warning: Cannot disable circuit breaker - HystrixGo is nil")
+		return
+	}
+
+	hystrixGo.DisableCircuitBreaker = b
+	if b {
+		log.Printf("Circuit breaker %s disabled", hystrixGo.CommandName)
+	} else {
+		log.Printf("Circuit breaker %s enabled", hystrixGo.CommandName)
 	}
 }

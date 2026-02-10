@@ -409,7 +409,7 @@ func SendMessage(q *sqs.SQS, queueUrl string, messageBody string, messageAttribu
 
 	if result, err := q.SendMessage(queueUrl, messageBody, messageAttributes, 0, timeoutDuration...); err != nil {
 		// send message error
-		return "", fmt.Errorf("SendMessage Failed: " + err.Error())
+		return "", fmt.Errorf("send message failed: %w", err)
 	} else {
 		// send message successful
 		return result.MessageId, nil
@@ -478,7 +478,7 @@ func ReceiveMessages(q *sqs.SQS, queueUrl string, messageAttributeFilters []stri
 	if list, err := q.ReceiveMessage(queueUrl, 10, messageAttributeFilters,
 		nil, 0, 0, "", timeoutDuration...); err != nil {
 		// error
-		return []*sqs.SQSReceivedMessage{}, fmt.Errorf("ReceiveMessage Failed: " + err.Error())
+		return []*sqs.SQSReceivedMessage{}, fmt.Errorf("receive message failed: %w", err)
 	} else {
 		// success
 		return list, nil

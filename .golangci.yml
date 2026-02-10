@@ -1,0 +1,46 @@
+version: 2
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - unconvert
+    - gosec
+
+linters-settings:
+  govet:
+    enable:
+      - assign
+      - atomic
+      - bools
+      - composites
+      - copylocks
+      - errorsas
+      - printf
+      - stdmethods
+      - tests
+      - unmarshal
+      - unreachable
+  gosec:
+    excludes:
+      - G104  # Errors unhandled - covered by errcheck
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+    - path: example/
+      linters:
+        - errcheck
+        - gosec

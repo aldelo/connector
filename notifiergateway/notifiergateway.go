@@ -128,7 +128,10 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	}
 
 	// setup gateway server
-	gatewayServer := webserver.NewWebServer(appName, configFileNameWebServer, customConfigPath)
+	gatewayServer, err := webserver.NewWebServer(appName, configFileNameWebServer, customConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("Notifier Gateway Web Server Failed: %s", err)
+	}
 
 	gatewayServer.Routes = map[string]*ginw.RouteDefinition{
 		"base": {
@@ -169,9 +172,13 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	return gatewayServer, nil
 }
 
-// escapeUserInput replaces \n and \r with blank to mitigate log-injection vulnerability
+// escapeUserInput replaces control characters (newlines, carriage returns, tabs) with spaces to mitigate log-injection vulnerability
 func escapeUserInput(data string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(data, "\n", ""), "\r", "")
+	// Remove newlines, carriage returns, and other common log injection characters
+	result := strings.ReplaceAll(data, "\n", " ")
+	result = strings.ReplaceAll(result, "\r", " ")
+	result = strings.ReplaceAll(result, "\t", " ")
+	return result
 }
 
 // healthreporter handles client reporting to host health status of the client,
@@ -1024,7 +1031,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 
 	if operationId, err := registry.DeregisterInstance(sd, instanceId, serviceId, timeoutDuration); err != nil {
 		log.Println("!!! Service Discovery De-Register Instance '" + instanceId + "' Failed: (Initial Deregister Action) " + err.Error() + " !!!")
-		return fmt.Errorf("Service Discovery De-Register Instance '%s' Fail: %w", instanceId, err)
+		return fmt.Errorf("service discovery de-register instance '%s' fail: %w", instanceId, err)
 	} else {
 		tryCount := 0
 
@@ -1033,7 +1040,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 		for {
 			if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration); e != nil {
 				log.Println("!!! Service Discovery De-Register Instance '" + instanceId + "' Failed: (Deregister GetOperationStatus Action) " + e.Error() + " !!!")
-				return fmt.Errorf("Service Discovery De-Register Instance '%s' Fail: %w", instanceId, e)
+				return fmt.Errorf("service discovery de-register instance '%s' fail: %w", instanceId, e)
 			} else {
 				if status == sdoperationstatus.Success {
 					log.Println("$$$ Service Discovery De-Register Instance '" + instanceId + "' OK $$$")
@@ -1046,7 +1053,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 						time.Sleep(250 * time.Millisecond)
 					} else {
 						log.Println("... De-Register Instance '" + instanceId + "' Failed: Operation Timeout After 5 Seconds")
-						return fmt.Errorf("Service Discovery De-register Instance '%s' Fail When Operation Timed Out After 5 Seconds", instanceId)
+						return fmt.Errorf("service discovery de-register instance '%s' fail when operation timed out after 5 seconds", instanceId)
 					}
 				}
 			}

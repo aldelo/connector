@@ -608,7 +608,7 @@ func (c *config) Read() error {
 	} else {
 		if !ok {
 			if e := c._v.Save(); e != nil {
-				return fmt.Errorf("Create Config File Failed: " + e.Error())
+				return fmt.Errorf("create config file failed: %w", e)
 			}
 		} else {
 			c._v.WatchConfig()
@@ -617,6 +617,14 @@ func (c *config) Read() error {
 
 	if err := c._v.Unmarshal(c); err != nil {
 		return err
+	}
+
+	// Validate port is within valid range
+	if c.WebServer.Port == 0 {
+		c.WebServer.Port = 8080 // default
+	}
+	if c.WebServer.Port < 1 || c.WebServer.Port > 65535 {
+		return fmt.Errorf("WebServer port %d is invalid (must be between 1-65535)", c.WebServer.Port)
 	}
 
 	return nil

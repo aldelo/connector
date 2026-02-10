@@ -26,7 +26,7 @@ import (
 )
 
 type Cache struct {
-	ServiceEndpoints map[string][]*serviceEndpoint
+	serviceEndpoints map[string][]*serviceEndpoint
 
 	DisableLogging bool
 	_mu            sync.Mutex
@@ -35,6 +35,36 @@ type Cache struct {
 // normalize service names consistently across all cache operations
 func normalizeServiceName(name string) string {
 	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(name)), " "))
+}
+
+// GetServiceEndpoints returns a deep copy of endpoints for the given service
+func (c *Cache) GetServiceEndpoints(serviceName string) []*serviceEndpoint {
+	if c == nil {
+		return nil
+	}
+
+	c._mu.Lock()
+	defer c._mu.Unlock()
+
+	serviceName = normalizeServiceName(serviceName)
+	if serviceName == "" {
+		return nil
+	}
+
+	eps, ok := c.serviceEndpoints[serviceName]
+	if !ok || len(eps) == 0 {
+		return nil
+	}
+
+	// Deep copy to prevent race conditions
+	result := make([]*serviceEndpoint, 0, len(eps))
+	for _, ep := range eps {
+		if ep != nil {
+			copied := *ep
+			result = append(result, &copied)
+		}
+	}
+	return result
 }
 
 // AddServiceEndpoints will append slice of service endpoints associated with the given serviceName within map
@@ -80,8 +110,8 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	c._mu.Lock()
 	defer c._mu.Unlock()
 
-	if c.ServiceEndpoints == nil {
-		c.ServiceEndpoints = make(map[string][]*serviceEndpoint)
+	if c.serviceEndpoints == nil {
+		c.serviceEndpoints = make(map[string][]*serviceEndpoint)
 	}
 
 	// shared key builder with normalized host/version
@@ -101,7 +131,7 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	seen := make(map[string]int)
 	merged := make([]*serviceEndpoint, 0)
 
-	if list, ok := c.ServiceEndpoints[serviceName]; ok {
+	if list, ok := c.serviceEndpoints[serviceName]; ok {
 		for _, v := range list {
 			if v == nil { // drop nil existing entries
 				continue
@@ -145,7 +175,7 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 		merged = append(merged, v)
 	}
 
-	c.ServiceEndpoints[serviceName] = merged
+	c.serviceEndpoints[serviceName] = merged
 }
 
 // PurgeServiceEndpoints will remove all endpoints associated with the given serviceName within map
@@ -163,7 +193,7 @@ func (c *Cache) PurgeServiceEndpoints(serviceName string) {
 	c._mu.Lock()
 	defer c._mu.Unlock()
 
-	if c.ServiceEndpoints == nil {
+	if c.serviceEndpoints == nil {
 		return
 	}
 
@@ -175,7 +205,7 @@ func (c *Cache) PurgeServiceEndpoints(serviceName string) {
 		log.Println("Cached Service Endpoints Purged for " + serviceName)
 	}
 
-	delete(c.ServiceEndpoints, serviceName)
+	delete(c.serviceEndpoints, serviceName)
 }
 
 // PurgeServiceEndpointByHostAndPort will remove a specific endpoint for a service based on host and port info
@@ -213,7 +243,7 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 		log.Println("Cached Service Endpoint Purging " + hostNormalized + ":" + util.UintToStr(port) + " From " + serviceName + "...")
 	}
 
-	eps, ok := c.ServiceEndpoints[serviceName]
+	eps, ok := c.serviceEndpoints[serviceName]
 
 	if !ok {
 		// no service endpoints found for service name
@@ -243,9 +273,9 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 
 	if found {
 		if len(newEps) == 0 {
-			delete(c.ServiceEndpoints, serviceName)
+			delete(c.serviceEndpoints, serviceName)
 		} else {
-			c.ServiceEndpoints[serviceName] = newEps
+			c.serviceEndpoints[serviceName] = newEps
 		}
 
 		if !c.DisableLogging {
@@ -282,11 +312,11 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 	c._mu.Lock()
 	defer c._mu.Unlock()
 
-	if c.ServiceEndpoints == nil {
+	if c.serviceEndpoints == nil {
 		return []*serviceEndpoint{}
 	}
 
-	eps, ok := c.ServiceEndpoints[serviceName]
+	eps, ok := c.serviceEndpoints[serviceName]
 	if !ok || len(eps) == 0 {
 		if !c.DisableLogging {
 			log.Println("Get Live Service Endpoints for " + serviceName + ", version '" + versionNormalized + "': " + "None Found")
@@ -356,9 +386,9 @@ func (c *Cache) GetLiveServiceEndpoints(serviceName string, version string, igno
 		}
 
 		if len(newEps) == 0 { // drop empty slice to avoid stale map entries
-			delete(c.ServiceEndpoints, serviceName)
+			delete(c.serviceEndpoints, serviceName)
 		} else {
-			c.ServiceEndpoints[serviceName] = newEps
+			c.serviceEndpoints[serviceName] = newEps
 		}
 	}
 
