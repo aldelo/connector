@@ -116,14 +116,15 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	if err := model.ConnectDataStore(cfg); err != nil {
 		return nil, fmt.Errorf("Connect Notifier Gateway Data Store Failed: %s", err.Error())
 	} else {
-		model.DynamoDBActionRetryAttempts = cfg.NotifierGatewayData.DynamoDBActionRetries
-		model.GatewayKey = cfg.NotifierGatewayData.GatewayKey
+		model.SetDynamoDBActionRetryAttempts(cfg.NotifierGatewayData.DynamoDBActionRetries)
+		model.SetGatewayKey(cfg.NotifierGatewayData.GatewayKey)
 
-		model.HashKeys = make(map[string]string)
+		hashKeysMap := make(map[string]string)
 
 		for _, v := range cfg.NotifierGatewayData.HashKeys {
-			model.HashKeys[v.HashKeyName] = v.HashKeySecret
+			hashKeysMap[v.HashKeyName] = v.HashKeySecret
 		}
+		model.SetHashKeys(hashKeysMap)
 	}
 
 	// setup gateway server
@@ -230,13 +231,14 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	if len(model.HashKeys) == 0 {
+	if model.GetHashKeysCount() == 0 {
 		log.Println("!!! Internal Server Config Error, Missing Hash Keys !!!")
 		c.String(500, "Internal Server Config Error, Missing Hash Keys")
 		return
 	}
 
-	if hashSecret, hsFound := model.HashKeys[data.HashKeyName]; !hsFound || util.LenTrim(hashSecret) == 0 {
+	hashSecret, hsFound := model.GetHashKey(data.HashKeyName)
+	if !hsFound || util.LenTrim(hashSecret) == 0 {
 		log.Println("!!! Inbound Health Report Hash Key Name '" + data.HashKeyName + "' From " + escapeUserInput(c.ClientIP()) + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
 		c.String(401, "Inbound Health Report Hash Key Name '"+data.HashKeyName+"' Not Valid")
 		return
@@ -330,13 +332,14 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	if len(model.HashKeys) == 0 {
+	if model.GetHashKeysCount() == 0 {
 		log.Println("!!! Internal Server Config Error, Missing Hash Keys !!!")
 		c.String(500, "Internal Server Config Error, Missing Hash Keys")
 		return
 	}
 
-	if hashSecret, hsFound := model.HashKeys[hashKeyName]; !hsFound || util.LenTrim(hashSecret) == 0 {
+	hashSecret, hsFound := model.GetHashKey(hashKeyName)
+	if !hsFound || util.LenTrim(hashSecret) == 0 {
 		log.Println("!!! Delete Health Report Service Record Request's Hash Key Name '" + hashKeyName + "' From " + escapeUserInput(c.ClientIP()) + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
 		c.String(401, "Delete Health Report Service Record Request's Hash Key Name '"+hashKeyName+"' Not Valid")
 		return
@@ -401,14 +404,14 @@ func callerid(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	if util.LenTrim(model.GatewayKey) == 0 {
+	if util.LenTrim(model.GetGatewayKey()) == 0 {
 		c.String(500, "Internal Server Config Error, Missing nts-gateway Key")
 		return
 	}
 
 	// validate inbound request
 	if token := c.GetHeader("x-nts-gateway-token"); util.LenTrim(token) > 0 {
-		key := crypto.Sha256(util.FormatDate(time.Now().UTC()), model.GatewayKey)
+		key := crypto.Sha256(util.FormatDate(time.Now().UTC()), model.GetGatewayKey())
 
 		if token == key {
 			// match
@@ -848,7 +851,7 @@ var sdMap map[string]*cloudmap.CloudMap
 
 // RunStaleHealthReportRecordsRemoverService starts a go-routine and runs loop to continuously clean up stale records
 func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
-	freq := model.HealthReportCleanUpFrequencySeconds
+	freq := model.GetHealthReportCleanUpFrequencySeconds()
 
 	if freq == 0 {
 		freq = 120
@@ -1013,7 +1016,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 
 	log.Println("Service Discovery De-Register Instance '" + instanceId + "' Begin...")
 
-	timeoutDuration := time.Duration(model.ServiceDiscoveryTimeoutSeconds) * time.Second
+	timeoutDuration := time.Duration(model.GetServiceDiscoveryTimeoutSeconds()) * time.Second
 
 	if timeoutDuration < 5*time.Second {
 		timeoutDuration = 5 * time.Second

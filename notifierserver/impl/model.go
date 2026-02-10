@@ -2,11 +2,19 @@ package impl
 
 import (
 	"fmt"
+	"net/url"
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/aws/awsregion"
 	"github.com/aldelo/common/wrapper/dynamodb"
 	"strings"
 	"time"
+)
+
+const (
+	pkPrefix       = "corems"
+	pkService      = "notifier-server"
+	pkPattern      = "%s#%s#service#discovery#host#target"
+	skPattern      = "ServerKey^%s"
 )
 
 type serverRoute struct {
@@ -18,6 +26,14 @@ type serverRoute struct {
 }
 
 func (n *NotifierImpl) ConnectDataStore() error {
+	if n == nil {
+		return fmt.Errorf("NotifierImpl receiver is nil")
+	}
+
+	if n.ConfigData == nil || n.ConfigData.NotifierServerData == nil {
+		return fmt.Errorf("Config data is not initialized")
+	}
+
 	n._ddbStore = &dynamodb.DynamoDB{
 		AwsRegion: awsregion.GetAwsRegion(n.ConfigData.NotifierServerData.DynamoDBAwsRegion),
 		SkipDax: !n.ConfigData.NotifierServerData.DynamoDBUseDax,
@@ -40,6 +56,28 @@ func (n *NotifierImpl) ConnectDataStore() error {
 	}
 }
 
+func validateServerURL(serverUrl string) error {
+	serverUrl = strings.TrimSpace(serverUrl)
+	if serverUrl == "" {
+		return fmt.Errorf("server URL is required")
+	}
+
+	u, err := url.Parse(serverUrl)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("URL must use http or https scheme, got: %s", u.Scheme)
+	}
+
+	if u.Host == "" {
+		return fmt.Errorf("URL must have a host")
+	}
+
+	return nil
+}
+
 func (n *NotifierImpl) saveServerRouteToDataStore(serverKey string, serverUrl string) (err error) {
 	if n._ddbStore == nil {
 		return fmt.Errorf("Persist Server Routing to Data Store Failed: DynamoDB Connection Not Established")
@@ -53,12 +91,12 @@ func (n *NotifierImpl) saveServerRouteToDataStore(serverKey string, serverUrl st
 		return fmt.Errorf("Notifier Server Callback URL Endpoint is Required")
 	}
 
-	if strings.ToLower(util.Left(serverUrl, 7)) != "http://" && strings.ToLower(util.Left(serverUrl, 8)) != "https://" {
-		return fmt.Errorf("Notifier Server Callback URL Endpoint Must Begin with https:// or http://")
+	if err := validateServerURL(serverUrl); err != nil {
+		return fmt.Errorf("Notifier Server Callback URL Endpoint: %w", err)
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
-	sk := fmt.Sprintf("ServerKey^%s", serverKey)
+	pk := fmt.Sprintf(pkPattern, pkPrefix, pkService)
+	sk := fmt.Sprintf(skPattern, serverKey)
 
 	hostInfo := &serverRoute{
 		PK: pk,
@@ -88,8 +126,8 @@ func (n *NotifierImpl) getServerRouteFromDataStore(serverKey string) (serverUrl 
 		return "", fmt.Errorf("Get Server Routing From Data Store Failed: Server Key is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
-	sk := fmt.Sprintf("ServerKey^%s", serverKey)
+	pk := fmt.Sprintf(pkPattern, pkPrefix, pkService)
+	sk := fmt.Sprintf(skPattern, serverKey)
 
 	routeInfo := &serverRoute{}
 
@@ -109,8 +147,8 @@ func (n *NotifierImpl) deleteServerRouteFromDataStore(serverKey string) error {
 		return fmt.Errorf("Delete Server Routing From Data Store Failed: Server Key is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
-	sk := fmt.Sprintf("ServerKey^%s", serverKey)
+	pk := fmt.Sprintf(pkPattern, pkPrefix, pkService)
+	sk := fmt.Sprintf(skPattern, serverKey)
 
 	if err := n._ddbStore.DeleteItemWithRetry(n.ConfigData.NotifierServerData.DynamoDBActionRetries, pk, sk, util.DurationPtr(time.Duration(n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds)*time.Second)); err != nil {
 		return fmt.Errorf("Delete Server Routing From Data Store Failed: %s", err)

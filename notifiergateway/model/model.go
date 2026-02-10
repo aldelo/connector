@@ -18,6 +18,7 @@ package model
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	util "github.com/aldelo/common"
@@ -28,12 +29,110 @@ import (
 	ddb "github.com/aws/aws-sdk-go/service/dynamodb"
 )
 
-var DynamoDBActionRetryAttempts uint
-var ServiceDiscoveryTimeoutSeconds uint
-var GatewayKey string
-var HealthReportCleanUpFrequencySeconds uint
-var HealthReportRecordStaleMinutes uint
-var HashKeys map[string]string
+const (
+	pkPrefix       = "corems"
+	pkService      = "notifier-server"
+	pkHealthPrefix = "all"
+	pkPattern      = "%s#%s#service#discovery#host#target"
+	pkHealthPattern = "%s#%s#service#discovery#host#health"
+	skPattern      = "ServerKey^%s"
+	skHealthPattern = "InstanceID^%s"
+)
+
+var (
+	configMu sync.RWMutex
+
+	dynamoDBActionRetryAttempts         uint
+	serviceDiscoveryTimeoutSeconds      uint
+	gatewayKey                          string
+	healthReportCleanUpFrequencySeconds uint
+	healthReportRecordStaleMinutes      uint
+	hashKeys                            map[string]string
+)
+
+// Getter functions with read locks
+func GetDynamoDBActionRetryAttempts() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return dynamoDBActionRetryAttempts
+}
+
+func GetServiceDiscoveryTimeoutSeconds() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return serviceDiscoveryTimeoutSeconds
+}
+
+func GetGatewayKey() string {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return gatewayKey
+}
+
+func GetHealthReportCleanUpFrequencySeconds() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return healthReportCleanUpFrequencySeconds
+}
+
+func GetHealthReportRecordStaleMinutes() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return healthReportRecordStaleMinutes
+}
+
+func GetHashKey(name string) (string, bool) {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	if hashKeys == nil {
+		return "", false
+	}
+	v, ok := hashKeys[name]
+	return v, ok
+}
+
+func GetHashKeysCount() int {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return len(hashKeys)
+}
+
+// Setter functions with write locks
+func SetDynamoDBActionRetryAttempts(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	dynamoDBActionRetryAttempts = v
+}
+
+func SetServiceDiscoveryTimeoutSeconds(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	serviceDiscoveryTimeoutSeconds = v
+}
+
+func SetGatewayKey(key string) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	gatewayKey = key
+}
+
+func SetHealthReportCleanUpFrequencySeconds(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	healthReportCleanUpFrequencySeconds = v
+}
+
+func SetHealthReportRecordStaleMinutes(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	healthReportRecordStaleMinutes = v
+}
+
+func SetHashKeys(keys map[string]string) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	hashKeys = keys
+}
 
 type serverRoute struct {
 	PK            string `json:"pk" dynamodbav:"PK"`
@@ -88,10 +187,10 @@ func ConnectDataStore(cfg *config.Config) error {
 		_ddbTimeoutSeconds = cfg.NotifierGatewayData.DynamoDBTimeoutSeconds
 		_ddbActionRetries = cfg.NotifierGatewayData.DynamoDBActionRetries
 
-		DynamoDBActionRetryAttempts = _ddbActionRetries
-		HealthReportCleanUpFrequencySeconds = cfg.NotifierGatewayData.HealthReportCleanUpFrequencySeconds
-		HealthReportRecordStaleMinutes = cfg.NotifierGatewayData.HealthReportRecordStaleMinutes
-		ServiceDiscoveryTimeoutSeconds = cfg.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds
+		SetDynamoDBActionRetryAttempts(cfg.NotifierGatewayData.DynamoDBActionRetries)
+		SetHealthReportCleanUpFrequencySeconds(cfg.NotifierGatewayData.HealthReportCleanUpFrequencySeconds)
+		SetHealthReportRecordStaleMinutes(cfg.NotifierGatewayData.HealthReportRecordStaleMinutes)
+		SetServiceDiscoveryTimeoutSeconds(cfg.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds)
 
 		return nil
 	}
@@ -106,8 +205,8 @@ func GetServerRouteFromDataStore(serverKey string) (serverUrl string, err error)
 		return "", fmt.Errorf("Get Server Routing From Data Store Failed: Server Key is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
-	sk := fmt.Sprintf("ServerKey^%s", serverKey)
+	pk := fmt.Sprintf(pkPattern, pkPrefix, pkService)
+	sk := fmt.Sprintf(skPattern, serverKey)
 
 	routeInfo := new(serverRoute)
 
@@ -127,8 +226,8 @@ func DeleteServerRouteFromDataStore(serverKey string) error {
 		return fmt.Errorf("Delete Server Routing From Data Store Failed: Server Key is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#target", "corems", "notifier-server")
-	sk := fmt.Sprintf("ServerKey^%s", serverKey)
+	pk := fmt.Sprintf(pkPattern, pkPrefix, pkService)
+	sk := fmt.Sprintf(skPattern, serverKey)
 
 	if err := _ddbStore.DeleteItemWithRetry(_ddbActionRetries, pk, sk, _ddbStore.TimeOutDuration(_ddbTimeoutSeconds)); err != nil {
 		return fmt.Errorf("Delete Server Routing From Data Store Failed: %s", err)
@@ -146,8 +245,8 @@ func GetInstanceHealthFromDataStore(instanceId string) (lastHealthy string, err 
 		return "", fmt.Errorf("Get Instance Health From Data Store Failed: InstanceId is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
-	sk := fmt.Sprintf("InstanceID^%s", instanceId)
+	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
+	sk := fmt.Sprintf(skHealthPattern, instanceId)
 
 	statusInfo := new(healthStatus)
 
@@ -189,8 +288,8 @@ func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instance
 		return fmt.Errorf("Set Instance Health To Data Store Failed: HostInfo is Required")
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
-	sk := fmt.Sprintf("InstanceID^%s", instanceId)
+	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
+	sk := fmt.Sprintf(skHealthPattern, instanceId)
 	timeNowUTC := time.Now().UTC()
 
 	statusInfo := &healthStatus{
@@ -244,9 +343,9 @@ func ListInactiveInstancesFromDataStore() (inactiveInstances []*healthStatus, er
 		return []*healthStatus{}, fmt.Errorf("List Inactive Instances From Data Store Failed: %s", err)
 	}
 
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
+	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
 
-	staleMinutes := HealthReportRecordStaleMinutes
+	staleMinutes := GetHealthReportRecordStaleMinutes()
 
 	if staleMinutes == 0 {
 		staleMinutes = 5

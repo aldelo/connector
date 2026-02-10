@@ -139,6 +139,14 @@ func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 //
 // returns time when Take took place
 func (p *RateLimitPlugin) Take() time.Time {
+	if p == nil {
+		return time.Now() // No rate limiting if plugin is nil
+	}
+
 	rl := p.ensureRateLimiter() // lazy, threadsafe init
-	return rl.Take()            // always apply rate limiting
+	if rl == nil {
+		return time.Now() // Defensive fallback
+	}
+
+	return rl.Take() // always apply rate limiting
 }

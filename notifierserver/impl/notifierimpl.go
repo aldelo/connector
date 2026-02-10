@@ -61,11 +61,14 @@ func (m *clientEndpointMap) Add(ep *clientEndpoint) bool {
 		return false
 	}
 
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		m.Clients = make(map[string][]*clientEndpoint)
 	}
 
-	ep.DataToSend = make(chan *pb.NotificationData, 1)
+	ep.DataToSend = make(chan *pb.NotificationData, 100)
 
 	epList := m.Clients[ep.TopicArn]
 	epList = append(epList, ep)
@@ -79,6 +82,9 @@ func (m *clientEndpointMap) RemoveByClientId(clientId string) bool {
 	if util.LenTrim(clientId) == 0 {
 		return false
 	}
+
+	m._mux.Lock()
+	defer m._mux.Unlock()
 
 	if m.Clients == nil {
 		return false
@@ -97,7 +103,7 @@ func (m *clientEndpointMap) RemoveByClientId(clientId string) bool {
 
 	for topicArn, epList := range m.Clients {
 		for epIndex, ep := range epList {
-			if ep != nil && strings.ToUpper(ep.ClientId) == strings.ToUpper(clientId) {
+			if ep != nil && strings.EqualFold(ep.ClientId, clientId) {
 				// found match
 				epListToRemove = epList
 				epIndexToRemove = epIndex
@@ -114,6 +120,12 @@ func (m *clientEndpointMap) RemoveByClientId(clientId string) bool {
 
 	// perform remove action
 	if len(epListToRemove) > 0 && util.LenTrim(topicArnToRemove) > 0 && epIndexToRemove >= 0 {
+		// Close the channel before removing to prevent goroutine leaks
+		ep := epListToRemove[epIndexToRemove]
+		if ep != nil && ep.DataToSend != nil {
+			close(ep.DataToSend)
+		}
+
 		// continue to remove
 		if resultSlice := util.SliceDeleteElement(epListToRemove, epIndexToRemove); resultSlice != nil {
 			if l, ok := resultSlice.([]*clientEndpoint); ok {
@@ -143,8 +155,20 @@ func (m *clientEndpointMap) RemoveByTopicArn(topicArn string) bool {
 		return false
 	}
 
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return false
+	}
+
+	// Close all channels for this topic before removing
+	if epList, exists := m.Clients[topicArn]; exists {
+		for _, ep := range epList {
+			if ep != nil && ep.DataToSend != nil {
+				close(ep.DataToSend)
+			}
+		}
 	}
 
 	delete(m.Clients, topicArn)
@@ -153,6 +177,18 @@ func (m *clientEndpointMap) RemoveByTopicArn(topicArn string) bool {
 }
 
 func (m *clientEndpointMap) RemoveAll() {
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
+	// Close all channels before clearing
+	for _, epList := range m.Clients {
+		for _, ep := range epList {
+			if ep != nil && ep.DataToSend != nil {
+				close(ep.DataToSend)
+			}
+		}
+	}
+
 	m.Clients = make(map[string][]*clientEndpoint)
 }
 
@@ -161,13 +197,16 @@ func (m *clientEndpointMap) GetByClientId(clientId string) *clientEndpoint {
 		return nil
 	}
 
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return nil
 	}
 
 	for _, epList := range m.Clients {
 		for _, ep := range epList {
-			if ep != nil && strings.ToUpper(ep.ClientId) == strings.ToUpper(clientId) {
+			if ep != nil && strings.EqualFold(ep.ClientId, clientId) {
 				// found match
 				return ep
 			}
@@ -182,12 +221,15 @@ func (m *clientEndpointMap) GetByTopicArn(topicArn string) []*clientEndpoint {
 		return []*clientEndpoint{}
 	}
 
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return []*clientEndpoint{}
 	}
 
 	for t, epList := range m.Clients {
-		if strings.ToUpper(t) == strings.ToUpper(topicArn) {
+		if strings.EqualFold(t, topicArn) {
 			return epList
 		}
 	}
@@ -204,14 +246,40 @@ func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend 
 		return false
 	}
 
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return false
 	}
 
-	if ep := m.GetByClientId(clientId); ep != nil {
-		ep.DataToSend <- dataToSend
+	// Find the endpoint without holding lock during send
+	var targetEp *clientEndpoint
+	for _, epList := range m.Clients {
+		for _, ep := range epList {
+			if ep != nil && strings.EqualFold(ep.ClientId, clientId) {
+				targetEp = ep
+				break
+			}
+		}
+		if targetEp != nil {
+			break
+		}
+	}
+
+	if targetEp == nil {
+		return false
+	}
+
+	// Send with timeout without holding the main mutex
+	m._mux.Unlock()
+	defer m._mux.Lock()
+
+	select {
+	case targetEp.DataToSend <- dataToSend:
 		return true
-	} else {
+	case <-time.After(2 * time.Second):
+		log.Println("Warning: client " + clientId + " too slow to receive data")
 		return false
 	}
 }
@@ -260,6 +328,9 @@ func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend 
 }
 
 func (m *clientEndpointMap) ClientsCount() int {
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return 0
 	}
@@ -276,6 +347,9 @@ func (m *clientEndpointMap) ClientsCount() int {
 }
 
 func (m *clientEndpointMap) TopicsCount() int {
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return 0
 	}
@@ -284,6 +358,9 @@ func (m *clientEndpointMap) TopicsCount() int {
 }
 
 func (m *clientEndpointMap) ClientsByTopicCount(topicArn string) int {
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return 0
 	}
@@ -293,7 +370,7 @@ func (m *clientEndpointMap) ClientsByTopicCount(topicArn string) int {
 	}
 
 	for t, epList := range m.Clients {
-		if strings.ToUpper(t) == strings.ToUpper(topicArn) && epList != nil {
+		if strings.EqualFold(t, topicArn) && epList != nil {
 			return len(epList)
 		}
 	}
@@ -403,7 +480,7 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 	} else {
 		// unsubscribe specific sns topic
 		for _, v := range n.ConfigData.SubscriptionsData {
-			if util.LenTrim(v.SubscriptionArn) > 0 && strings.ToUpper(v.TopicArn) == strings.ToUpper(topicArnToUnsubscribe) {
+			if util.LenTrim(v.SubscriptionArn) > 0 && strings.EqualFold(v.TopicArn, topicArnToUnsubscribe) {
 				_ = notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout)
 			}
 		}
@@ -624,7 +701,7 @@ func (n *NotifierImpl) Unsubscribe(c context.Context, s *pb.NotificationSubscrib
 			removeTopic := false
 
 			for _, v := range n.ConfigData.SubscriptionsData {
-				if v != nil && strings.ToLower(v.TopicArn) == strings.ToLower(s.Topic) && util.LenTrim(v.SubscriptionArn) > 0 {
+				if v != nil && strings.EqualFold(v.TopicArn, s.Topic) && util.LenTrim(v.SubscriptionArn) > 0 {
 					if err := notification.Unsubscribe(n._sns, v.SubscriptionArn, 5*time.Second); err != nil {
 						log.Printf("!!! RPC Unsubscribe SNS Topic '%s' Failed: %s !!!\n", s.Topic, err)
 					} else {
