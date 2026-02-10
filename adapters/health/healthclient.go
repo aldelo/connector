@@ -31,10 +31,14 @@ import (
 	"strings"
 )
 
+// HealthClient wraps the gRPC health check client with timeout handling
+// and error categorization for better diagnostics.
 type HealthClient struct {
 	hcClient grpc_health_v1.HealthClient
 }
 
+// NewHealthClient creates a new HealthClient that wraps the gRPC health check service.
+// Returns an error if the connection is nil.
 func NewHealthClient(conn *grpc.ClientConn) (*HealthClient, error) {
 	if conn == nil {
 		return nil, fmt.Errorf("new health client failed: gRPC client connection is nil")
@@ -45,12 +49,19 @@ func NewHealthClient(conn *grpc.ClientConn) (*HealthClient, error) {
 	}, nil
 }
 
-// Check preserves the original API but now delegates to the context-aware version
+// Check performs a health check using the default context.Background().
+// Deprecated: Use CheckContext for better context propagation.
 func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) {
 	return h.CheckContext(context.Background(), svcName, timeoutDuration...)
 }
 
-// CheckContext allows callers to propagate cancellation, deadlines, and metadata
+// CheckContext performs a health check with the given context for cancellation and timeout control.
+// The timeoutDuration parameter is optional:
+//   - If omitted, a default 5-second timeout is applied
+//   - If 0, no timeout is applied (use context for cancellation only)
+//   - If negative, returns an error
+//
+// Returns the serving status and any error encountered.
 func (h *HealthClient) CheckContext(ctx context.Context, svcName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) {
 	if h == nil { // guard nil receiver to avoid panic
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("health check failed: HealthClient receiver is nil")
