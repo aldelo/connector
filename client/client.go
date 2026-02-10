@@ -186,10 +186,16 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 
 	// Issue #9: Close prior connection asynchronously with a small delay to allow in-flight RPCs to complete
 	if old != nil && old != conn {
-		go func(conn *grpc.ClientConn) {
+		go func(oldConn *grpc.ClientConn, logger *data.ZapLog) {
 			time.Sleep(connectionCloseDelay) // Allow in-flight RPCs to complete
-			_ = conn.Close()
-		}(old)
+			if err := oldConn.Close(); err != nil {
+				if logger != nil {
+					logger.Warnf("Failed to close old connection: %v", err)
+				} else {
+					log.Printf("Failed to close old connection: %v", err)
+				}
+			}
+		}(old, c._z)
 	}
 }
 
@@ -416,6 +422,32 @@ func (c *Client) endpointsSnapshot() []*serviceEndpoint {
 	return out
 }
 
+// getCircuitBreaker retrieves a circuit breaker by name in a thread-safe manner
+func (c *Client) getCircuitBreaker(name string) circuitbreaker.CircuitBreakerIFace {
+	if c == nil {
+		return nil
+	}
+	c.cbMu.RLock()
+	defer c.cbMu.RUnlock()
+	if c._circuitBreakers == nil {
+		return nil
+	}
+	return c._circuitBreakers[name]
+}
+
+// setCircuitBreaker sets a circuit breaker by name in a thread-safe manner
+func (c *Client) setCircuitBreaker(name string, cb circuitbreaker.CircuitBreakerIFace) {
+	if c == nil {
+		return
+	}
+	c.cbMu.Lock()
+	defer c.cbMu.Unlock()
+	if c._circuitBreakers == nil {
+		c._circuitBreakers = make(map[string]circuitbreaker.CircuitBreakerIFace)
+	}
+	c._circuitBreakers[name] = cb
+}
+
 // helper to (re)wire notifier handlers every time before dial
 func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 	if c == nil || nc == nil || c._config == nil {
@@ -493,19 +525,29 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 			ticker := time.NewTicker(defaultNotifierReconnectDelay)
 			defer ticker.Stop()
 
+			checkTimer := time.NewTimer(100 * time.Millisecond)
+			defer checkTimer.Stop()
+
 			for {
 				// Check if closed before waiting
 				if c.closed.Load() {
 					return
 				}
 
-				// Simple select statement with ticker and immediate closed check
+				// Wait for ticker or periodic check for close state
 				select {
 				case <-ticker.C:
 					// Continue to reconnection attempt
+				case <-checkTimer.C:
+					// Periodic check for close state during long ticker intervals
+					if c.closed.Load() {
+						return
+					}
+					checkTimer.Reset(100 * time.Millisecond)
+					continue
 				}
 
-				// Check if closed after ticker
+				// Re-check after ticker fires
 				if c.closed.Load() {
 					return
 				}
@@ -2638,9 +2680,7 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 
 	logPrintf("In - Unary Circuit Breaker Handler: " + method)
 
-	c.cbMu.RLock()
-	cb := c._circuitBreakers[method]
-	c.cbMu.RUnlock()
+	cb := c.getCircuitBreaker(method)
 
 	if cb == nil {
 		logPrintf("... Creating Circuit Breaker for: " + method)
@@ -2666,12 +2706,7 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
 
-		c.cbMu.Lock()
-		if c._circuitBreakers == nil {
-			c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
-		}
-		c._circuitBreakers[method] = cb
-		c.cbMu.Unlock()
+		c.setCircuitBreaker(method, cb)
 
 		logPrintf("... Circuit Breaker Created for: " + method)
 	} else {
@@ -2747,9 +2782,7 @@ func (c *Client) streamCircuitBreakerHandler(
 
 	logPrintf("In - Stream Circuit Breaker Handler: " + method)
 
-	c.cbMu.RLock()
-	cb := c._circuitBreakers[method]
-	c.cbMu.RUnlock()
+	cb := c.getCircuitBreaker(method)
 
 	if cb == nil {
 		logPrintf("... Creating Circuit Breaker for: " + method)
@@ -2776,12 +2809,7 @@ func (c *Client) streamCircuitBreakerHandler(
 			return streamer(ctx, desc, cc, method, opts...)
 		}
 
-		c.cbMu.Lock()
-		if c._circuitBreakers == nil { // defensive init
-			c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
-		}
-		c._circuitBreakers[method] = cb
-		c.cbMu.Unlock()
+		c.setCircuitBreaker(method, cb)
 
 		logPrintf("... Circuit Breaker Created for: " + method)
 	} else {
