@@ -60,6 +60,13 @@ import (
 	"time"
 )
 
+// Retry backoff constants
+const (
+	initialBackoff = 1 * time.Second
+	maxBackoff     = 30 * time.Second
+	backoffFactor  = 2.0
+)
+
 // healthreport struct info,
 // notifiergateway/notifiergateway.go also contains this struct as a mirror;
 //
@@ -217,12 +224,6 @@ func (s *Service) readConfig() error {
 }
 
 // retryWithBackoff executes an operation with exponential backoff
-const (
-	initialBackoff = 1 * time.Second
-	maxBackoff     = 30 * time.Second
-	backoffFactor  = 2.0
-)
-
 func retryWithBackoff(ctx context.Context, maxRetries int, operation func() error) error {
 	backoff := initialBackoff
 

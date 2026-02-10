@@ -525,6 +525,9 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 			ticker := time.NewTicker(defaultNotifierReconnectDelay)
 			defer ticker.Stop()
 
+			checkTimer := time.NewTimer(100 * time.Millisecond)
+			defer checkTimer.Stop()
+
 			for {
 				// Check if closed before waiting
 				if c.closed.Load() {
@@ -535,11 +538,12 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 				select {
 				case <-ticker.C:
 					// Continue to reconnection attempt
-				case <-time.After(100 * time.Millisecond):
+				case <-checkTimer.C:
 					// Periodic check for close state during long ticker intervals
 					if c.closed.Load() {
 						return
 					}
+					checkTimer.Reset(100 * time.Millisecond)
 					continue
 				}
 
