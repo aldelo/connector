@@ -666,7 +666,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 						}
 
 						atomic.StoreInt32(&n._notificationServicesStarted, 0)
-						err = fmt.Errorf("Notifier Client Received Error: " + err.Error() + ", Recv Loop Ending")
+						err = fmt.Errorf("notifier client received error: %w, recv loop ending", err)
 						return err
 
 					}

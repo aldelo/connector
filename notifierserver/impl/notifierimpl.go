@@ -705,12 +705,12 @@ func (n *NotifierImpl) Broadcast(c context.Context, d *pb.NotificationData) (r *
 		} else {
 			// set data to topic clients failed
 			log.Println("!!! Notifier Server RPC Broadcast Set Notification Data To Client Endpoints By TopicArn '" + d.Topic + "': Failed !!!")
-			return &pb.NotificationDone{}, fmt.Errorf("RPC Broadcast Set Notification Data To Client Endpoints By TopicArn '" + d.Topic + "' Failed")
+			return &pb.NotificationDone{}, fmt.Errorf("RPC broadcast set notification data to client endpoints by TopicArn '%s' failed", d.Topic)
 		}
 	} else {
 		// no client endpoints by topicArn
 		log.Println("### Notifier Server RPC Broadcast Found Zero Client Endpoints By TopicArn '" + d.Topic + "' ###")
-		return &pb.NotificationDone{}, fmt.Errorf("RPC Broadcast Found Zero Client Endpoints By TopicArn '" + d.Topic + "'")
+		return &pb.NotificationDone{}, fmt.Errorf("RPC broadcast found zero client endpoints by TopicArn '%s'", d.Topic)
 	}
 }
 
@@ -731,7 +731,7 @@ func (n *NotifierImpl) UpdateSubscriptionArnToTopic(topicArn string, subscriptio
 	n.ConfigData.SetSubscriptionData(topicArn, subscriptionArn)
 
 	if err := n.ConfigData.Save(); err != nil {
-		return fmt.Errorf("SNS Update SubscriptionArn Persist To Config Failed: " + err.Error())
+		return fmt.Errorf("SNS update subscriptionArn persist to config failed: %w", err)
 	} else {
 		return nil
 	}

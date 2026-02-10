@@ -18,6 +18,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/crypto"
@@ -479,22 +480,22 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 				log.Println(buf)
 
 				if publicIPSeg != nil {
-					_ = publicIPSeg.Seg.AddError(fmt.Errorf(buf))
+					_ = publicIPSeg.Seg.AddError(errors.New(buf))
 					publicIPSeg.Close()
 				}
 
-				return nil, "", 0, fmt.Errorf(buf)
+				return nil, "", 0, errors.New(buf)
 			} else if status != 200 {
 				// get public ip status not 200, still use local ip
 				buf := "!!! Get Instance Public IP via '" + s._config.Instance.PublicIPGateway + "' with Header 'x-nts-gateway-token' Not Successful: Status Code " + util.Itoa(status) + ", Service Launch Stopped !!!"
 				log.Println(buf)
 
 				if publicIPSeg != nil {
-					_ = publicIPSeg.Seg.AddError(fmt.Errorf(buf))
+					_ = publicIPSeg.Seg.AddError(errors.New(buf))
 					publicIPSeg.Close()
 				}
 
-				return nil, "", 0, fmt.Errorf(buf)
+				return nil, "", 0, errors.New(buf)
 			} else {
 				// status 200, use public ip instead of local ip
 				if util.IsNumericIntOnly(strings.Replace(body, ".", "", -1)) {
@@ -512,11 +513,11 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 					log.Println(buf)
 
 					if publicIPSeg != nil {
-						_ = publicIPSeg.Seg.AddError(fmt.Errorf(buf))
+						_ = publicIPSeg.Seg.AddError(errors.New(buf))
 						publicIPSeg.Close()
 					}
 
-					return nil, "", 0, fmt.Errorf(buf)
+					return nil, "", 0, errors.New(buf)
 				}
 			}
 		} else {
@@ -1241,12 +1242,12 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		},
 	}, jsonData); e != nil {
 		// rest post invoke error
-		err = fmt.Errorf("Set Service Health Report Update To Data Store Failed: (Invoke REST POST '" + s._config.Instance.HealthReportServiceUrl + "' Error) " + e.Error())
+		err = fmt.Errorf("set service health report update to data store failed: (invoke REST POST '%s' error) %w", s._config.Instance.HealthReportServiceUrl, e)
 		log.Println(err.Error())
 
 	} else if statusCode != 200 {
 		// rest post result status not 200
-		err = fmt.Errorf("Set Service Health Report Update To Data Store Failed: (Invoke REST POST '" + s._config.Instance.HealthReportServiceUrl + "' Result Status " + util.Itoa(statusCode) + ") " + RespBody)
+		err = fmt.Errorf("set service health report update to data store failed: (invoke REST POST '%s' result status %d) %s", s._config.Instance.HealthReportServiceUrl, statusCode, RespBody)
 		log.Println(err.Error())
 
 	} else {

@@ -653,9 +653,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	logger := c.ZLog() // ensure logger is initialized
 	logPrintf := func(msg string) {
 		if logger != nil {
-			logger.Printf(msg)
+			logger.Printf("%s", msg)
 		} else {
-			log.Printf(msg)
+			log.Printf("%s", msg)
 		}
 	}
 
@@ -1108,7 +1108,7 @@ func (c *Client) Dial(ctx context.Context) error {
 
 	if !c.ConfiguredForClientDial() {
 		c._config = nil
-		return fmt.Errorf(c.ConfigFileName + " Not Yet Configured for gRPC Client Dial, Please Check Config File")
+		return fmt.Errorf("%s not yet configured for gRPC client dial, please check config file", c.ConfigFileName)
 	}
 
 	// if rest target ca cert files defined, load self-signed ca certs so that this service may use those host resources
@@ -1147,7 +1147,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	}
 	eps := c.endpointsSnapshot() // protect _endpoints read
 	if len(eps) == 0 {
-		return fmt.Errorf("No Service Endpoints Discovered for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
+		return fmt.Errorf("no service endpoints discovered for %s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
 	}
 
 	c._z.Printf("... Service Discovery for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + " Found " + strconv.Itoa(len(eps)) + " Endpoints:")
@@ -1180,7 +1180,7 @@ func (c *Client) Dial(ctx context.Context) error {
 		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(schemeName, fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
 
 		if err != nil {
-			return fmt.Errorf("Build Client Load Balancer Failed: " + err.Error())
+			return fmt.Errorf("build client load balancer failed: %w", err)
 		}
 	} else {
 		target = fmt.Sprintf("%s:///%s", "passthrough", endpointAddrs[0])
@@ -1189,7 +1189,7 @@ func (c *Client) Dial(ctx context.Context) error {
 
 	// build dial options
 	if opts, err := c.buildDialOptions(loadBalancerPolicy); err != nil {
-		return fmt.Errorf("Build gRPC Client Dial Options Failed: " + err.Error())
+		return fmt.Errorf("build gRPC client dial options failed: %w", err)
 	} else {
 		if c.BeforeClientDial != nil {
 			c._z.Printf("Before gRPC Client Dial Begin...")
@@ -1253,10 +1253,10 @@ func (c *Client) Dial(ctx context.Context) error {
 				}
 				cleanupConn = false
 				if seg != nil {
-					_ = seg.Seg.AddError(fmt.Errorf("gRPC Service Server Not Ready: " + e.Error()))
+					_ = seg.Seg.AddError(fmt.Errorf("gRPC service server not ready: %w", e))
 				}
 				healthCancel()
-				return fmt.Errorf("gRPC Service Server Not Ready: " + e.Error())
+				return fmt.Errorf("gRPC service server not ready: %w", e)
 			}
 			healthCancel()
 		}
@@ -1393,7 +1393,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
 		errorf(s)
-		return 0, fmt.Errorf(s)
+		return 0, errors.New(s)
 	}
 
 	eps := c.endpointsSnapshot()
@@ -1401,7 +1401,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) No Live Endpoints",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		errorf(s)
-		return 0, fmt.Errorf(s)
+		return 0, errors.New(s)
 	}
 
 	if updateEndpointsToLoadBalanceResolver {
@@ -1423,7 +1423,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 			s := fmt.Sprintf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required",
 				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 			errorf(s)
-			return 0, fmt.Errorf(s)
+			return 0, errors.New(s)
 		}
 
 		// update load balance resolver with new endpoint addresses
@@ -1504,7 +1504,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 			s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s",
 				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
 			errorf(s)
-			return fmt.Errorf(s)
+			return errors.New(s)
 		}
 		// refresh snapshot after discovery to use newly populated endpoints
 		eps = c.endpointsSnapshot()
@@ -1514,7 +1514,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
 		errorf(s)
-		return fmt.Errorf(s)
+		return errors.New(s)
 	}
 
 	// get endpoint addresses
@@ -1675,7 +1675,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	if c.closed.Load() { // abort if client closed after subscribe
 		// Issue #10: Add nil check before calling methods on nc
 		if nc != nil {
-			nc.Unsubscribe()
+			_ = nc.Unsubscribe() // ignore error during cleanup
 			nc.Close()
 		}
 		c.setNotifierClient(nil)
@@ -2205,7 +2205,7 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 		err = c.setApiDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceName, c._config.Target.NamespaceName, c._config.Target.InstanceVersion,
 			int64(c._config.Target.SdInstanceMaxResult), c._config.Target.SdTimeout, forceRefresh)
 	default:
-		err = fmt.Errorf("Unexpected Service Discovery Type: " + c._config.Target.ServiceDiscoveryType)
+		err = fmt.Errorf("unexpected service discovery type: %s", c._config.Target.ServiceDiscoveryType)
 	}
 
 	if err != nil {
@@ -2308,7 +2308,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	log.Printf("Start DiscoverDnsIps %s.%s SRV=%v", serviceName, namespaceName, srv)
 	ipList, err := registry.DiscoverDnsIps(serviceName+"."+namespaceName, srv)
 	if err != nil {
-		return fmt.Errorf("Service Discovery By DNS Failed: " + err.Error())
+		return fmt.Errorf("service discovery by DNS failed: %w", err)
 	}
 
 	sdType := "a"
@@ -2455,7 +2455,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	log.Printf("Start DiscoverInstances %s.%s attr=%v count=%d", serviceName, namespaceName, customAttr, maxCount)
 	instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, true, customAttr, &maxCount, timeoutDuration...)
 	if err != nil {
-		return fmt.Errorf("Service Discovery By API Failed: " + err.Error())
+		return fmt.Errorf("service discovery by API failed: %w", err)
 	}
 
 	seen := make(map[string]struct{})
@@ -2537,7 +2537,7 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 
 	instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, false, customAttr, &maxCount, timeoutDuration...)
 	if err != nil {
-		return []*serviceEndpoint{}, fmt.Errorf("Service Discovery By API Failed: " + err.Error())
+		return []*serviceEndpoint{}, fmt.Errorf("service discovery by API failed: %w", err)
 	}
 
 	for _, v := range instanceList {
@@ -2658,23 +2658,23 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 	logger := c.ZLog()
 	logPrintf := func(msg string) {
 		if logger != nil {
-			logger.Printf(msg)
+			logger.Printf("%s", msg)
 		} else {
-			log.Printf(msg)
+			log.Printf("%s", msg)
 		}
 	}
 	logErrorf := func(msg string) {
 		if logger != nil {
-			logger.Errorf(msg)
+			logger.Errorf("%s", msg)
 		} else {
-			log.Printf(msg)
+			log.Printf("%s", msg)
 		}
 	}
 	logWarnf := func(msg string) {
 		if logger != nil {
-			logger.Warnf(msg)
+			logger.Warnf("%s", msg)
 		} else {
-			log.Printf(msg)
+			log.Printf("%s", msg)
 		}
 	}
 
@@ -2760,23 +2760,23 @@ func (c *Client) streamCircuitBreakerHandler(
 	logger := c.ZLog()
 	logPrintf := func(msg string) {
 		if logger != nil {
-			logger.Printf(msg)
+			logger.Printf("%s", msg)
 		} else {
-			log.Printf(msg)
+			log.Printf("%s", msg)
 		}
 	}
 	logErrorf := func(msg string) {
 		if logger != nil {
-			logger.Errorf(msg)
+			logger.Errorf("%s", msg)
 		} else {
-			log.Printf(msg)
+			log.Printf("%s", msg)
 		}
 	}
 	logWarnf := func(msg string) {
 		if logger != nil {
-			logger.Warnf(msg)
+			logger.Warnf("%s", msg)
 		} else {
-			log.Printf(msg)
+			log.Printf("%s", msg)
 		}
 	}
 

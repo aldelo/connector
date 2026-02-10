@@ -54,10 +54,10 @@ var TokenValidator func(token string) bool
 // ServerAuthUnaryInterceptor is an unary rpc server interceptor handler that handles auth via request's metadata
 // this interceptor will block rpc call if auth fails
 func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	if md, ok := metadata.FromIncomingContext(ctx); !ok {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
 		return nil, status.Errorf(codes.InvalidArgument, "Metadata Missing")
-	} else {
-		a := md["authorization"]
+	}
 
 		if len(a) <= 0 {
 			return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
@@ -80,6 +80,9 @@ func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc
 			return handler(ctx, req)
 		}
 	}
+
+	// Auth token validation not implemented - reject all requests until properly configured
+	return nil, status.Errorf(codes.Unimplemented, "Auth Token Validation Not Implemented - Configure ValidateToken handler")
 }
 
 func ServerAuthStreamInterceptor(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
