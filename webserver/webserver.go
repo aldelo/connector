@@ -86,30 +86,30 @@ type WebServer struct {
 }
 
 // NewWebServer creates a prepared web server for further setup and use
-func NewWebServer(appName string, configFileName string, customConfigPath string) *WebServer {
+func NewWebServer(appName string, configFileName string, customConfigPath string) (*WebServer, error) {
 	// load config
-	if c, e := readConfig(appName, configFileName, customConfigPath); e != nil {
-		log.Println("Create Web Server Failed: " + e.Error())
-		return nil
-	} else {
-		var gz *ginw.GinZap
-		if c.Logging.CustomLogging {
-			gz = ginw.NewGinZapMiddleware(c.WebServer.Name, c.Logging.CustomLoggingToConsole)
-		}
+	c, e := readConfig(appName, configFileName, customConfigPath)
+	if e != nil {
+		return nil, fmt.Errorf("Create Web Server Failed: %s", e.Error())
+	}
 
-		var ge func(status int, trace string, c *gin.Context)
-		if c.Recovery.CustomRecovery {
-			ge = func(status int, trace string, c *gin.Context) {
-				// custom recovery output
-				c.String(status, trace)
-			}
-		}
+	var gz *ginw.GinZap
+	if c.Logging.CustomLogging {
+		gz = ginw.NewGinZapMiddleware(c.WebServer.Name, c.Logging.CustomLoggingToConsole)
+	}
 
-		return &WebServer{
-			_config:       c,
-			_ginwebserver: ginw.NewServer(c.WebServer.Name, c.WebServer.Port, !c.WebServer.Debug, c.Recovery.CustomRecovery, ge, gz),
+	var ge func(status int, trace string, c *gin.Context)
+	if c.Recovery.CustomRecovery {
+		ge = func(status int, trace string, c *gin.Context) {
+			// custom recovery output
+			c.String(status, trace)
 		}
 	}
+
+	return &WebServer{
+		_config:       c,
+		_ginwebserver: ginw.NewServer(c.WebServer.Name, c.WebServer.Port, !c.WebServer.Debug, c.Recovery.CustomRecovery, ge, gz),
+	}, nil
 }
 
 // SetRouterGroupCustomMiddleware sets additional custom gin middleware (RouterFunc) to engine or router groups,

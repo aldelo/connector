@@ -18,6 +18,7 @@ package model
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	util "github.com/aldelo/common"
@@ -28,11 +29,122 @@ import (
 	ddb "github.com/aws/aws-sdk-go/service/dynamodb"
 )
 
+var (
+	configMu sync.RWMutex
+
+	dynamoDBActionRetryAttempts         uint
+	serviceDiscoveryTimeoutSeconds      uint
+	gatewayKey                          string
+	healthReportCleanUpFrequencySeconds uint
+	healthReportRecordStaleMinutes      uint
+	hashKeys                            map[string]string
+)
+
+// GetDynamoDBActionRetryAttempts returns the configured retry attempts value
+func GetDynamoDBActionRetryAttempts() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return dynamoDBActionRetryAttempts
+}
+
+// SetDynamoDBActionRetryAttempts sets the retry attempts value
+func SetDynamoDBActionRetryAttempts(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	dynamoDBActionRetryAttempts = v
+}
+
+// GetServiceDiscoveryTimeoutSeconds returns the configured timeout value
+func GetServiceDiscoveryTimeoutSeconds() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return serviceDiscoveryTimeoutSeconds
+}
+
+// SetServiceDiscoveryTimeoutSeconds sets the timeout value
+func SetServiceDiscoveryTimeoutSeconds(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	serviceDiscoveryTimeoutSeconds = v
+}
+
+// GetGatewayKey returns the configured gateway key
+func GetGatewayKey() string {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return gatewayKey
+}
+
+// SetGatewayKey sets the gateway key
+func SetGatewayKey(v string) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	gatewayKey = v
+}
+
+// GetHealthReportCleanUpFrequencySeconds returns the configured cleanup frequency
+func GetHealthReportCleanUpFrequencySeconds() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return healthReportCleanUpFrequencySeconds
+}
+
+// SetHealthReportCleanUpFrequencySeconds sets the cleanup frequency
+func SetHealthReportCleanUpFrequencySeconds(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	healthReportCleanUpFrequencySeconds = v
+}
+
+// GetHealthReportRecordStaleMinutes returns the configured stale minutes value
+func GetHealthReportRecordStaleMinutes() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return healthReportRecordStaleMinutes
+}
+
+// SetHealthReportRecordStaleMinutes sets the stale minutes value
+func SetHealthReportRecordStaleMinutes(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	healthReportRecordStaleMinutes = v
+}
+
+// GetHashKeys returns a copy of the hash keys map
+func GetHashKeys() map[string]string {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	// Return a copy to prevent external modification
+	result := make(map[string]string)
+	for k, v := range hashKeys {
+		result[k] = v
+	}
+	return result
+}
+
+// SetHashKeys sets the hash keys map
+func SetHashKeys(v map[string]string) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	hashKeys = v
+}
+
+// Deprecated: Use GetDynamoDBActionRetryAttempts instead
 var DynamoDBActionRetryAttempts uint
+
+// Deprecated: Use GetServiceDiscoveryTimeoutSeconds instead
 var ServiceDiscoveryTimeoutSeconds uint
+
+// Deprecated: Use GetGatewayKey instead
 var GatewayKey string
+
+// Deprecated: Use GetHealthReportCleanUpFrequencySeconds instead
 var HealthReportCleanUpFrequencySeconds uint
+
+// Deprecated: Use GetHealthReportRecordStaleMinutes instead
 var HealthReportRecordStaleMinutes uint
+
+// Deprecated: Use GetHashKeys/SetHashKeys instead
 var HashKeys map[string]string
 
 type serverRoute struct {
@@ -88,7 +200,13 @@ func ConnectDataStore(cfg *config.Config) error {
 		_ddbTimeoutSeconds = cfg.NotifierGatewayData.DynamoDBTimeoutSeconds
 		_ddbActionRetries = cfg.NotifierGatewayData.DynamoDBActionRetries
 
-		DynamoDBActionRetryAttempts = _ddbActionRetries
+		SetDynamoDBActionRetryAttempts(cfg.NotifierGatewayData.DynamoDBActionRetries)
+		SetHealthReportCleanUpFrequencySeconds(cfg.NotifierGatewayData.HealthReportCleanUpFrequencySeconds)
+		SetHealthReportRecordStaleMinutes(cfg.NotifierGatewayData.HealthReportRecordStaleMinutes)
+		SetServiceDiscoveryTimeoutSeconds(cfg.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds)
+
+		// Update deprecated variables for backward compatibility
+		DynamoDBActionRetryAttempts = cfg.NotifierGatewayData.DynamoDBActionRetries
 		HealthReportCleanUpFrequencySeconds = cfg.NotifierGatewayData.HealthReportCleanUpFrequencySeconds
 		HealthReportRecordStaleMinutes = cfg.NotifierGatewayData.HealthReportRecordStaleMinutes
 		ServiceDiscoveryTimeoutSeconds = cfg.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds
@@ -246,7 +364,7 @@ func ListInactiveInstancesFromDataStore() (inactiveInstances []*healthStatus, er
 
 	pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
 
-	staleMinutes := HealthReportRecordStaleMinutes
+	staleMinutes := GetHealthReportRecordStaleMinutes()
 
 	if staleMinutes == 0 {
 		staleMinutes = 5

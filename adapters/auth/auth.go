@@ -18,12 +18,17 @@ package auth
 
 import (
 	"context"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+// TokenValidator is a function that validates the authentication token.
+// Must be set before using ServerAuthUnaryInterceptor or ServerAuthStreamInterceptor.
+var TokenValidator func(token string) bool
 
 // ServerAuthUnaryInterceptor is an unary rpc server interceptor handler that handles auth via request's metadata
 // this interceptor will block rpc call if auth fails
@@ -36,15 +41,42 @@ func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc
 		if len(a) <= 0 {
 			return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
 		} else {
-			// Auth token validation not implemented - reject all requests until properly configured
-			return nil, status.Errorf(codes.Unimplemented, "Auth Token Validation Not Implemented - Configure ValidateToken handler")
+			token := strings.TrimPrefix(a[0], "Bearer ")
+
+			// Validate token using configured validator
+			if TokenValidator == nil {
+				return nil, status.Errorf(codes.Internal, "Token validator not configured")
+			}
+			if !TokenValidator(token) {
+				return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
+			}
+
+			return handler(ctx, req)
 		}
 	}
 }
 
 func ServerAuthStreamInterceptor(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	// TODO(security): Stream authentication not implemented - all stream RPCs bypass auth validation
-	// WARNING: This interceptor currently allows all stream requests without authentication
-	// Implement proper stream auth before using in production
-	return handler(srv, stream)
+	ctx := stream.Context()
+
+	if md, ok := metadata.FromIncomingContext(ctx); !ok {
+		return status.Errorf(codes.InvalidArgument, "Metadata Missing")
+	} else {
+		a := md["authorization"]
+
+		if len(a) <= 0 {
+			return status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
+		}
+
+		token := strings.TrimPrefix(a[0], "Bearer ")
+
+		if TokenValidator == nil {
+			return status.Errorf(codes.Internal, "Token validator not configured")
+		}
+		if !TokenValidator(token) {
+			return status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
+		}
+
+		return handler(srv, stream)
+	}
 }
