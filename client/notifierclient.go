@@ -19,7 +19,6 @@ package client
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/wrapper/xray"
 	notifierpb "github.com/aldelo/connector/notifierserver/proto"
@@ -27,6 +26,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -89,8 +89,6 @@ type NotifierClient struct {
 	_subscriberID                string
 	_subscriberTopicArn          string
 	_notificationServicesStarted int32 // Use int32 for atomic operations
-
-	//_stopNotificationServices chan bool
 }
 
 // NewNotifierClient creates a new prepared notifier client for use in service discovery notification
@@ -332,7 +330,6 @@ func (n *NotifierClient) Close() {
 	}
 
 	if atomic.LoadInt32(&n._notificationServicesStarted) == 1 {
-		//n._stopNotificationServices <-true
 		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 	}
 
@@ -406,12 +403,10 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 		err = fmt.Errorf("Notifier Client Subscribe to TopicArn Failed: %s", err.Error())
 		return err
 	}
-	
+
 	if n.ServiceAlertStartedHandler != nil {
 		n.ServiceAlertStartedHandler()
 	}
-
-	//n._stopNotificationServices = make(chan bool)
 
 	n._grpcClient.ZLog().Printf("+++ Notifier Client Subscribe TopicArn Success +++")
 
@@ -438,21 +433,6 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 			err = fmt.Errorf("Notifier Client Context Done")
 			return err
 
-		/*
-			case <-n._stopNotificationServices:
-				if n.ServiceAlertStoppedHandler != nil {
-					n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
-				}
-
-				atomic.StoreInt32(&n._notificationServicesStarted, 0)
-
-				n._grpcClient.ZLog().Printf("### Notifier Client Received Stop Notification Services Signal ###")
-
-				recvMap = nil
-				err = fmt.Errorf("Notifier Client Received Stop Notification Signal")
-				return err
-		*/
-
 		default:
 			// process notification receive event
 			n._grpcClient.ZLog().Printf("~~~ Notifier Client Awaits Notifier Server's Notification Data Arrival ~~~")
@@ -460,220 +440,220 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 			var data *notifierpb.NotificationData
 			data, err = nsClient.Recv()
 			if err == nil {
-					n._grpcClient.ZLog().Printf("$$$ Notifier Client Received Notification Data From Server Stream, Ready to Process $$$")
+				n._grpcClient.ZLog().Printf("$$$ Notifier Client Received Notification Data From Server Stream, Ready to Process $$$")
 
-					if data != nil {
-						// notification data received from host stream provider
-						n._grpcClient.ZLog().Printf("$$$ Received Server Stream Notification Data Not Nil $$$")
+				if data != nil {
+					// notification data received from host stream provider
+					n._grpcClient.ZLog().Printf("$$$ Received Server Stream Notification Data Not Nil $$$")
 
-						if data.Topic != topicArn {
-							n._grpcClient.ZLog().Printf("!!! Notifier Client Received Notification Data's TopicArn Mismatch: Received " + data.Topic + ", Expected " + topicArn + ", Recv Loop Skips to Next Cycle !!!")
+					if data.Topic != topicArn {
+						n._grpcClient.ZLog().Printf("!!! Notifier Client Received Notification Data's TopicArn Mismatch: Received " + data.Topic + ", Expected " + topicArn + ", Recv Loop Skips to Next Cycle !!!")
+
+						if n.ServiceAlertSkippedHandler != nil {
+							n.ServiceAlertSkippedHandler("Received Topic " + data.Topic + ", Expected Topic " + topicArn)
+						}
+
+						continue
+					}
+
+					// evaluate sns callback relay message
+					// Id = sns message id (assigned by sns) < Id is not used in this code block
+					// Timestamp = sns message timestamp, formatted as "yyyy-mm-ddThh:mm:ss.mmmZ"
+					// Message = sns message content:
+					// 			 `{"msg_type":"host-discovery", "action":"online | offline", "host":"123.123.123.123"}`
+					if util.LenTrim(data.Message) == 0 {
+						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data's Message is Blank, Recv Loop Skips to Next Cycle !!!")
+
+						if n.ServiceAlertSkippedHandler != nil {
+							n.ServiceAlertSkippedHandler("Notification Message is Blank")
+						}
+
+						continue
+					}
+
+					// ensure message was within the last 15 minutes
+					// t1 is utc value
+					// t2 converts to utc for comparison
+					var t1 time.Time
+					var parseErr error
+					t1, parseErr = time.Parse(time.RFC3339, data.Timestamp)
+					if parseErr != nil {
+						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Parser Not Valid: " + parseErr.Error() + "， Recv Loop Skips to Next Cycle !!!")
+
+						if n.ServiceAlertSkippedHandler != nil {
+							n.ServiceAlertSkippedHandler("Notification Timestamp Parse Error: " + parseErr.Error())
+						}
+
+						continue
+					}
+
+					t2 := time.Now().UTC()
+
+					if util.AbsDuration(t2.Sub(t1)).Minutes() > 15 {
+						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Exceeded 15 Minute Limit: Message Timestamp " + util.FormatDateTime(t1) + ", Current Timestamp " + util.FormatDateTime(t2) + ", Recv Loop Skips to Next Cycle !!!")
+
+						if n.ServiceAlertSkippedHandler != nil {
+							n.ServiceAlertSkippedHandler("Notification Expired (Exceeded 15 Minutes): Received " + util.FormatDateTime(t1) + ", Current " + util.FormatDateTime(t2))
+						}
+
+						continue
+					}
+
+					// unmarshal message to host discovery notification object
+					hostDiscNotification := new(HostDiscoveryNotification)
+
+					var unmarshalErr error
+					unmarshalErr = hostDiscNotification.Unmarshal(data.Message)
+					if unmarshalErr != nil {
+						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Unmarshal Json Failed: " + unmarshalErr.Error() + ", Recv Loop Skips to Next Cycle !!!")
+
+						if n.ServiceAlertSkippedHandler != nil {
+							n.ServiceAlertSkippedHandler("Notification Message Unmarshal Failed: " + unmarshalErr.Error())
+						}
+
+						continue
+					}
+
+					// received host discovery notification, push out for event alert
+					if strings.ToUpper(hostDiscNotification.MsgType) == "HOST-DISCOVERY" {
+						if ipPort := strings.Split(hostDiscNotification.Host, ":"); len(ipPort) != 2 {
+							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "', Recv Loop Skips to Next Cycle !!!")
 
 							if n.ServiceAlertSkippedHandler != nil {
-								n.ServiceAlertSkippedHandler("Received Topic " + data.Topic + ", Expected Topic " + topicArn)
+								n.ServiceAlertSkippedHandler("Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "'")
 							}
 
 							continue
-						}
+						} else {
+							ip := ipPort[0]
+							port := util.StrToUint(ipPort[1])
 
-						// evaluate sns callback relay message
-						// Id = sns message id (assigned by sns) < Id is not used in this code block
-						// Timestamp = sns message timestamp, formatted as "yyyy-mm-ddThh:mm:ss.mmmZ"
-						// Message = sns message content:
-						// 			 `{"msg_type":"host-discovery", "action":"online | offline", "host":"123.123.123.123"}`
-						if util.LenTrim(data.Message) == 0 {
-							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data's Message is Blank, Recv Loop Skips to Next Cycle !!!")
-
-							if n.ServiceAlertSkippedHandler != nil {
-								n.ServiceAlertSkippedHandler("Notification Message is Blank")
-							}
-
-							continue
-						}
-
-						// ensure message was within the last 15 minutes
-						// t1 is utc value
-						// t2 converts to utc for comparison
-						var t1 time.Time
-						var parseErr error
-						t1, parseErr = time.Parse(time.RFC3339, data.Timestamp)
-						if parseErr != nil {
-							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Parser Not Valid: " + parseErr.Error() + "， Recv Loop Skips to Next Cycle !!!")
-
-							if n.ServiceAlertSkippedHandler != nil {
-								n.ServiceAlertSkippedHandler("Notification Timestamp Parse Error: " + parseErr.Error())
-							}
-
-							continue
-						}
-						
-						t2 := time.Now().UTC()
-
-						if util.AbsDuration(t2.Sub(t1)).Minutes() > 15 {
-							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Exceeded 15 Minute Limit: Message Timestamp " + util.FormatDateTime(t1) + ", Current Timestamp " + util.FormatDateTime(t2) + ", Recv Loop Skips to Next Cycle !!!")
-
-							if n.ServiceAlertSkippedHandler != nil {
-								n.ServiceAlertSkippedHandler("Notification Expired (Exceeded 15 Minutes): Received " + util.FormatDateTime(t1) + ", Current " + util.FormatDateTime(t2))
-							}
-
-							continue
-						}
-
-						// unmarshal message to host discovery notification object
-						hostDiscNotification := new(HostDiscoveryNotification)
-
-						var unmarshalErr error
-						unmarshalErr = hostDiscNotification.Unmarshal(data.Message)
-						if unmarshalErr != nil {
-							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Unmarshal Json Failed: " + unmarshalErr.Error() + ", Recv Loop Skips to Next Cycle !!!")
-
-							if n.ServiceAlertSkippedHandler != nil {
-								n.ServiceAlertSkippedHandler("Notification Message Unmarshal Failed: " + unmarshalErr.Error())
-							}
-
-							continue
-						}
-
-						// received host discovery notification, push out for event alert
-						if strings.ToUpper(hostDiscNotification.MsgType) == "HOST-DISCOVERY" {
-							if ipPort := strings.Split(hostDiscNotification.Host, ":"); len(ipPort) != 2 {
-								n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "', Recv Loop Skips to Next Cycle !!!")
+							if ipParts := strings.Split(ip, "."); len(ipParts) != 4 || !util.IsNumericIntOnly(strings.Replace(ip, ".", "", -1)) {
+								n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host IP Not Valid: Received '" + ip + "', Recv Loop Skips to Next Cycle !!!")
 
 								if n.ServiceAlertSkippedHandler != nil {
-									n.ServiceAlertSkippedHandler("Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "'")
+									n.ServiceAlertSkippedHandler("Notification Host IP Not Valid: Received '" + ip + "'")
 								}
 
 								continue
+							}
+
+							if port == 0 || port > 65535 {
+								n._grpcClient.ZLog().Warnf("!!! Notification Client Received Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "', Recv Loop Skips to Next Cycle !!!")
+
+								if n.ServiceAlertSkippedHandler != nil {
+									n.ServiceAlertSkippedHandler("Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "'")
+								}
+
+								continue
+							}
+
+							// check if already received within the last 10 seconds
+							recvKey := fmt.Sprintf("%s:%d", ip, port)
+							now := time.Now()
+							if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(now, t)) <= 10 {
+								// already in map, skip this one
+								n._grpcClient.ZLog().Warnf("*** Notification Client Received Repeated Notification Same Data '" + recvKey + "' Within 10 Seconds Duration, Alert Bypassed ***")
+								continue
 							} else {
-								ip := ipPort[0]
-								port := util.StrToUint(ipPort[1])
-
-								if ipParts := strings.Split(ip, "."); len(ipParts) != 4 || !util.IsNumericIntOnly(strings.Replace(ip, ".", "", -1)) {
-									n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host IP Not Valid: Received '" + ip + "', Recv Loop Skips to Next Cycle !!!")
-
-									if n.ServiceAlertSkippedHandler != nil {
-										n.ServiceAlertSkippedHandler("Notification Host IP Not Valid: Received '" + ip + "'")
-									}
-
-									continue
-								}
-
-								if port == 0 || port > 65535 {
-									n._grpcClient.ZLog().Warnf("!!! Notification Client Received Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "', Recv Loop Skips to Next Cycle !!!")
-
-									if n.ServiceAlertSkippedHandler != nil {
-										n.ServiceAlertSkippedHandler("Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "'")
-									}
-
-									continue
-								}
-
-								// check if already received within the last 10 seconds
-								recvKey := fmt.Sprintf("%s:%d", ip, port)
-								now := time.Now()
-								if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(now, t)) <= 10 {
-									// already in map, skip this one
-									n._grpcClient.ZLog().Warnf("*** Notification Client Received Repeated Notification Same Data '" + recvKey + "' Within 10 Seconds Duration, Alert Bypassed ***")
-									continue
-								} else {
-									// add or update to map with TTL-based cleanup
-									if len(recvMap) > 5000 {
-										// Clean up entries older than 60 seconds to prevent unbounded memory growth
-										for k, v := range recvMap {
-											if util.AbsInt(util.SecondsDiff(now, v)) > 60 {
-												delete(recvMap, k)
-											}
-										}
-										// If still too large after cleanup, reset the map
-										if len(recvMap) > 5000 {
-											recvMap = make(map[string]time.Time)
-										}
-									}
-									recvMap[recvKey] = now
-								}
-								
-								cleanupCounter++
-								// Periodically clean up entries older than 60 seconds
-								// Trigger cleanup every 100 entries processed OR when map exceeds 1000 entries
-								if cleanupCounter >= 100 || len(recvMap) > 1000 {
-									cleanupCounter = 0
+								// add or update to map with TTL-based cleanup
+								if len(recvMap) > 5000 {
+									// Clean up entries older than 60 seconds to prevent unbounded memory growth
 									for k, v := range recvMap {
-										if now.Sub(v) > 60*time.Second {
+										if util.AbsInt(util.SecondsDiff(now, v)) > 60 {
 											delete(recvMap, k)
 										}
 									}
-								}
-								// If still too large after cleanup, reset (lowered from 5000 to 2000 to prevent excessive growth)
-								if len(recvMap) > 2000 {
-									recvMap = make(map[string]time.Time)
-									cleanupCounter = 0
+									// If still too large after cleanup, reset the map
+									if len(recvMap) > 5000 {
+										recvMap = make(map[string]time.Time)
+									}
 								}
 								recvMap[recvKey] = now
+							}
 
-								isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
-
-								// notify the discovered host
-								if isOnline {
-									if n.ServiceHostOnlineHandler != nil {
-										n.ServiceHostOnlineHandler(ip, port)
-									}
-								} else {
-									if n.ServiceHostOfflineHandler != nil {
-										n.ServiceHostOfflineHandler(ip, port)
+							cleanupCounter++
+							// Periodically clean up entries older than 60 seconds
+							// Trigger cleanup every 100 entries processed OR when map exceeds 1000 entries
+							if cleanupCounter >= 100 || len(recvMap) > 1000 {
+								cleanupCounter = 0
+								for k, v := range recvMap {
+									if now.Sub(v) > 60*time.Second {
+										delete(recvMap, k)
 									}
 								}
-
-								n._grpcClient.ZLog().Printf("### Notifier Client Received Notification Data Exposed to Handler, Now Ready for Next Recv Event ###")
 							}
-						} else {
-							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Message Type Not Expected: Received '" + hostDiscNotification.MsgType + "', Expected 'host-discovery', Recv Loop Skips to Next Cycle !!!")
+							// If still too large after cleanup, reset (lowered from 5000 to 2000 to prevent excessive growth)
+							if len(recvMap) > 2000 {
+								recvMap = make(map[string]time.Time)
+								cleanupCounter = 0
+							}
+							recvMap[recvKey] = now
 
-							if n.ServiceAlertSkippedHandler != nil {
-								n.ServiceAlertSkippedHandler("Notification Message Type Not Expected: 'Received " + hostDiscNotification.MsgType + "', Expected 'host-discovery'")
+							isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
+
+							// notify the discovered host
+							if isOnline {
+								if n.ServiceHostOnlineHandler != nil {
+									n.ServiceHostOnlineHandler(ip, port)
+								}
+							} else {
+								if n.ServiceHostOfflineHandler != nil {
+									n.ServiceHostOfflineHandler(ip, port)
+								}
 							}
 
-							continue
+							n._grpcClient.ZLog().Printf("### Notifier Client Received Notification Data Exposed to Handler, Now Ready for Next Recv Event ###")
 						}
 					} else {
-						// notify nil data received
-						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data is Nil, Recv Loop Skips to Next Cycle !!!")
+						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Message Type Not Expected: Received '" + hostDiscNotification.MsgType + "', Expected 'host-discovery', Recv Loop Skips to Next Cycle !!!")
 
 						if n.ServiceAlertSkippedHandler != nil {
-							n.ServiceAlertSkippedHandler("Notification Data Nil")
+							n.ServiceAlertSkippedHandler("Notification Message Type Not Expected: 'Received " + hostDiscNotification.MsgType + "', Expected 'host-discovery'")
 						}
 
 						continue
 					}
 				} else {
-					// on error exit stream client loop
-					if err == io.EOF {
-						n._grpcClient.ZLog().Printf("!!! Notifier Client Stream Receive Action Encountered EOF, Recv Loop Ending !!!")
+					// notify nil data received
+					n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data is Nil, Recv Loop Skips to Next Cycle !!!")
 
-						if n.ServiceAlertStoppedHandler != nil {
-							n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Notifier Server Stream EOF")
-						}
-
-						atomic.StoreInt32(&n._notificationServicesStarted, 0)
-						err = fmt.Errorf("Notifier Client Received EOF, Recv Loop Ending")
-						return err
-
-					} else {
-						// other error, continue
-						n._grpcClient.ZLog().Errorf("!!! Notifier Client Stream Receive Action Encountered Error: " + err.Error() + ", Recv Loop Ending !!!")
-
-						if n.ServiceAlertStoppedHandler != nil {
-							n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Notifier Server Stream Error: " + err.Error())
-						}
-
-						atomic.StoreInt32(&n._notificationServicesStarted, 0)
-						err = fmt.Errorf("notifier client received error: %w, recv loop ending", err)
-						return err
-
+					if n.ServiceAlertSkippedHandler != nil {
+						n.ServiceAlertSkippedHandler("Notification Data Nil")
 					}
+
+					continue
+				}
+			} else {
+				// on error exit stream client loop
+				if err == io.EOF {
+					n._grpcClient.ZLog().Printf("!!! Notifier Client Stream Receive Action Encountered EOF, Recv Loop Ending !!!")
+
+					if n.ServiceAlertStoppedHandler != nil {
+						n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Notifier Server Stream EOF")
+					}
+
+					atomic.StoreInt32(&n._notificationServicesStarted, 0)
+					err = fmt.Errorf("Notifier Client Received EOF, Recv Loop Ending")
+					return err
+
+				} else {
+					// other error, continue
+					n._grpcClient.ZLog().Errorf("!!! Notifier Client Stream Receive Action Encountered Error: " + err.Error() + ", Recv Loop Ending !!!")
+
+					if n.ServiceAlertStoppedHandler != nil {
+						n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Notifier Server Stream Error: " + err.Error())
+					}
+
+					atomic.StoreInt32(&n._notificationServicesStarted, 0)
+					err = fmt.Errorf("notifier client received error: %w, recv loop ending", err)
+					return err
+
 				}
 			}
 		}
 	}
+}
 
 // Unsubscribe will stop notification alert services and disconnect from subscription on notifier server
 func (n *NotifierClient) Unsubscribe() (err error) {
@@ -690,7 +670,6 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 
 	// first, stop notification alert services
 	if atomic.LoadInt32(&n._notificationServicesStarted) == 1 {
-		//n._stopNotificationServices <-true
 		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 	}
 
