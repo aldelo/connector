@@ -1633,7 +1633,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	if c.closed.Load() { // abort if client closed after subscribe
 		// Issue #10: Add nil check before calling methods on nc
 		if nc != nil {
-			nc.Unsubscribe()
+			_ = nc.Unsubscribe() // ignore error during cleanup
 			nc.Close()
 		}
 		c.setNotifierClient(nil)
