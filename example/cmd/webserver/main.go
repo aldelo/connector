@@ -35,7 +35,10 @@ type SimpleData struct {
 }
 
 func main() {
-	g := ws.NewWebServer("Example", "server", "")
+	g, err := ws.NewWebServer("Example", "server", "")
+	if err != nil {
+		log.Fatalf("Failed to create web server: %v", err)
+	}
 
 	g.LoginRequestDataPtr = &ginw.UserLogin{}
 

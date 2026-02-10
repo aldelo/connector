@@ -3028,7 +3028,10 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 	// always buffer the channel we write to, even if caller passed unbuffered
 	internalServeErr := make(chan error, 1)
 
-	server := ws.NewWebServer(c.WebServerConfig.AppName, c.WebServerConfig.ConfigFileName, c.WebServerConfig.CustomConfigPath)
+	server, err := ws.NewWebServer(c.WebServerConfig.AppName, c.WebServerConfig.ConfigFileName, c.WebServerConfig.CustomConfigPath)
+	if err != nil {
+		return fmt.Errorf("Start Web Server Failed: %s", err)
+	}
 
 	/* EXAMPLE
 	server.Routes = map[string]*ginw.RouteDefinition{
