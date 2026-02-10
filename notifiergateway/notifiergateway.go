@@ -1024,7 +1024,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 
 	if operationId, err := registry.DeregisterInstance(sd, instanceId, serviceId, timeoutDuration); err != nil {
 		log.Println("!!! Service Discovery De-Register Instance '" + instanceId + "' Failed: (Initial Deregister Action) " + err.Error() + " !!!")
-		return fmt.Errorf("Service Discovery De-Register Instance '" + instanceId + "' Fail: " + err.Error())
+		return fmt.Errorf("Service Discovery De-Register Instance '%s' Fail: %w", instanceId, err)
 	} else {
 		tryCount := 0
 
@@ -1033,7 +1033,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 		for {
 			if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration); e != nil {
 				log.Println("!!! Service Discovery De-Register Instance '" + instanceId + "' Failed: (Deregister GetOperationStatus Action) " + e.Error() + " !!!")
-				return fmt.Errorf("Service Discovery De-Register Instance '" + instanceId + "' Fail: " + e.Error())
+				return fmt.Errorf("Service Discovery De-Register Instance '%s' Fail: %w", instanceId, e)
 			} else {
 				if status == sdoperationstatus.Success {
 					log.Println("$$$ Service Discovery De-Register Instance '" + instanceId + "' OK $$$")
@@ -1046,7 +1046,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 						time.Sleep(250 * time.Millisecond)
 					} else {
 						log.Println("... De-Register Instance '" + instanceId + "' Failed: Operation Timeout After 5 Seconds")
-						return fmt.Errorf("Service Discovery De-register Instance '" + instanceId + "' Fail When Operation Timed Out After 5 Seconds")
+						return fmt.Errorf("Service Discovery De-register Instance '%s' Fail When Operation Timed Out After 5 Seconds", instanceId)
 					}
 				}
 			}
