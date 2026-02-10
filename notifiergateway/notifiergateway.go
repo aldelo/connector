@@ -127,7 +127,10 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	}
 
 	// setup gateway server
-	gatewayServer := webserver.NewWebServer(appName, configFileNameWebServer, customConfigPath)
+	gatewayServer, err := webserver.NewWebServer(appName, configFileNameWebServer, customConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("Notifier Gateway Web Server Failed: %s", err)
+	}
 
 	gatewayServer.Routes = map[string]*ginw.RouteDefinition{
 		"base": {

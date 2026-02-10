@@ -1756,7 +1756,10 @@ func (s *Service) startWebServer() error {
 		return fmt.Errorf("Start Web Server Failed: Web Server Routes Not Set (Count Zero)")
 	}
 
-	server := ws.NewWebServer(s.WebServerConfig.AppName, s.WebServerConfig.ConfigFileName, s.WebServerConfig.CustomConfigPath)
+	server, err := ws.NewWebServer(s.WebServerConfig.AppName, s.WebServerConfig.ConfigFileName, s.WebServerConfig.CustomConfigPath)
+	if err != nil {
+		return fmt.Errorf("Start Web Server Failed: %s", err)
+	}
 
 	/* EXAMPLE
 	server.Routes = map[string]*ginw.RouteDefinition{
