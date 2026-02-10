@@ -61,6 +61,9 @@ func (m *clientEndpointMap) Add(ep *clientEndpoint) bool {
 		return false
 	}
 
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		m.Clients = make(map[string][]*clientEndpoint)
 	}
@@ -79,6 +82,9 @@ func (m *clientEndpointMap) RemoveByClientId(clientId string) bool {
 	if util.LenTrim(clientId) == 0 {
 		return false
 	}
+
+	m._mux.Lock()
+	defer m._mux.Unlock()
 
 	if m.Clients == nil {
 		return false
@@ -195,6 +201,27 @@ func (m *clientEndpointMap) GetByTopicArn(topicArn string) []*clientEndpoint {
 	return []*clientEndpoint{}
 }
 
+// safeSend safely sends data to a client endpoint's channel with panic recovery
+func (m *clientEndpointMap) safeSend(ep *clientEndpoint, data *pb.NotificationData) (sent bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			sent = false
+			log.Printf("Recovered from send on closed channel: %v", r)
+		}
+	}()
+
+	if ep == nil || ep.DataToSend == nil {
+		return false
+	}
+
+	select {
+	case ep.DataToSend <- data:
+		return true
+	case <-time.After(2 * time.Second):
+		return false // channel full or timeout
+	}
+}
+
 func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend *pb.NotificationData) bool {
 	if util.LenTrim(clientId) == 0 {
 		return false
@@ -209,8 +236,7 @@ func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend 
 	}
 
 	if ep := m.GetByClientId(clientId); ep != nil {
-		ep.DataToSend <- dataToSend
-		return true
+		return m.safeSend(ep, dataToSend)
 	} else {
 		return false
 	}
@@ -240,12 +266,10 @@ func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend 
 		for _, ep := range epList {
 			if ep != nil {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - Before <-dataToSend Assign to ep.DataToSend")
-				select {
-				case ep.DataToSend <- dataToSend:
+				if m.safeSend(ep, dataToSend) {
 					log.Println("Trace: SetDataSendByTopicArn (Loop) - After <-dataToSend Assign to ep.DataToSend")
-				case <-time.After(2 * time.Second):
-					log.Println("Trace: SetDataSendByTopicArn (Loop) - timeout(2s) on <-dataToSend Assign to ep.DataToSend")
-					continue
+				} else {
+					log.Println("Trace: SetDataSendByTopicArn (Loop) - Failed to send data (timeout or closed channel)")
 				}
 			} else {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - ep Nil")
