@@ -72,7 +72,7 @@ func (n *NotifierImpl) saveServerRouteToDataStore(serverKey string, serverUrl st
 										 hostInfo,
 										 n._ddbStore.TimeOutDuration(n.ConfigData.NotifierServerData.DynamoDBTimeoutSeconds)); e != nil {
 		// error
-		return fmt.Errorf("Persist Server Routing to Data Store Failed: %s", err)
+		return fmt.Errorf("Persist Server Routing to Data Store Failed: %s", e)
 	} else {
 		// success
 		return nil

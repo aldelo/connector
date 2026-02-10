@@ -45,14 +45,14 @@ func NewNotificationAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2
 // ListTopics will return list of all topic arns for the given sns object
 func ListTopics(n *sns.SNS, timeoutDuration ...time.Duration) (topicArnsList []string, err error) {
 	if n == nil {
-		return []string{}, fmt.Errorf("ListTopics Failed: SNS Notification Object is Required")
+		return []string{}, fmt.Errorf("list topics failed: SNS notification object is required")
 	}
 
 	var nextToken string
 
 	for {
 		if t, nt, e := n.ListTopics(nextToken, timeoutDuration...); e != nil {
-			return topicArnsList, fmt.Errorf("ListTopics Failed After Partial Fetch: %w", e)
+			return topicArnsList, fmt.Errorf("list topics failed after partial fetch: %w", e)
 		} else {
 			topicArnsList = append(topicArnsList, t...)
 
@@ -70,15 +70,15 @@ func ListTopics(n *sns.SNS, timeoutDuration ...time.Duration) (topicArnsList []s
 // CreateTopic will create a new sns notification's topic
 func CreateTopic(n *sns.SNS, topicName string, timeoutDuration ...time.Duration) (topicArn string, err error) {
 	if n == nil {
-		return "", fmt.Errorf("CreateTopic Failed: SNS Notification Object is Required")
+		return "", fmt.Errorf("create topic failed: SNS notification object is required")
 	}
 
 	if util.LenTrim(topicName) == 0 {
-		return "", fmt.Errorf("CreateTopic Failed: Topic Name is Required")
+		return "", fmt.Errorf("create topic failed: topic name is required")
 	}
 
 	if topicArn, err = n.CreateTopic(topicName, nil, timeoutDuration...); err != nil {
-		return "", fmt.Errorf("CreateTopic Failed: %w", err)
+		return "", fmt.Errorf("create topic failed: %w", err)
 	} else {
 		return topicArn, nil
 	}
@@ -87,19 +87,19 @@ func CreateTopic(n *sns.SNS, topicName string, timeoutDuration ...time.Duration)
 // Subscribe will subscribe client to a sns notification's topic arn
 func Subscribe(n *sns.SNS, topicArn string, protocol snsprotocol.SNSProtocol, endPoint string, timeoutDuration ...time.Duration) (subscriptionArn string, err error) {
 	if n == nil {
-		return "", fmt.Errorf("Subscribe Failed: SNS Notification Object is Required")
+		return "", fmt.Errorf("subscribe failed: SNS notification object is required")
 	}
 
 	if util.LenTrim(topicArn) == 0 {
-		return "", fmt.Errorf("Subscribe Failed: Topic ARN is Required")
+		return "", fmt.Errorf("subscribe failed: topic ARN is required")
 	}
 
 	if !protocol.Valid() || protocol == snsprotocol.UNKNOWN {
-		return "", fmt.Errorf("Subscribe Failed: Protocol is Required")
+		return "", fmt.Errorf("subscribe failed: protocol is required")
 	}
 
 	if util.LenTrim(endPoint) == 0 {
-		return "", fmt.Errorf("Subscribe Failed: Endpoint is Required")
+		return "", fmt.Errorf("subscribe failed: endpoint is required")
 	}
 
 	return n.Subscribe(topicArn, protocol, endPoint, nil, timeoutDuration...)
@@ -108,11 +108,11 @@ func Subscribe(n *sns.SNS, topicArn string, protocol snsprotocol.SNSProtocol, en
 // Unsubscribe will unsubscribe a subscription from sns notification system
 func Unsubscribe(n *sns.SNS, subscriptionArn string, timeoutDuration ...time.Duration) error {
 	if n == nil {
-		return fmt.Errorf("Unsubscribe Failed: SNS Notification Object is Required")
+		return fmt.Errorf("unsubscribe failed: SNS notification object is required")
 	}
 
 	if util.LenTrim(subscriptionArn) == 0 {
-		return fmt.Errorf("Unsubscribe Failed: Subscription ARN is Required")
+		return fmt.Errorf("unsubscribe failed: subscription ARN is required")
 	}
 
 	return n.Unsubscribe(subscriptionArn, timeoutDuration...)
@@ -121,15 +121,15 @@ func Unsubscribe(n *sns.SNS, subscriptionArn string, timeoutDuration ...time.Dur
 // Publish will publish a message to sns notification system for subscribers to consume
 func Publish(n *sns.SNS, topicArn string, message string, attributes map[string]*snsaws.MessageAttributeValue, timeoutDuration ...time.Duration) (messageId string, err error) {
 	if n == nil {
-		return "", fmt.Errorf("Publish Failed: SNS Notification Object is Required")
+		return "", fmt.Errorf("publish failed: SNS notification object is required")
 	}
 
 	if util.LenTrim(topicArn) == 0 {
-		return "", fmt.Errorf("Publish Failed: Topic ARN is Required")
+		return "", fmt.Errorf("publish failed: topic ARN is required")
 	}
 
 	if util.LenTrim(message) == 0 {
-		return "", fmt.Errorf("Publish Failed: Message is Required")
+		return "", fmt.Errorf("publish failed: message is required")
 	}
 
 	return n.Publish(topicArn, "", message, "", attributes, timeoutDuration...)

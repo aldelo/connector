@@ -22,14 +22,24 @@ import (
 	"google.golang.org/grpc"
 )
 
-// LoggerUnaryInterceptor is an unary rpc server interceptor handler that handles cloud logging of unary rpc calls
+// LoggerUnaryInterceptor is a unary RPC server interceptor that handles cloud logging of unary RPC calls.
+// TODO(logging): Implement structured logging with the following features:
+//   - Log request method, duration, and status code
+//   - Log request/response metadata (configurable)
+//   - Support for correlation IDs from context
+//   - Integration with cloud logging services (CloudWatch, Stackdriver, etc.)
 func LoggerUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	// TODO: not implemented at this time
+	// Not implemented - passes through to handler without logging
 	return handler(ctx, req)
 }
 
-// LoggerStreamInterceptor is a stream rpc server interceptor handler that handles cloud logging of stream rpc calls
+// LoggerStreamInterceptor is a stream RPC server interceptor that handles cloud logging of stream RPC calls.
+// TODO(logging): Implement structured logging with the following features:
+//   - Log stream method, duration, and status code
+//   - Log stream lifecycle events (start, end, error)
+//   - Support for correlation IDs from context
+//   - Integration with cloud logging services (CloudWatch, Stackdriver, etc.)
 func LoggerStreamInterceptor(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	// TODO: not implemented at this time
+	// Not implemented - passes through to handler without logging
 	return handler(srv, stream)
 }

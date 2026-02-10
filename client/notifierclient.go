@@ -42,13 +42,12 @@ type HostDiscoveryNotification struct {
 func (d *HostDiscoveryNotification) Marshal() (string, error) {
 	if d == nil {
 		return "", nil
-	} else {
-		if buf, err := util.MarshalJSONCompact(d); err != nil {
-			return "", err
-		} else {
-			return buf, nil
-		}
 	}
+	buf, err := util.MarshalJSONCompact(d)
+	if err != nil {
+		return "", err
+	}
+	return buf, nil
 }
 
 func (d *HostDiscoveryNotification) Unmarshal(jsonData string) error {
@@ -58,13 +57,13 @@ func (d *HostDiscoveryNotification) Unmarshal(jsonData string) error {
 
 	if util.LenTrim(jsonData) == 0 {
 		return fmt.Errorf("Unmarshal Requires Json Data")
-	} else {
-		if err := util.UnmarshalJSON(jsonData, d); err != nil {
-			return err
-		} else {
-			return nil
-		}
 	}
+
+	err := util.UnmarshalJSON(jsonData, d)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 type NotifierClient struct {
@@ -314,7 +313,11 @@ func (n *NotifierClient) Dial() error {
 	n._subscriberTopicArn = ""
 
 	if err := n._grpcClient.Dial(context.Background()); err != nil {
-		n._grpcClient.ZLog().Errorf("!!! Notifier Client Dial Failed: (Connectivity State = %s) %s !!!", n._grpcClient.GetState().String(), err.Error())
+		if n._grpcClient.ZLog() != nil {
+			n._grpcClient.ZLog().Errorf("!!! Notifier Client Dial Failed: (Connectivity State = %s) %s !!!", n._grpcClient.GetState().String(), err.Error())
+		} else {
+			log.Printf("!!! Notifier Client Dial Failed: %s !!!", err.Error())
+		}
 		return err
 	} else {
 		// dial success
@@ -555,7 +558,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 									continue
 								}
 
-								if port <= 0 || port > 65535 {
+								if port == 0 || port > 65535 {
 									n._grpcClient.ZLog().Warnf("!!! Notification Client Received Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "', Recv Loop Skips to Next Cycle !!!")
 
 									if n.ServiceAlertSkippedHandler != nil {
@@ -572,6 +575,21 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 									// already in map, skip this one
 									n._grpcClient.ZLog().Warnf("*** Notification Client Received Repeated Notification Same Data '" + recvKey + "' Within 10 Seconds Duration, Alert Bypassed ***")
 									continue
+								} else {
+									// add or update to map with TTL-based cleanup
+									if len(recvMap) > 5000 {
+										// Clean up entries older than 60 seconds to prevent unbounded memory growth
+										for k, v := range recvMap {
+											if util.AbsInt(util.SecondsDiff(now, v)) > 60 {
+												delete(recvMap, k)
+											}
+										}
+										// If still too large after cleanup, reset the map
+										if len(recvMap) > 5000 {
+											recvMap = make(map[string]time.Time)
+										}
+									}
+									recvMap[recvKey] = now
 								}
 								
 								cleanupCounter++

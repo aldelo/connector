@@ -37,7 +37,7 @@ type HealthClient struct {
 
 func NewHealthClient(conn *grpc.ClientConn) (*HealthClient, error) {
 	if conn == nil {
-		return nil, fmt.Errorf("New Health Client Failed: %s", "gRPC Client Connection Nil")
+		return nil, fmt.Errorf("new health client failed: gRPC client connection is nil")
 	}
 
 	return &HealthClient{
@@ -53,17 +53,17 @@ func (h *HealthClient) Check(svcName string, timeoutDuration ...time.Duration) (
 // CheckContext allows callers to propagate cancellation, deadlines, and metadata
 func (h *HealthClient) CheckContext(ctx context.Context, svcName string, timeoutDuration ...time.Duration) (grpc_health_v1.HealthCheckResponse_ServingStatus, error) {
 	if h == nil { // guard nil receiver to avoid panic
-		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: %s", "HealthClient receiver is nil")
+		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("health check failed: HealthClient receiver is nil")
 	}
 
 	if h.hcClient == nil {
-		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: %s", "Health Check Client Nil")
+		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("health check failed: health check client is nil")
 	}
 
 	// reject multiple timeout arguments to avoid silent misuse.
 	if len(timeoutDuration) > 1 {
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-			fmt.Errorf("Health Check Failed: only one timeoutDuration argument is allowed (got %d)", len(timeoutDuration))
+			fmt.Errorf("health check failed: only one timeoutDuration argument is allowed (got %d)", len(timeoutDuration))
 	}
 
 	const defaultTimeout = 5 * time.Second // avoid indefinite hang
@@ -75,7 +75,7 @@ func (h *HealthClient) CheckContext(ctx context.Context, svcName string, timeout
 		switch t := timeoutDuration[0]; {
 		case t < 0:
 			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-				fmt.Errorf("Health Check Failed: invalid timeout %s (must be >= 0)", t)
+				fmt.Errorf("health check failed: invalid timeout %s (must be >= 0)", t)
 		case t == 0:
 			useTimeout = false // caller explicitly requested no timeout
 		default:
@@ -114,26 +114,26 @@ func (h *HealthClient) CheckContext(ctx context.Context, svcName string, timeout
 			case codes.DeadlineExceeded:
 				if useTimeout {
 					return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-						fmt.Errorf("Health Check Failed: (Timeout exceeded after %s): %w", effectiveTimeout, err)
+						fmt.Errorf("health check failed: timeout exceeded after %s: %w", effectiveTimeout, err)
 				}
 				// no-timeout call should not hit this unless server imposed its own deadline
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Server/transport deadline exceeded): %w", err)
+					fmt.Errorf("health check failed: server/transport deadline exceeded (%w)", err)
 			case codes.Canceled:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Context canceled) %w", err)
+					fmt.Errorf("health check failed: context canceled (%w)", err)
 			case codes.Unavailable:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Service unavailable) %w", err)
+					fmt.Errorf("health check failed: service unavailable (%w)", err)
 			case codes.NotFound:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Service not found) %w", err)
+					fmt.Errorf("health check failed: service not found (%w)", err)
 			case codes.Unimplemented:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Health service unimplemented on server) %w", err)
+					fmt.Errorf("health check failed: health service unimplemented on server (%w)", err)
 			default:
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Call Health Server Error) [%s]: %w", st.Code(), err)
+					fmt.Errorf("health check failed: call health server error [%s] (%w)", st.Code(), err)
 			}
 		}
 
@@ -141,24 +141,24 @@ func (h *HealthClient) CheckContext(ctx context.Context, svcName string, timeout
 		if errors.Is(err, context.DeadlineExceeded) {
 			if useTimeout {
 				return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-					fmt.Errorf("Health Check Failed: (Timeout exceeded after %s): %w", effectiveTimeout, err)
+					fmt.Errorf("health check failed: timeout exceeded after %s: %w", effectiveTimeout, err)
 			}
 			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-				fmt.Errorf("Health Check Failed: (Server/transport deadline exceeded): %w", err)
+				fmt.Errorf("health check failed: server/transport deadline exceeded (%w)", err)
 		}
 
 		// report caller/transport cancellation accurately
 		if errors.Is(err, context.Canceled) {
 			return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-				fmt.Errorf("Health Check Failed: (Context canceled) %w", err)
+				fmt.Errorf("health check failed: context canceled (%w)", err)
 		}
 
 		return grpc_health_v1.HealthCheckResponse_UNKNOWN,
-			fmt.Errorf("Health Check Failed: (Call Health Server Error) %w", err)
+			fmt.Errorf("health check failed: call health server error (%w)", err)
 	}
 
 	if resp == nil {
-		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("Health Check Failed: (Health Server Response Nil)")
+		return grpc_health_v1.HealthCheckResponse_UNKNOWN, fmt.Errorf("health check failed: health server response is nil")
 	}
 
 	return resp.Status, nil
