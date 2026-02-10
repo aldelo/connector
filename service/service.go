@@ -61,6 +61,13 @@ import (
 	"time"
 )
 
+// Retry backoff constants
+const (
+	initialBackoff = 1 * time.Second
+	maxBackoff     = 30 * time.Second
+	backoffFactor  = 2.0
+)
+
 // healthreport struct info,
 // notifiergateway/notifiergateway.go also contains this struct as a mirror;
 //
@@ -180,8 +187,26 @@ func NewService(appName string, configFileName string, customConfigPath string, 
 	}
 }
 
+// isServing returns the serving status in a thread-safe manner
+func (s *Service) isServing() bool {
+	s._mu.RLock()
+	defer s._mu.RUnlock()
+	return s._serving
+}
+
+// setServing sets the serving status in a thread-safe manner
+func (s *Service) setServing(v bool) {
+	s._mu.Lock()
+	defer s._mu.Unlock()
+	s._serving = v
+}
+
 // readConfig will read in config data
 func (s *Service) readConfig() error {
+	if s == nil {
+		return fmt.Errorf("Service receiver is nil")
+	}
+
 	s._config = &config{
 		AppName:          s.AppName,
 		ConfigFileName:   s.ConfigFileName,
@@ -197,6 +222,34 @@ func (s *Service) readConfig() error {
 	}
 
 	return nil
+}
+
+// retryWithBackoff executes an operation with exponential backoff
+func retryWithBackoff(ctx context.Context, maxRetries int, operation func() error) error {
+	backoff := initialBackoff
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if err := operation(); err == nil {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
+		backoff = time.Duration(float64(backoff) * backoffFactor)
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+
+	return fmt.Errorf("operation failed after %d retries", maxRetries)
 }
 
 // setupServer sets up tcp listener, and creates grpc server
@@ -606,6 +659,9 @@ func (s *Service) startHealthChecker() error {
 
 // CurrentlyServing indicates if this service health status indicates currently serving mode or not
 func (s *Service) CurrentlyServing() bool {
+	if s == nil {
+		return false
+	}
 	s._mu.RLock()
 	defer s._mu.RUnlock()
 	return s._serving
@@ -629,9 +685,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 	}
 
 	// set service default serving mode to 'not serving'
-	s._mu.Lock()
-	s._serving = false
-	s._mu.Unlock()
+	s.setServing(false)
 
 	go func() {
 		gRPCServerInvoked := false
@@ -668,9 +722,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 				}
 
 				// on exit, stop serving
-				s._mu.Lock()
-				s._serving = false
-				s._mu.Unlock()
+				s.setServing(false)
 
 				s._grpcServer.Stop()
 				_ = lis.Close()
@@ -847,9 +899,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 							}
 
 							// set service serving mode to true (serving)
-							s._mu.Lock()
-							s._serving = true
-							s._mu.Unlock()
+							s.setServing(true)
 
 							// -----------------------------------------------------------------------------------------
 							// start service live timestamp reporting to data store
@@ -901,6 +951,10 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 
 // getHostDiscoveryMessage returns json string formatted with online / offline status indicator along with host address info
 func (s *Service) getHostDiscoveryMessage(online bool) string {
+	if s == nil {
+		return ""
+	}
+
 	onlineStatus := ""
 
 	if online {
@@ -1694,6 +1748,9 @@ func (s *Service) ImmediateStop() {
 
 // LocalAddress returns the service server's address and port
 func (s *Service) LocalAddress() string {
+	if s == nil {
+		return ""
+	}
 	return s._localAddress
 }
 
@@ -1757,7 +1814,10 @@ func (s *Service) startWebServer() error {
 		return fmt.Errorf("Start Web Server Failed: Web Server Routes Not Set (Count Zero)")
 	}
 
-	server := ws.NewWebServer(s.WebServerConfig.AppName, s.WebServerConfig.ConfigFileName, s.WebServerConfig.CustomConfigPath)
+	server, err := ws.NewWebServer(s.WebServerConfig.AppName, s.WebServerConfig.ConfigFileName, s.WebServerConfig.CustomConfigPath)
+	if err != nil {
+		return fmt.Errorf("Start Web Server Failed: %s", err)
+	}
 
 	/* EXAMPLE
 	server.Routes = map[string]*ginw.RouteDefinition{

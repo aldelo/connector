@@ -34,8 +34,17 @@ var (
 	schemeMap         map[string]*manual.Resolver
 	registeredSchemes map[string]string // track which service owns a registered scheme
 	_mux              sync.Mutex        // thread-safety for accessing and modifying schemeMap
+	mapsInitialized   sync.Once
 	schemePattern     = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
 )
+
+// ensureMapsInitialized ensures maps are initialized before use
+func ensureMapsInitialized() {
+	mapsInitialized.Do(func() {
+		schemeMap = make(map[string]*manual.Resolver)
+		registeredSchemes = make(map[string]string)
+	})
+}
 
 // collision-safe map key builder
 func composeKey(schemeName string, serviceName string) string {
@@ -269,12 +278,7 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 	_mux.Lock()
 	defer _mux.Unlock()
 
-	if schemeMap == nil {
-		schemeMap = make(map[string]*manual.Resolver)
-	}
-	if registeredSchemes == nil {
-		registeredSchemes = make(map[string]string)
-	}
+	ensureMapsInitialized()
 
 	key := composeKey(schemeName, svc)
 
@@ -314,9 +318,7 @@ func getResolver(schemeName string, serviceName string) (*manual.Resolver, error
 	_mux.Lock()
 	defer _mux.Unlock()
 
-	if schemeMap == nil {
-		return nil, fmt.Errorf("Resolver SchemeMap Nil")
-	}
+	ensureMapsInitialized()
 
 	key := composeKey(schemeName, svc)
 	if r := schemeMap[key]; r != nil {

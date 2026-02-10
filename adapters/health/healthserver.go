@@ -22,6 +22,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 
 	util "github.com/aldelo/common"
 	"google.golang.org/grpc/codes"
@@ -113,6 +114,10 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 		return nil, status.Errorf(codes.Internal, "Health Server Not Initialized")
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if req == nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Health Check Request Nil")
 	}
@@ -166,6 +171,41 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 	return &grpc_health_v1.HealthCheckResponse{Status: statusVal}, nil
 }
 
-func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, server grpc_health_v1.Health_WatchServer) error {
-	return status.Errorf(codes.Unimplemented, "Health Server Watch Not Supported, Use Check Instead")
+func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, stream grpc_health_v1.Health_WatchServer) error {
+	if h == nil {
+		return status.Errorf(codes.Internal, "Health Server Not Initialized")
+	}
+
+	ctx := stream.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ticker := time.NewTicker(30 * time.Second) // Heartbeat interval
+	defer ticker.Stop()
+
+	// Send initial status
+	statusResp, err := h.Check(ctx, req)
+	if err != nil {
+		return err
+	}
+	if err := stream.Send(statusResp); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			// Send periodic heartbeat
+			statusResp, err := h.Check(ctx, req)
+			if err != nil {
+				return err
+			}
+			if err := stream.Send(statusResp); err != nil {
+				return err
+			}
+		}
+	}
 }
