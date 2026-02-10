@@ -24,21 +24,16 @@ type RecoveryHandlerFuncContext func(ctx context.Context, p interface{}) (err er
 func UnaryServerInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 	o := evaluateOptions(opts)
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-		panicked := true
-
 		defer func() {
-			if panicked {
-				if r := recover(); r != nil {
-					fmt.Printf("%s\n", r)
-					fmt.Printf("stack: %s\n", debug.Stack())
-					fmt.Printf("\n\n\n Start Service Again\n")
-					err = recoverFrom(ctx, r, o.recoveryHandlerFunc)
-				}
+			if r := recover(); r != nil {
+				fmt.Printf("%s\n", r)
+				fmt.Printf("stack: %s\n", debug.Stack())
+				fmt.Printf("\n\n\n Start Service Again\n")
+				err = recoverFrom(ctx, r, o.recoveryHandlerFunc)
 			}
 		}()
 
 		resp, err = handler(ctx, req)
-		panicked = false
 		return resp, err
 	}
 }
@@ -47,20 +42,15 @@ func UnaryServerInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 func StreamServerInterceptor(opts ...Option) grpc.StreamServerInterceptor {
 	o := evaluateOptions(opts)
 	return func(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
-		panicked := true
-
 		defer func() {
-			if panicked {
-				if r := recover(); r != nil {
-					fmt.Printf("%s\n", r)
-					fmt.Printf("\n\n\n Start Service Again\n")
-					err = recoverFrom(stream.Context(), r, o.recoveryHandlerFunc)
-				}
+			if r := recover(); r != nil {
+				fmt.Printf("%s\n", r)
+				fmt.Printf("\n\n\n Start Service Again\n")
+				err = recoverFrom(stream.Context(), r, o.recoveryHandlerFunc)
 			}
 		}()
 
 		err = handler(srv, stream)
-		panicked = false
 		return err
 	}
 }
