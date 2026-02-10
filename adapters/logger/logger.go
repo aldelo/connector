@@ -18,6 +18,8 @@ package logger
 
 import (
 	"context"
+	"log"
+	"time"
 
 	"google.golang.org/grpc"
 )
@@ -29,8 +31,18 @@ import (
 //   - Support for correlation IDs from context
 //   - Integration with cloud logging services (CloudWatch, Stackdriver, etc.)
 func LoggerUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	// Not implemented - passes through to handler without logging
-	return handler(ctx, req)
+	start := time.Now()
+
+	resp, err := handler(ctx, req)
+
+	duration := time.Since(start)
+	if err != nil {
+		log.Printf("[gRPC] %s | %v | ERROR: %v", info.FullMethod, duration, err)
+	} else {
+		log.Printf("[gRPC] %s | %v | OK", info.FullMethod, duration)
+	}
+
+	return resp, err
 }
 
 // LoggerStreamInterceptor is a stream RPC server interceptor that handles cloud logging of stream RPC calls.
@@ -40,6 +52,16 @@ func LoggerUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.Una
 //   - Support for correlation IDs from context
 //   - Integration with cloud logging services (CloudWatch, Stackdriver, etc.)
 func LoggerStreamInterceptor(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	// Not implemented - passes through to handler without logging
-	return handler(srv, stream)
+	start := time.Now()
+
+	err := handler(srv, stream)
+
+	duration := time.Since(start)
+	if err != nil {
+		log.Printf("[gRPC-Stream] %s | %v | ERROR: %v", info.FullMethod, duration, err)
+	} else {
+		log.Printf("[gRPC-Stream] %s | %v | OK", info.FullMethod, duration)
+	}
+
+	return err
 }

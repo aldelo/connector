@@ -658,7 +658,12 @@ func (s *Service) startHealthChecker() error {
 
 // CurrentlyServing indicates if this service health status indicates currently serving mode or not
 func (s *Service) CurrentlyServing() bool {
-	return s.isServing()
+	if s == nil {
+		return false
+	}
+	s._mu.RLock()
+	defer s._mu.RUnlock()
+	return s._serving
 }
 
 // startServer will start and serve grpc services, it will run in goroutine until terminated
@@ -945,6 +950,10 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 
 // getHostDiscoveryMessage returns json string formatted with online / offline status indicator along with host address info
 func (s *Service) getHostDiscoveryMessage(online bool) string {
+	if s == nil {
+		return ""
+	}
+
 	onlineStatus := ""
 
 	if online {
@@ -1738,6 +1747,9 @@ func (s *Service) ImmediateStop() {
 
 // LocalAddress returns the service server's address and port
 func (s *Service) LocalAddress() string {
+	if s == nil {
+		return ""
+	}
 	return s._localAddress
 }
 
@@ -1801,7 +1813,10 @@ func (s *Service) startWebServer() error {
 		return fmt.Errorf("Start Web Server Failed: Web Server Routes Not Set (Count Zero)")
 	}
 
-	server := ws.NewWebServer(s.WebServerConfig.AppName, s.WebServerConfig.ConfigFileName, s.WebServerConfig.CustomConfigPath)
+	server, err := ws.NewWebServer(s.WebServerConfig.AppName, s.WebServerConfig.ConfigFileName, s.WebServerConfig.CustomConfigPath)
+	if err != nil {
+		return fmt.Errorf("Start Web Server Failed: %s", err)
+	}
 
 	/* EXAMPLE
 	server.Routes = map[string]*ginw.RouteDefinition{
