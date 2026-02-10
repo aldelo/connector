@@ -149,6 +149,9 @@ func (m *clientEndpointMap) RemoveByTopicArn(topicArn string) bool {
 		return false
 	}
 
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return false
 	}
@@ -159,6 +162,8 @@ func (m *clientEndpointMap) RemoveByTopicArn(topicArn string) bool {
 }
 
 func (m *clientEndpointMap) RemoveAll() {
+	m._mux.Lock()
+	defer m._mux.Unlock()
 	m.Clients = make(map[string][]*clientEndpoint)
 }
 
@@ -166,6 +171,9 @@ func (m *clientEndpointMap) GetByClientId(clientId string) *clientEndpoint {
 	if util.LenTrim(clientId) == 0 {
 		return nil
 	}
+
+	m._mux.Lock()
+	defer m._mux.Unlock()
 
 	if m.Clients == nil {
 		return nil
@@ -187,6 +195,9 @@ func (m *clientEndpointMap) GetByTopicArn(topicArn string) []*clientEndpoint {
 	if util.LenTrim(topicArn) == 0 {
 		return []*clientEndpoint{}
 	}
+
+	m._mux.Lock()
+	defer m._mux.Unlock()
 
 	if m.Clients == nil {
 		return []*clientEndpoint{}
@@ -284,6 +295,9 @@ func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend 
 }
 
 func (m *clientEndpointMap) ClientsCount() int {
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return 0
 	}
@@ -300,6 +314,9 @@ func (m *clientEndpointMap) ClientsCount() int {
 }
 
 func (m *clientEndpointMap) TopicsCount() int {
+	m._mux.Lock()
+	defer m._mux.Unlock()
+
 	if m.Clients == nil {
 		return 0
 	}
@@ -308,9 +325,8 @@ func (m *clientEndpointMap) TopicsCount() int {
 }
 
 func (m *clientEndpointMap) ClientsByTopicCount(topicArn string) int {
-	if m.Clients == nil {
-		return 0
-	}
+	m._mux.Lock()
+	defer m._mux.Unlock()
 
 	if m.Clients == nil {
 		return 0
@@ -555,9 +571,7 @@ func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.N
 		ClientContext: serverStream.Context(),
 	}
 
-	n._clients._mux.Lock()
 	n._clients.Add(ep)
-	n._clients._mux.Unlock()
 
 	//
 	// start loop for pushing received data to client via server stream
@@ -597,11 +611,7 @@ func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.N
 
 	// at this point, loop ended, we will clean up the client endpoint as the end of the service cycle
 	log.Println("### Notifier Server RPC Subscribe Send Loop Ending, Cleaning Up Client ID '" + ep.ClientId + "' ###")
-	func() {
-		n._clients._mux.Lock()
-		defer n._clients._mux.Unlock()
-		n._clients.RemoveByClientId(ep.ClientId)
-	}()
+	n._clients.RemoveByClientId(ep.ClientId)
 	log.Println("### Notifier Server RPC Subscriber Send Loop Ended ###")
 
 	return nil
@@ -624,9 +634,6 @@ func (n *NotifierImpl) Unsubscribe(c context.Context, s *pb.NotificationSubscrib
 	}
 
 	// find client endpoint for the given subscriber to unsubscribe
-	n._clients._mux.Lock()
-	defer n._clients._mux.Unlock()
-
 	if ep := n._clients.GetByClientId(s.Id); ep != nil {
 		// stop the client endpoint loop service
 		_, cancel := context.WithCancel(ep.ClientContext)
@@ -689,9 +696,6 @@ func (n *NotifierImpl) Broadcast(c context.Context, d *pb.NotificationData) (r *
 		log.Println("!!! Notifier Server RPC Broadcast Requires Client Endpoints !!!")
 		return &pb.NotificationDone{}, fmt.Errorf("RPC Broadcast Requires Client Endpoints")
 	}
-
-	n._clients._mux.Lock()
-	defer n._clients._mux.Unlock()
 
 	if epList := n._clients.GetByTopicArn(d.Topic); len(epList) > 0 {
 		if n._clients.SetDataToSendByTopicArn(d.Topic, d) {
