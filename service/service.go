@@ -900,6 +900,10 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 
 // getHostDiscoveryMessage returns json string formatted with online / offline status indicator along with host address info
 func (s *Service) getHostDiscoveryMessage(online bool) string {
+	if s == nil {
+		return ""
+	}
+
 	onlineStatus := ""
 
 	if online {

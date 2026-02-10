@@ -168,9 +168,13 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	return gatewayServer, nil
 }
 
-// escapeUserInput replaces \n and \r with blank to mitigate log-injection vulnerability
+// escapeUserInput replaces control characters (newlines, carriage returns, tabs) with spaces to mitigate log-injection vulnerability
 func escapeUserInput(data string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(data, "\n", ""), "\r", "")
+	// Remove newlines, carriage returns, and other common log injection characters
+	result := strings.ReplaceAll(data, "\n", " ")
+	result = strings.ReplaceAll(result, "\r", " ")
+	result = strings.ReplaceAll(result, "\t", " ")
+	return result
 }
 
 // healthreporter handles client reporting to host health status of the client,
