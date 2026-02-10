@@ -1,0 +1,87 @@
+run:
+  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+
+linters:
+  enable:
+    - errcheck       # Check for unchecked errors
+    - gosimple       # Simplify code
+    - govet          # Vet examines Go source code
+    - ineffassign    # Detect ineffectual assignments
+    - staticcheck    # Static analysis
+    - unused         # Check for unused code
+    - gofmt          # Check formatting
+    - goimports      # Check imports
+    - misspell       # Check for misspellings
+    - unconvert      # Remove unnecessary type conversions
+    - unparam        # Check for unused function parameters
+    - gosec          # Security checks
+  disable:
+    - typecheck      # Disable typecheck as it's redundant with govet
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: false
+  govet:
+    check-shadowing: false  # Too many false positives in this codebase
+    enable-all: false
+    enable:
+      - assign
+      - atomic
+      - bools
+      - buildtag
+      - cgocall
+      - composites
+      - copylocks
+      - errorsas
+      - httpresponse
+      - loopclosure
+      - lostcancel
+      - nilfunc
+      - printf
+      - shift
+      - stdmethods
+      - structtag
+      - tests
+      - unmarshal
+      - unreachable
+      - unsafeptr
+      - unusedresult
+  gofmt:
+    simplify: true
+  gosec:
+    excludes:
+      - G104  # Errors unhandled - covered by errcheck
+      - G401  # Weak crypto - may be intentional for non-critical use
+      - G501  # Blacklisted import crypto/md5
+  staticcheck:
+    checks: ["all"]
+
+issues:
+  exclude-use-default: false
+  exclude-rules:
+    # Exclude some linters from test files
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+    # Exclude some checks for example code
+    - path: example/
+      linters:
+        - errcheck
+        - gosec
+        - unused
+    # Allow non-constant format strings in specific safe contexts
+    - text: "non-constant format string in call to"
+      linters:
+        - govet
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
