@@ -177,7 +177,7 @@ func (c *Config) Read() error {
 	} else {
 		if !ok {
 			if e := c._v.Save(); e != nil {
-				return fmt.Errorf("Create Config File Failed: " + e.Error())
+				return fmt.Errorf("create config file failed: %w", e)
 			}
 		} else {
 			c._v.WatchConfig()
