@@ -19,6 +19,7 @@ package auth
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -26,8 +27,28 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// TokenValidator is a function that validates the authentication token.
-// Must be set before using ServerAuthUnaryInterceptor or ServerAuthStreamInterceptor.
+var (
+	tokenValidatorMu sync.RWMutex
+	tokenValidator   func(token string) bool
+)
+
+// SetTokenValidator sets the token validation function.
+// This should be called during initialization before the server starts processing requests.
+func SetTokenValidator(validator func(token string) bool) {
+	tokenValidatorMu.Lock()
+	defer tokenValidatorMu.Unlock()
+	tokenValidator = validator
+}
+
+// getTokenValidator safely retrieves the current token validator.
+func getTokenValidator() func(token string) bool {
+	tokenValidatorMu.RLock()
+	defer tokenValidatorMu.RUnlock()
+	return tokenValidator
+}
+
+// Deprecated: Use SetTokenValidator instead.
+// TokenValidator is maintained for backward compatibility but is not thread-safe.
 var TokenValidator func(token string) bool
 
 // ServerAuthUnaryInterceptor is an unary rpc server interceptor handler that handles auth via request's metadata
@@ -44,10 +65,15 @@ func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc
 			token := strings.TrimPrefix(a[0], "Bearer ")
 
 			// Validate token using configured validator
-			if TokenValidator == nil {
+			validator := getTokenValidator()
+			if validator == nil {
+				// Fallback to deprecated variable for backward compatibility
+				validator = TokenValidator
+			}
+			if validator == nil {
 				return nil, status.Errorf(codes.Internal, "Token validator not configured")
 			}
-			if !TokenValidator(token) {
+			if !validator(token) {
 				return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
 			}
 
@@ -70,10 +96,15 @@ func ServerAuthStreamInterceptor(srv interface{}, stream grpc.ServerStream, info
 
 		token := strings.TrimPrefix(a[0], "Bearer ")
 
-		if TokenValidator == nil {
+		validator := getTokenValidator()
+		if validator == nil {
+			// Fallback to deprecated variable for backward compatibility
+			validator = TokenValidator
+		}
+		if validator == nil {
 			return status.Errorf(codes.Internal, "Token validator not configured")
 		}
-		if !TokenValidator(token) {
+		if !validator(token) {
 			return status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
 		}
 

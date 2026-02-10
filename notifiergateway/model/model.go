@@ -205,11 +205,13 @@ func ConnectDataStore(cfg *config.Config) error {
 		SetHealthReportRecordStaleMinutes(cfg.NotifierGatewayData.HealthReportRecordStaleMinutes)
 		SetServiceDiscoveryTimeoutSeconds(cfg.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds)
 
-		// Update deprecated variables for backward compatibility
-		DynamoDBActionRetryAttempts = cfg.NotifierGatewayData.DynamoDBActionRetries
-		HealthReportCleanUpFrequencySeconds = cfg.NotifierGatewayData.HealthReportCleanUpFrequencySeconds
-		HealthReportRecordStaleMinutes = cfg.NotifierGatewayData.HealthReportRecordStaleMinutes
-		ServiceDiscoveryTimeoutSeconds = cfg.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds
+		// Update deprecated variables for backward compatibility (protected by same mutex)
+		configMu.Lock()
+		DynamoDBActionRetryAttempts = dynamoDBActionRetryAttempts
+		HealthReportCleanUpFrequencySeconds = healthReportCleanUpFrequencySeconds
+		HealthReportRecordStaleMinutes = healthReportRecordStaleMinutes
+		ServiceDiscoveryTimeoutSeconds = serviceDiscoveryTimeoutSeconds
+		configMu.Unlock()
 
 		return nil
 	}

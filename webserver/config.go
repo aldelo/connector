@@ -623,8 +623,8 @@ func (c *config) Read() error {
 	if c.WebServer.Port == 0 {
 		c.WebServer.Port = 8080 // default
 	}
-	if c.WebServer.Port > 65535 {
-		return fmt.Errorf("WebServer port %d exceeds maximum valid port 65535", c.WebServer.Port)
+	if c.WebServer.Port < 1 || c.WebServer.Port > 65535 {
+		return fmt.Errorf("WebServer port %d is invalid (must be between 1-65535)", c.WebServer.Port)
 	}
 
 	return nil
