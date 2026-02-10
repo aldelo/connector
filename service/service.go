@@ -605,6 +605,9 @@ func (s *Service) startHealthChecker() error {
 
 // CurrentlyServing indicates if this service health status indicates currently serving mode or not
 func (s *Service) CurrentlyServing() bool {
+	if s == nil {
+		return false
+	}
 	s._mu.RLock()
 	defer s._mu.RUnlock()
 	return s._serving
@@ -1697,6 +1700,9 @@ func (s *Service) ImmediateStop() {
 
 // LocalAddress returns the service server's address and port
 func (s *Service) LocalAddress() string {
+	if s == nil {
+		return ""
+	}
 	return s._localAddress
 }
 
