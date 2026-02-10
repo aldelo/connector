@@ -18,7 +18,6 @@ package auth
 
 import (
 	"context"
-	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -37,15 +36,8 @@ func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc
 		if len(a) <= 0 {
 			return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
 		} else {
-			token := strings.TrimPrefix(a[0], "Bearer ")
-
-			// TODO: not implemented at this time
-			if token != "xyz" {
-				return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
-			}
-
-			// continue rpc handler execution upon token validation success
-			return handler(ctx, req)
+			// Auth token validation not implemented - reject all requests until properly configured
+			return nil, status.Errorf(codes.Unimplemented, "Auth Token Validation Not Implemented - Configure ValidateToken handler")
 		}
 	}
 }

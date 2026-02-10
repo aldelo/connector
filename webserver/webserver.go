@@ -277,10 +277,14 @@ func (w *WebServer) Serve() error {
 	}
 
 	if err := w.setupWebServer(); err != nil {
+		// Clean up DNS record if setup fails after DNS registration
+		w.RemoveDNSRecordset()
 		return fmt.Errorf("Web Server Setup Failed: %s", err)
 	}
 
 	if err := w._ginwebserver.RunServer(); err != nil {
+		// Clean up DNS record if server start fails after DNS registration
+		w.RemoveDNSRecordset()
 		return fmt.Errorf("Start Web Server Failed: %s", err)
 	}
 
