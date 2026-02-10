@@ -179,8 +179,26 @@ func NewService(appName string, configFileName string, customConfigPath string, 
 	}
 }
 
+// isServing returns the serving status in a thread-safe manner
+func (s *Service) isServing() bool {
+	s._mu.RLock()
+	defer s._mu.RUnlock()
+	return s._serving
+}
+
+// setServing sets the serving status in a thread-safe manner
+func (s *Service) setServing(v bool) {
+	s._mu.Lock()
+	defer s._mu.Unlock()
+	s._serving = v
+}
+
 // readConfig will read in config data
 func (s *Service) readConfig() error {
+	if s == nil {
+		return fmt.Errorf("Service receiver is nil")
+	}
+
 	s._config = &config{
 		AppName:          s.AppName,
 		ConfigFileName:   s.ConfigFileName,
@@ -196,6 +214,40 @@ func (s *Service) readConfig() error {
 	}
 
 	return nil
+}
+
+// retryWithBackoff executes an operation with exponential backoff
+const (
+	initialBackoff = 1 * time.Second
+	maxBackoff     = 30 * time.Second
+	backoffFactor  = 2.0
+)
+
+func retryWithBackoff(ctx context.Context, maxRetries int, operation func() error) error {
+	backoff := initialBackoff
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if err := operation(); err == nil {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
+		backoff = time.Duration(float64(backoff) * backoffFactor)
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+
+	return fmt.Errorf("operation failed after %d retries", maxRetries)
 }
 
 // setupServer sets up tcp listener, and creates grpc server
@@ -605,9 +657,7 @@ func (s *Service) startHealthChecker() error {
 
 // CurrentlyServing indicates if this service health status indicates currently serving mode or not
 func (s *Service) CurrentlyServing() bool {
-	s._mu.RLock()
-	defer s._mu.RUnlock()
-	return s._serving
+	return s.isServing()
 }
 
 // startServer will start and serve grpc services, it will run in goroutine until terminated
@@ -628,9 +678,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 	}
 
 	// set service default serving mode to 'not serving'
-	s._mu.Lock()
-	s._serving = false
-	s._mu.Unlock()
+	s.setServing(false)
 
 	go func() {
 		gRPCServerInvoked := false
@@ -667,9 +715,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 				}
 
 				// on exit, stop serving
-				s._mu.Lock()
-				s._serving = false
-				s._mu.Unlock()
+				s.setServing(false)
 
 				s._grpcServer.Stop()
 				_ = lis.Close()
@@ -846,9 +892,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 							}
 
 							// set service serving mode to true (serving)
-							s._mu.Lock()
-							s._serving = true
-							s._mu.Unlock()
+							s.setServing(true)
 
 							// -----------------------------------------------------------------------------------------
 							// start service live timestamp reporting to data store
