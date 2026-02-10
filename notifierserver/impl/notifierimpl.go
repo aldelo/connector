@@ -785,3 +785,40 @@ func (n *NotifierImpl) UpdateSubscriptionArnToTopic(topicArn string, subscriptio
 		return nil
 	}
 }
+
+// Shutdown gracefully shuts down the notifier server
+// It closes all client connections, removes server route from DynamoDB, and disconnects from DynamoDB
+func (n *NotifierImpl) Shutdown(ctx context.Context) error {
+	log.Println("=== Notifier Server Shutdown Started ===")
+
+	if n == nil {
+		return fmt.Errorf("NotifierImpl receiver is nil")
+	}
+
+	// 1. Close all client channels gracefully
+	if n._clients != nil {
+		log.Println("--- Closing all client channels ---")
+		n._clients._mux.Lock()
+		for topicArn, epList := range n._clients.Clients {
+			for _, ep := range epList {
+				if ep != nil && ep.DataToSend != nil {
+					close(ep.DataToSend)
+				}
+			}
+			log.Printf("... Closed %d client(s) for topic %s", len(epList), topicArn)
+		}
+		n._clients.Clients = nil
+		n._clients._mux.Unlock()
+	}
+
+	// 2. Remove server route from DynamoDB
+	if n.ConfigData != nil && util.LenTrim(n.ConfigData.NotifierServerData.ServerKey) > 0 {
+		log.Println("--- Removing server route from DynamoDB ---")
+		if err := n.deleteServerRouteFromDataStore(n.ConfigData.NotifierServerData.ServerKey); err != nil {
+			log.Printf("Warning: failed to remove server route: %v", err)
+		}
+	}
+
+	log.Println("=== Notifier Server Shutdown Completed ===")
+	return nil
+}
