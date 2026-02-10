@@ -43,14 +43,14 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 	service := strings.TrimSpace(serviceName)
 
 	if scheme == "" {
-		return "", "", fmt.Errorf("Resolver Scheme Name is Required")
+		return "", "", fmt.Errorf("resolver scheme name is required")
 	}
 	if !schemeRE.MatchString(scheme) { // validate scheme syntax
 		return "", "", fmt.Errorf("resolver scheme name %q is invalid (must match [a-z][a-z0-9+.-]*)", scheme)
 	}
 
 	if service == "" {
-		return "", "", fmt.Errorf("Resolver Service Name is Required")
+		return "", "", fmt.Errorf("resolver service name is required")
 	}
 	if !serviceRE.MatchString(service) {
 		return "", "", fmt.Errorf("resolver service name %q is invalid (allowed: A-Z a-z 0-9 . _ ~ -)", service)
@@ -63,7 +63,7 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 	}
 
 	if len(endpointAddrs) == 0 {
-		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required")
+		return "", "", fmt.Errorf("resolver endpoint addresses are required")
 	}
 
 	seen := make(map[string]struct{}, len(endpointAddrs))
@@ -146,11 +146,11 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		cleanAddrs = append(cleanAddrs, canonical)
 	}
 	if len(cleanAddrs) == 0 {
-		return "", "", fmt.Errorf("Resolver Endpoint Addresses Are Required (all were empty, duplicate, or invalid)")
+		return "", "", fmt.Errorf("resolver endpoint addresses are required (all were empty, duplicate, or invalid)")
 	}
 
 	if err = res.NewManualResolver(scheme, service, cleanAddrs); err != nil {
-		return "", "", fmt.Errorf("Setup CLB New Resolver Failed: %w", err)
+		return "", "", fmt.Errorf("setup CLB new resolver failed: %w", err)
 	}
 
 	// load balancer round robin is per call, rather than per connection
