@@ -70,7 +70,7 @@ func (c *Config) SetDynamoDBAwsRegion(s string) error {
 
 	// Validate it's a known AWS region
 	if awsregion.GetAwsRegion(s) == awsregion.UNKNOWN {
-		return fmt.Errorf("invalid AWS region: %s", s)
+		return fmt.Errorf("invalid AWS region provided")
 	}
 
 	c._v.Set("notifier_gateway.dynamodb_aws_region", s)

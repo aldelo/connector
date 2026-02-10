@@ -36,11 +36,53 @@ import (
 // ---------------------------------------------------------------------------------------------------------------------
 // define clientEndpoint and clientEndpointMap
 // ---------------------------------------------------------------------------------------------------------------------
+
+const (
+	dataChannelBufferSize  = 100             // Buffer size for client data channels
+	dataChannelSendTimeout = 2 * time.Second // Timeout for sending to client channels
+)
+
 type clientEndpoint struct {
 	ClientId      string                    // required, typically custom created guid or other unique id value, used during unsubscribe
 	TopicArn      string                    // required
 	DataToSend    chan *pb.NotificationData // this field will be initialized by clientEndpointMap.Add (No need to init outside)
 	ClientContext context.Context           // this field should be setup by code outside of clientEndpointMap
+	closed        bool                      // internal flag to track if channel is closed
+	closeMux      sync.Mutex                // protects closed flag
+}
+
+// safeClose safely closes the DataToSend channel if not already closed
+func (ep *clientEndpoint) safeClose() {
+	if ep == nil {
+		return
+	}
+	ep.closeMux.Lock()
+	defer ep.closeMux.Unlock()
+	if !ep.closed && ep.DataToSend != nil {
+		close(ep.DataToSend)
+		ep.closed = true
+	}
+}
+
+// safeSend safely sends data to the channel if not closed
+func (ep *clientEndpoint) safeSend(data *pb.NotificationData, timeout time.Duration) bool {
+	if ep == nil {
+		return false
+	}
+	ep.closeMux.Lock()
+	if ep.closed {
+		ep.closeMux.Unlock()
+		return false
+	}
+	ch := ep.DataToSend
+	ep.closeMux.Unlock()
+
+	select {
+	case ch <- data:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 type clientEndpointMap struct {
@@ -68,7 +110,7 @@ func (m *clientEndpointMap) Add(ep *clientEndpoint) bool {
 		m.Clients = make(map[string][]*clientEndpoint)
 	}
 
-	ep.DataToSend = make(chan *pb.NotificationData, 100)
+	ep.DataToSend = make(chan *pb.NotificationData, dataChannelBufferSize)
 
 	epList := m.Clients[ep.TopicArn]
 	epList = append(epList, ep)
@@ -122,8 +164,8 @@ func (m *clientEndpointMap) RemoveByClientId(clientId string) bool {
 	if len(epListToRemove) > 0 && util.LenTrim(topicArnToRemove) > 0 && epIndexToRemove >= 0 {
 		// Close the channel before removing to prevent goroutine leaks
 		ep := epListToRemove[epIndexToRemove]
-		if ep != nil && ep.DataToSend != nil {
-			close(ep.DataToSend)
+		if ep != nil {
+			ep.safeClose()
 		}
 
 		// continue to remove
@@ -165,8 +207,8 @@ func (m *clientEndpointMap) RemoveByTopicArn(topicArn string) bool {
 	// Close all channels for this topic before removing
 	if epList, exists := m.Clients[topicArn]; exists {
 		for _, ep := range epList {
-			if ep != nil && ep.DataToSend != nil {
-				close(ep.DataToSend)
+			if ep != nil {
+				ep.safeClose()
 			}
 		}
 	}
@@ -183,8 +225,8 @@ func (m *clientEndpointMap) RemoveAll() {
 	// Close all channels before clearing
 	for _, epList := range m.Clients {
 		for _, ep := range epList {
-			if ep != nil && ep.DataToSend != nil {
-				close(ep.DataToSend)
+			if ep != nil {
+				ep.safeClose()
 			}
 		}
 	}
@@ -253,7 +295,7 @@ func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend 
 		return false
 	}
 
-	// Find the endpoint without holding lock during send
+	// Find the endpoint
 	var targetEp *clientEndpoint
 	for _, epList := range m.Clients {
 		for _, ep := range epList {
@@ -271,17 +313,8 @@ func (m *clientEndpointMap) SetDataToSendByClientId(clientId string, dataToSend 
 		return false
 	}
 
-	// Send with timeout without holding the main mutex
-	m._mux.Unlock()
-	defer m._mux.Lock()
-
-	select {
-	case targetEp.DataToSend <- dataToSend:
-		return true
-	case <-time.After(2 * time.Second):
-		log.Println("Warning: client " + clientId + " too slow to receive data")
-		return false
-	}
+	// Use safeSend which releases the closeMux before the channel operation
+	return targetEp.safeSend(dataToSend, dataChannelSendTimeout)
 }
 
 func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend *pb.NotificationData) bool {
@@ -308,12 +341,10 @@ func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend 
 		for _, ep := range epList {
 			if ep != nil {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - Before <-dataToSend Assign to ep.DataToSend")
-				select {
-				case ep.DataToSend <- dataToSend:
+				if ep.safeSend(dataToSend, dataChannelSendTimeout) {
 					log.Println("Trace: SetDataSendByTopicArn (Loop) - After <-dataToSend Assign to ep.DataToSend")
-				case <-time.After(2 * time.Second):
-					log.Println("Trace: SetDataSendByTopicArn (Loop) - timeout(2s) on <-dataToSend Assign to ep.DataToSend")
-					continue
+				} else {
+					log.Println("Trace: SetDataSendByTopicArn (Loop) - timeout on <-dataToSend Assign to ep.DataToSend")
 				}
 			} else {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - ep Nil")
@@ -795,20 +826,10 @@ func (n *NotifierImpl) Shutdown(ctx context.Context) error {
 		return fmt.Errorf("NotifierImpl receiver is nil")
 	}
 
-	// 1. Close all client channels gracefully
+	// 1. Close all client channels gracefully using RemoveAll
 	if n._clients != nil {
 		log.Println("--- Closing all client channels ---")
-		n._clients._mux.Lock()
-		for topicArn, epList := range n._clients.Clients {
-			for _, ep := range epList {
-				if ep != nil && ep.DataToSend != nil {
-					close(ep.DataToSend)
-				}
-			}
-			log.Printf("... Closed %d client(s) for topic %s", len(epList), topicArn)
-		}
-		n._clients.Clients = nil
-		n._clients._mux.Unlock()
+		n._clients.RemoveAll()
 	}
 
 	// 2. Remove server route from DynamoDB
