@@ -229,7 +229,7 @@ func (m *clientEndpointMap) safeSend(ep *clientEndpoint, data *pb.NotificationDa
 	case ep.DataToSend <- data:
 		return true
 	case <-time.After(2 * time.Second):
-		return false // channel full or timeout
+		return false // timeout waiting for channel to accept data
 	}
 }
 
