@@ -53,6 +53,7 @@ package notifierserver
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"time"
 
@@ -95,7 +96,10 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 		return nil, fmt.Errorf("WARNING: Notifier-Config.yaml Not Ready: %s", err)
 	} else {
 		if util.LenTrim(notifierServer.ConfigData.NotifierServerData.ServerKey) == 0 {
-			notifierServer.ConfigData.SetServerKey(util.NewULID())
+			// FIX #1: SetServerKey now returns error — must check it
+			if err := notifierServer.ConfigData.SetServerKey(util.NewULID()); err != nil {
+				return nil, fmt.Errorf("ERROR: Set Notifier Server Key Failed: %s", err)
+			}
 
 			if err := notifierServer.ConfigData.Save(); err != nil {
 				return nil, fmt.Errorf("ERROR: Persist Notifier Server Key Failed: %s", err)
@@ -116,9 +120,10 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 	})
 
 	svr.WebServerConfig = &service.WebServerConfig{
-		AppName:          appName,
-		ConfigFileName:   configFileNameWebServer,
-		CustomConfigPath: "",
+		AppName:        appName,
+		ConfigFileName: configFileNameWebServer,
+		// FIX #2: Pass customConfigPath through instead of hardcoding ""
+		CustomConfigPath: customConfigPath,
 		WebServerRoutes: map[string]*ginw.RouteDefinition{
 			"base": {
 				Routes: []*ginw.Route{
@@ -180,14 +185,24 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 
 	n, ok := bindingInputPtr.(*snsNotification)
 
-	if !ok {
+	// FIX #3: Original code did NOT return after failed assertion — execution continued
+	// with n == nil, causing a nil-pointer panic on n.Message, n.TopicArn, etc.
+	if !ok || n == nil {
 		c.String(412, "Assert SNS Notification Json Failed")
+		return
 	}
 
 	log.Println("Notifier Server SNS Relay Started...")
 
 	if util.LenTrim(n.Message) > 0 {
+		// FIX #4: Added recover in goroutine to prevent a Broadcast panic from crashing the server
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("!!! Notifier Server SNS Relay Goroutine Recovered From Panic: %v !!!", r)
+				}
+			}()
+
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
@@ -237,9 +252,18 @@ func snsupdate(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	buf := make([]byte, 1024)
-	num, _ := c.Request.Body.Read(buf)
-	subscriptionArn := string(buf[0:num])
+	// FIX #5: Use io.ReadAll instead of fixed 1024-byte buffer.
+	// The original code used `buf := make([]byte, 1024)` with a single Read call that:
+	// - Silently ignored the error from Read
+	// - Truncated bodies longer than 1024 bytes
+	// - Could return fewer bytes than available (io.Read contract allows partial reads)
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.String(412, "SNS Update Failed to Read Http Request Body")
+		return
+	}
+
+	subscriptionArn := string(bodyBytes)
 
 	if util.LenTrim(subscriptionArn) == 0 {
 		c.String(412, "SNS Update Requires SubscriptionArn in Http Request Body")

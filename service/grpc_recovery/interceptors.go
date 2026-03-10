@@ -1,11 +1,8 @@
-// Copyright 2017 David Ackroyd. All Rights Reserved.
-// See LICENSE for licensing terms.
-
 package grpc_recovery
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"runtime/debug"
 
 	"google.golang.org/grpc"
@@ -26,9 +23,7 @@ func UnaryServerInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("%s\n", r)
-				fmt.Printf("stack: %s\n", debug.Stack())
-				fmt.Printf("\n\n\n Start Service Again\n")
+				log.Printf("grpc_recovery: recovered from panic: %v\n%s", r, debug.Stack())
 				err = recoverFrom(ctx, r, o.recoveryHandlerFunc)
 			}
 		}()
@@ -44,8 +39,7 @@ func StreamServerInterceptor(opts ...Option) grpc.StreamServerInterceptor {
 	return func(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("%s\n", r)
-				fmt.Printf("\n\n\n Start Service Again\n")
+				log.Printf("grpc_recovery: recovered from panic: %v\n%s", r, debug.Stack())
 				err = recoverFrom(stream.Context(), r, o.recoveryHandlerFunc)
 			}
 		}()

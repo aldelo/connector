@@ -29,9 +29,13 @@ type Option func(*options)
 // WithRecoveryHandler customizes the function for recovering from a panic.
 func WithRecoveryHandler(f RecoveryHandlerFunc) Option {
 	return func(o *options) {
-		o.recoveryHandlerFunc = RecoveryHandlerFuncContext(func(ctx context.Context, p interface{}) error {
+		if f == nil {
+			o.recoveryHandlerFunc = nil
+			return
+		}
+		o.recoveryHandlerFunc = func(ctx context.Context, p interface{}) error {
 			return f(p)
-		})
+		}
 	}
 }
 

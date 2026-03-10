@@ -1,6 +1,3 @@
-// Copyright 2017 David Ackroyd. All Rights Reserved.
-// See LICENSE for licensing terms.
-
 package grpc_recovery
 
 import (

@@ -27,25 +27,21 @@ import (
 	_ "google.golang.org/grpc/balancer/roundrobin"
 )
 
-// add precompiled regex for scheme validation
 var schemeRE = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
 
-// enforce URI-safe service names (RFC3986 unreserved + '.' '_' '-')
 var serviceRE = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
 
-// host label must not start/end with hyphen or dot; allow IPv6 literals separately
 var hostLabelRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 
 // WithRoundRobin returns gRPC dial target, and defaultServiceConfig set for Round Robin client side load balancer
 func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []string) (target string, loadBalancerPolicy string, err error) {
-	// trim inputs before validation/use
 	scheme := strings.TrimSpace(strings.ToLower(schemeName))
 	service := strings.TrimSpace(serviceName)
 
 	if scheme == "" {
 		return "", "", fmt.Errorf("resolver scheme name is required")
 	}
-	if !schemeRE.MatchString(scheme) { // validate scheme syntax
+	if !schemeRE.MatchString(scheme) {
 		return "", "", fmt.Errorf("resolver scheme name %q is invalid (must match [a-z][a-z0-9+.-]*)", scheme)
 	}
 
@@ -55,10 +51,10 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 	if !serviceRE.MatchString(service) {
 		return "", "", fmt.Errorf("resolver service name %q is invalid (allowed: A-Z a-z 0-9 . _ ~ -)", service)
 	}
-	if strings.ContainsAny(service, "/ \t\r\n") { // disallow slashes/whitespace to keep target valid
+	if strings.ContainsAny(service, "/ \t\r\n") {
 		return "", "", fmt.Errorf("resolver service name %q is invalid (must not contain slashes or whitespace)", service)
 	}
-	if strings.Contains(service, "://") { // prevent embedded scheme-like fragments
+	if strings.Contains(service, "://") {
 		return "", "", fmt.Errorf("resolver service name %q is invalid (must not contain \"://\")", service)
 	}
 
@@ -73,7 +69,6 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		if trimmed == "" {
 			continue
 		}
-		// block addresses that already include a URI scheme
 		if strings.Contains(trimmed, "://") {
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (must not include a URI scheme)", i, a)
 		}
@@ -83,7 +78,6 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (want host:port; IPv6 must be in [::1]:port form): %w", i, a, splitErr)
 		}
 
-		// allow absolute FQDNs with trailing dot; still reject empty host
 		if !strings.Contains(host, ":") && strings.HasSuffix(host, ".") {
 			host = strings.TrimSuffix(host, ".")
 			if host == "" {
@@ -91,7 +85,6 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 			}
 		}
 
-		// ensure host segment itself has no embedded scheme/path
 		if strings.Contains(host, "://") || strings.ContainsAny(host, "/?#") {
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) is invalid (host must not contain scheme or path)", i, a)
 		}
@@ -99,21 +92,20 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		var ipHost net.IP
 		ipZone := ""
 
-		if strings.Contains(host, ":") { // treat colon hosts as IP literals (IPv6 or IPv4-mapped)
+		if strings.Contains(host, ":") {
 			baseHost := host
 			if zoneIdx := strings.LastIndex(host, "%"); zoneIdx != -1 {
 				baseHost = host[:zoneIdx]
 				ipZone = host[zoneIdx+1:]
-				if ipZone == "" { // validate non-empty zone if present
+				if ipZone == "" {
 					return "", "", fmt.Errorf("resolver endpoint address %d (%q) has invalid IPv6 zone (empty)", i, a)
 				}
 			}
 			ipHost = net.ParseIP(baseHost)
-			if ipHost == nil { // reject invalid IP literals
+			if ipHost == nil {
 				return "", "", fmt.Errorf("resolver endpoint address %d (%q) has invalid IP literal %q", i, a, baseHost)
 			}
 		} else {
-			// validate host labels for DNS names (skip IP literals)
 			labels := strings.Split(host, ".")
 			for _, lbl := range labels {
 				if lbl == "" || !hostLabelRE.MatchString(lbl) {
@@ -122,14 +114,12 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 			}
 		}
 
-		// validate port is numeric and within 1-65535
 		if p, convErr := strconv.Atoi(port); convErr != nil || p < 1 || p > 65535 {
 			return "", "", fmt.Errorf("resolver endpoint address %d (%q) has invalid port %q (must be numeric 1-65535): %v", i, a, port, convErr)
 		}
 
-		// canonicalize hostname for deduplication (lowercase DNS; preserve IP/zone) and rebuild
 		canonicalHost := host
-		if ipHost != nil { // canonicalize IP literal (preserve zone)
+		if ipHost != nil {
 			canonicalHost = ipHost.String()
 			if ipZone != "" {
 				canonicalHost = canonicalHost + "%" + ipZone
@@ -140,7 +130,7 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		canonical := net.JoinHostPort(canonicalHost, port)
 
 		if _, ok := seen[canonical]; ok {
-			continue // skip duplicates
+			continue
 		}
 		seen[canonical] = struct{}{}
 		cleanAddrs = append(cleanAddrs, canonical)
@@ -153,13 +143,19 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 		return "", "", fmt.Errorf("setup CLB new resolver failed: %w", err)
 	}
 
-	// load balancer round robin is per call, rather than per connection
-	// this means, load balancer will connect to all discovered ip and
-	// perform per call actions in round robin fashion across all channels
 	target = fmt.Sprintf("%s:///%s", scheme, service)
 
-	// return a valid gRPC service config string for round_robin
-	loadBalancerPolicy = `{"loadBalancingConfig":[{"round_robin":{}}]}`
+	// FIX: Return a JSON *fragment* (without outer braces), not a complete JSON object.
+	// The caller in client.go wraps this in fmt.Sprintf(`{%s}`, defSvrConf), so returning
+	// a full object like `{"loadBalancingConfig":[...]}` produces `{{"loadBalancingConfig":[...]}}` —
+	// double-wrapped braces, invalid JSON. gRPC silently ignores invalid service configs,
+	// meaning round-robin load balancing never activates and all RPCs go to one backend.
+	//
+	// With this fragment, the caller produces:
+	//   LB only:        `{"loadBalancingConfig":[{"round_robin":{}}]}`
+	//   LB + health:    `{"loadBalancingConfig":[{"round_robin":{}}], "healthCheckConfig":{"serviceName":""}}`
+	// Both are valid gRPC service config JSON.
+	loadBalancerPolicy = `"loadBalancingConfig":[{"round_robin":{}}]`
 
 	return target, loadBalancerPolicy, nil
 }

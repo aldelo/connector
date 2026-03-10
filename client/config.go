@@ -18,10 +18,11 @@ package client
 
 import (
 	"fmt"
-	util "github.com/aldelo/common"
-	data "github.com/aldelo/common/wrapper/viper"
 	"os"
 	"strings"
+
+	util "github.com/aldelo/common"
+	data "github.com/aldelo/common/wrapper/viper"
 )
 
 type config struct {
@@ -345,99 +346,104 @@ func (c *config) SetCircuitBreakerLoggerEnabled(b bool) {
 	}
 }
 
-// Read will load config settings from disk
+// Read will load config settings from disk.
+// FIX #1: Builds into local variables first and only overwrites c._v, c.Target, etc.
+// on success, so a failed Read() doesn't destroy previously valid state.
 func (c *config) Read() error {
-	c._v = nil
-	c.Target = targetData{}
-	c.Queues = queuesData{}
-	c.Topics = topicsData{}
-	c.Grpc = grpcData{}
-
 	if util.LenTrim(c.AppName) == 0 {
 		return fmt.Errorf("App Name is Required")
 	}
 
-	if util.LenTrim(c.ConfigFileName) == 0 {
-		c.ConfigFileName = "client"
+	configFileName := c.ConfigFileName
+	if util.LenTrim(configFileName) == 0 {
+		configFileName = "client"
 	}
 
-	c._v = &data.ViperConf{
+	v := &data.ViperConf{
 		AppName:          c.AppName,
-		ConfigName:       c.ConfigFileName,
+		ConfigName:       configFileName,
 		CustomConfigPath: c.CustomConfigPath,
 
 		UseYAML:            true,
 		UseAutomaticEnvVar: false,
 	}
 
-	c._v.Default(
-		"target.app_name", "connector.client").Default( // required, this client app's name
-		"target.service_discovery_type", "srv").Default( // required, defines target service discovery mode: srv, a, api, direct
-		"target.direct_connect_ip_port", "").Default( // for direct: ip:port format of direct service endpoint (for testing use only)
-		"target.service_name", "").Default( // for srv, api: service name as registered on cloud map
-		"target.namespace_name", "").Default( // for srv, api: namespace name as registered on cloud map
-		"target.region", "us-east-1").Default( // for api: must be valid aws regions supported
-		"target.instance_version", "").Default( // for api: target instance filter to given version only
-		"target.instance_port", 0).Default( // for sd = a: specific port being used on service endpoint
-		"target.sd_timeout", 5).Default( // timeout seconds for service discovery actions
-		"target.sd_endpoint_cache_expires", 300).Default( // service discovery endpoints cache expires seconds, 0 for default of 300 seconds
-		"target.sd_instance_max_result", 100).Default( // service discovery api returns maximum instances count from discovery call, 0 for default of 100
-		"target.trace_use_xray", false).Default( // indicates if this client will use aws xray tracing, default is false
-		"target.zaplog_enabled", false).Default( // indicates if app logs will use zap log, default = false, meaning no log written
-		"target.zaplog_output_console", true).Default( // indicates if zap log outputs to console (screen) or to file, true = console, false = file; default = true
-		"target.rest_target_ca_cert_files", "").Default( // optional, self-signed ca certs file path, separated by comma if multiple ca pems,
-		// 			 used by rest get/post/put/delete against target server hosts that use self-signed certs for tls,
-		//			 to avoid bad certificate error during tls handshake
-		"queues.sqs_logger_queue_url", "").Default( // the queue url pre-created on aws sqs for the target logger service this config file targets
-		"topics.sns_discovery_topic_arn", "").Default( // the topic arn pre-created on aws sns for the target discovery service this config file targets
-		"grpc.dial_blocking_mode", true).Default( // indicate if grpc dial is blocking mode or not, default is true
-		"grpc.server_ca_cert_files", "").Default( // for server TLS or mTLS setup, one or more server CA cert path to pem file, multiple files separated by comma
-		"grpc.client_cert_file", "").Default( // for mTLS setup, the client certificate pem file path
-		"grpc.client_key_file", "").Default( // for mTLS setup, the client certificate key file path
-		"grpc.user_agent", "").Default( // define user agent string for all RPCs
-		"grpc.use_load_balancer", true).Default( // indicates round robin load balancer is to be used, default is true
-		"grpc.use_health_check", true).Default( // indicates health check for server serving status is enabled, default is true
-		"grpc.dial_min_connect_timeout", 5).Default( // indicates the minimum connect timeout seconds for the dial action, default is 5 seconds
-		"grpc.keepalive_inactive_ping_time_trigger", 0).Default( // max seconds of no activity before client pings server, 0 for default of 30 seconds
-		"grpc.keepalive_inactive_ping_timeout", 0).Default( // max seconds of timeout during client to server ping, where no response closes connection, 0 for default of 5 seconds
-		"grpc.keepalive_permit_without_stream", false).Default( // allow client to keepalive if no stream, false is default
-		"grpc.read_buffer_size", 0).Default( // 0 for default 32 kb = 1024 * 32
-		"grpc.write_buffer_size", 0).Default( // 0 for default 32 kb = 1024 * 32
-		"grpc.circuit_breaker_enabled", false).Default( // indicates if circuit breaker is enabled, default is false
-		"grpc.circuit_breaker_timeout", 1000).Default( // how long to wait for command to complete, in milliseconds, default = 1000
-		"grpc.circuit_breaker_max_concurrent_requests", 10).Default( // how many commands of the same type can run at the same time, default = 10
-		"grpc.circuit_breaker_request_volume_threshold", 20).Default( // minimum number of requests needed before a circuit can be tripped due to health, default = 20
-		"grpc.circuit_breaker_sleep_window", 5000).Default( // how long to wait after a circuit opens before testing for recovery, in milliseconds, default = 5000
-		"grpc.circuit_breaker_error_percent_threshold", 50).Default( // causes circuits to open once the rolling measure of errors exceeds this percent of requests, default = 50
-		"grpc.circuit_breaker_logger_enabled", true) // indicates the logger that will be used to log circuit breaker action
+	v.Default(
+		"target.app_name", "connector.client").Default(
+		"target.service_discovery_type", "srv").Default(
+		"target.direct_connect_ip_port", "").Default(
+		"target.service_name", "").Default(
+		"target.namespace_name", "").Default(
+		"target.region", "us-east-1").Default(
+		"target.instance_version", "").Default(
+		"target.instance_port", 0).Default(
+		"target.sd_timeout", 5).Default(
+		"target.sd_endpoint_cache_expires", 300).Default(
+		"target.sd_instance_max_result", 100).Default(
+		"target.trace_use_xray", false).Default(
+		"target.zaplog_enabled", false).Default(
+		"target.zaplog_output_console", true).Default(
+		"target.rest_target_ca_cert_files", "").Default(
+		"queues.sqs_logger_queue_url", "").Default(
+		"topics.sns_discovery_topic_arn", "").Default(
+		"grpc.dial_blocking_mode", true).Default(
+		"grpc.server_ca_cert_files", "").Default(
+		"grpc.client_cert_file", "").Default(
+		"grpc.client_key_file", "").Default(
+		"grpc.user_agent", "").Default(
+		"grpc.use_load_balancer", true).Default(
+		"grpc.use_health_check", true).Default(
+		"grpc.dial_min_connect_timeout", 5).Default(
+		"grpc.keepalive_inactive_ping_time_trigger", 0).Default(
+		"grpc.keepalive_inactive_ping_timeout", 0).Default(
+		"grpc.keepalive_permit_without_stream", false).Default(
+		"grpc.read_buffer_size", 0).Default(
+		"grpc.write_buffer_size", 0).Default(
+		"grpc.circuit_breaker_enabled", false).Default(
+		"grpc.circuit_breaker_timeout", 1000).Default(
+		"grpc.circuit_breaker_max_concurrent_requests", 10).Default(
+		"grpc.circuit_breaker_request_volume_threshold", 20).Default(
+		"grpc.circuit_breaker_sleep_window", 5000).Default(
+		"grpc.circuit_breaker_error_percent_threshold", 50).Default(
+		"grpc.circuit_breaker_logger_enabled", true)
 
-	if ok, err := c._v.Init(); err != nil {
+	if ok, err := v.Init(); err != nil {
 		return err
 	} else {
 		if !ok {
-			if e := c._v.Save(); e != nil {
+			if e := v.Save(); e != nil {
 				return fmt.Errorf("create config file failed: %w", e)
 			}
 		} else {
-			//c._v.WatchConfig()
+			//v.WatchConfig()
 		}
 	}
 
-	if err := c._v.Unmarshal(c); err != nil {
+	// Unmarshal into a temporary config to validate before committing
+	tempCfg := &config{}
+	if err := v.Unmarshal(tempCfg); err != nil {
 		return err
 	}
+
+	// All succeeded — commit to receiver
+	c._v = v
+	c.ConfigFileName = configFileName
+	c.Target = tempCfg.Target
+	c.Queues = tempCfg.Queues
+	c.Topics = tempCfg.Topics
+	c.Grpc = tempCfg.Grpc
 
 	return nil
 }
 
-// Save persists config settings to disk
+// Save persists config settings to disk.
+// FIX #2: Returns an error when _v is nil instead of silently succeeding.
 func (c *config) Save() error {
 	if strings.ToLower(os.Getenv("CONFIG_READ_ONLY")) == "true" {
 		return nil
 	}
-	if c._v != nil {
-		return c._v.Save()
-	} else {
-		return nil
+	if c._v == nil {
+		return fmt.Errorf("cannot save: viper config not initialized (call Read first)")
 	}
+	return c._v.Save()
 }

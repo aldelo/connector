@@ -33,10 +33,12 @@ type Config struct {
 
 	_v *data.ViperConf `mapstructure:"-"`
 
-	NotifierGatewayData *notifierGatewayData `mapstructure:"notifier_gateway"`
+	NotifierGatewayData *NotifierGatewayData `mapstructure:"notifier_gateway"`
 }
 
-type notifierGatewayData struct {
+// FIX #7: Exported so other packages can declare variables of this type
+// and access the struct fields directly.
+type NotifierGatewayData struct {
 	DynamoDBAwsRegion                   string        `mapstructure:"dynamodb_aws_region"`
 	DynamoDBUseDax                      bool          `mapstructure:"dynamodb_use_dax"`
 	DynamoDBDaxUrl                      string        `mapstructure:"dynamodb_dax_url"`
@@ -47,12 +49,22 @@ type notifierGatewayData struct {
 	ServiceDiscoveryTimeoutSeconds      uint          `mapstructure:"service_discovery_timeout_seconds"`
 	HealthReportCleanUpFrequencySeconds uint          `mapstructure:"health_report_cleanup_frequency_seconds"`
 	HealthReportRecordStaleMinutes      uint          `mapstructure:"health_report_record_stale_minutes"`
-	HashKeys                            []hashKeyData `mapstructure:"hash_keys"`
+	HashKeys                            []HashKeyData `mapstructure:"hash_keys"`
 }
 
-type hashKeyData struct {
+// FIX #7: Exported so other packages can construct HashKeyData values
+// to pass to SetHashKeys.
+type HashKeyData struct {
 	HashKeyName   string `mapstructure:"hash_key_name"`
 	HashKeySecret string `mapstructure:"hash_key_secret"`
+}
+
+// ensureGatewayData initializes NotifierGatewayData if nil.
+// FIX #1: All setters call this to prevent nil-pointer panics when called before Read().
+func (c *Config) ensureGatewayData() {
+	if c.NotifierGatewayData == nil {
+		c.NotifierGatewayData = &NotifierGatewayData{}
+	}
 }
 
 func (c *Config) SetDynamoDBAwsRegion(s string) error {
@@ -73,6 +85,7 @@ func (c *Config) SetDynamoDBAwsRegion(s string) error {
 		return fmt.Errorf("invalid AWS region provided")
 	}
 
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.dynamodb_aws_region", s)
 	c.NotifierGatewayData.DynamoDBAwsRegion = s
 	return nil
@@ -86,6 +99,16 @@ func (c *Config) SetDynamoDBUseDax(b bool) error {
 		return fmt.Errorf("viper config not initialized")
 	}
 
+	// FIX #5: If disabling DAX, just set the flag.
+	// If enabling DAX, validate that DaxUrl is already configured.
+	if b {
+		c.ensureGatewayData()
+		if util.LenTrim(c.NotifierGatewayData.DynamoDBDaxUrl) == 0 {
+			return fmt.Errorf("cannot enable DAX without a configured DynamoDB DAX URL; call SetDynamoDBDaxUrl first")
+		}
+	}
+
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.dynamodb_use_dax", b)
 	c.NotifierGatewayData.DynamoDBUseDax = b
 	return nil
@@ -100,8 +123,8 @@ func (c *Config) SetDynamoDBDaxUrl(s string) error {
 	}
 
 	s = strings.TrimSpace(s)
-	// DAX URL can be empty if not using DAX, but if provided should be validated
 
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.dynamodb_dax_url", s)
 	c.NotifierGatewayData.DynamoDBDaxUrl = s
 	return nil
@@ -120,6 +143,7 @@ func (c *Config) SetDynamoDBTable(s string) error {
 		return fmt.Errorf("DynamoDB table name cannot be empty")
 	}
 
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.dynamodb_table", s)
 	c.NotifierGatewayData.DynamoDBTable = s
 	return nil
@@ -137,6 +161,7 @@ func (c *Config) SetDynamoDBTimeoutSeconds(i uint) error {
 		return fmt.Errorf("DynamoDB timeout must be greater than 0")
 	}
 
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.dynamodb_timeout_seconds", i)
 	c.NotifierGatewayData.DynamoDBTimeoutSeconds = i
 	return nil
@@ -150,8 +175,7 @@ func (c *Config) SetDynamoDBActionRetries(i uint) error {
 		return fmt.Errorf("viper config not initialized")
 	}
 
-	// Action retries can be 0, meaning no retries
-
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.dynamodb_action_retries", i)
 	c.NotifierGatewayData.DynamoDBActionRetries = i
 	return nil
@@ -166,8 +190,8 @@ func (c *Config) SetGatewayKey(s string) error {
 	}
 
 	s = strings.TrimSpace(s)
-	// Gateway key can be empty if not using authentication
 
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.gateway_key", s)
 	c.NotifierGatewayData.GatewayKey = s
 	return nil
@@ -185,6 +209,7 @@ func (c *Config) SetServiceDiscoveryTimeoutSeconds(i uint) error {
 		return fmt.Errorf("service discovery timeout must be greater than 0")
 	}
 
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.service_discovery_timeout_seconds", i)
 	c.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds = i
 	return nil
@@ -198,8 +223,7 @@ func (c *Config) SetHealthReportCleanUpFrequencySeconds(i uint) error {
 		return fmt.Errorf("viper config not initialized")
 	}
 
-	// Frequency can be 0, will use default value
-
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.health_report_cleanup_frequency_seconds", i)
 	c.NotifierGatewayData.HealthReportCleanUpFrequencySeconds = i
 	return nil
@@ -213,14 +237,15 @@ func (c *Config) SetHealthReportRecordStaleMinutes(i uint) error {
 		return fmt.Errorf("viper config not initialized")
 	}
 
-	// Stale minutes can be 0, will use default value
-
+	c.ensureGatewayData()
 	c._v.Set("notifier_gateway.health_report_record_stale_minutes", i)
 	c.NotifierGatewayData.HealthReportRecordStaleMinutes = i
 	return nil
 }
 
-func (c *Config) SetHashKeys(hk ...hashKeyData) error {
+// FIX #4: Trim key names and secrets before storing so that lookups
+// using trimmed names (e.g. model.GetHashKey("mykey")) match correctly.
+func (c *Config) SetHashKeys(hk ...HashKeyData) error {
 	if c == nil {
 		return fmt.Errorf("config receiver is nil")
 	}
@@ -228,89 +253,124 @@ func (c *Config) SetHashKeys(hk ...hashKeyData) error {
 		return fmt.Errorf("viper config not initialized")
 	}
 
-	// Validate hash keys
+	// Validate and normalize hash keys
+	normalized := make([]HashKeyData, 0, len(hk))
 	for _, key := range hk {
-		if strings.TrimSpace(key.HashKeyName) == "" {
+		name := strings.TrimSpace(key.HashKeyName)
+		secret := strings.TrimSpace(key.HashKeySecret)
+
+		if name == "" {
 			return fmt.Errorf("hash key name cannot be empty")
 		}
-		if strings.TrimSpace(key.HashKeySecret) == "" {
-			return fmt.Errorf("hash key secret cannot be empty for key: %s", key.HashKeyName)
+		if secret == "" {
+			return fmt.Errorf("hash key secret cannot be empty for key: %s", name)
 		}
+
+		normalized = append(normalized, HashKeyData{
+			HashKeyName:   name,
+			HashKeySecret: secret,
+		})
 	}
 
-	c._v.Set("notifier_gateway.hash_keys", hk)
-	c.NotifierGatewayData.HashKeys = hk
+	c.ensureGatewayData()
+	c._v.Set("notifier_gateway.hash_keys", normalized)
+	c.NotifierGatewayData.HashKeys = normalized
 	return nil
 }
 
-// Read will load config settings from disk
+// Read will load config settings from disk.
+// FIX #2: Builds into local variables first and only overwrites c._v and
+// c.NotifierGatewayData on success, so a failed Read() doesn't destroy
+// previously valid state.
+// FIX #3: Validates required fields (DynamoDBAwsRegion, DynamoDBTable)
+// after unmarshal so callers get a clear error instead of a confusing
+// downstream AWS SDK failure.
 func (c *Config) Read() error {
-	c._v = nil
-	c.NotifierGatewayData = &notifierGatewayData{}
-
 	if util.LenTrim(c.AppName) == 0 {
 		return fmt.Errorf("App Name is Required")
 	}
 
-	if util.LenTrim(c.ConfigFileName) == 0 {
-		c.ConfigFileName = "gateway-config"
+	configFileName := c.ConfigFileName
+	if util.LenTrim(configFileName) == 0 {
+		configFileName = "gateway-config"
 	}
 
-	c._v = &data.ViperConf{
+	v := &data.ViperConf{
 		AppName:          c.AppName,
-		ConfigName:       c.ConfigFileName,
+		ConfigName:       configFileName,
 		CustomConfigPath: c.CustomConfigPath,
 
 		UseYAML:            true,
 		UseAutomaticEnvVar: false,
 	}
 
-	c._v.Default("notifier_gateway.dynamodb_aws_region", "").Default( // required, valid aws region such as us-east-1
-		"notifier_gateway.dynamodb_use_dax", false).Default( // optional, true = uses dax
-		"notifier_gateway.dynamodb_dax_url", "").Default( // conditional, required if use dax = true
-		"notifier_gateway.dynamodb_table", "").Default( // required, dynamodb table name
-		"notifier_gateway.dynamodb_timeout_seconds", 5).Default( // optional, dynamodb action timeout seconds
-		"notifier_gateway.dynamodb_action_retries", 3).Default( // optional, dynamodb actions retry count
-		"notifier_gateway.gateway_key", "").Default( // optional, gateway key is used to validate inbound request when such request is to be validated
-		"notifier_gateway.service_discovery_timeout_seconds", 5) // optional, service discovery actions timeout seconds, defaults to 5 seconds
+	v.Default("notifier_gateway.dynamodb_aws_region", "").Default(
+		"notifier_gateway.dynamodb_use_dax", false).Default(
+		"notifier_gateway.dynamodb_dax_url", "").Default(
+		"notifier_gateway.dynamodb_table", "").Default(
+		"notifier_gateway.dynamodb_timeout_seconds", 5).Default(
+		"notifier_gateway.dynamodb_action_retries", 3).Default(
+		"notifier_gateway.gateway_key", "").Default(
+		"notifier_gateway.service_discovery_timeout_seconds", 5)
 
-	// optional, health report service record clean up frequency seconds, default is 120, minmimum is 30, maximum is 3600 (1 hour), 0 = 120
-	c._v.Default("notifier_gateway.health_report_cleanup_frequency_seconds", 120)
+	v.Default("notifier_gateway.health_report_cleanup_frequency_seconds", 120)
+	v.Default("notifier_gateway.health_report_record_stale_minutes", 5)
+	v.Default("notifier_gateway.hash_keys", []HashKeyData{})
 
-	// optional, health report service record stale minutes, total minutes before record is considered stale and primed for clean up removal
-	// minimum = 3 minutes, default = 5 minutes, maximum = 15 minutes, 0 = 5 minutes
-	c._v.Default("notifier_gateway.health_report_record_stale_minutes", 5)
-
-	// optional, sets up default hash keys slice
-	c._v.Default("notifier_gateway.hash_keys", []hashKeyData{})
-
-	if ok, err := c._v.Init(); err != nil {
+	if ok, err := v.Init(); err != nil {
 		return err
 	} else {
 		if !ok {
-			if e := c._v.Save(); e != nil {
+			if e := v.Save(); e != nil {
 				return fmt.Errorf("create config file failed: %w", e)
 			}
 		} else {
-			c._v.WatchConfig()
+			v.WatchConfig()
 		}
 	}
 
-	if err := c._v.Unmarshal(c); err != nil {
+	// Unmarshal into a temporary Config to validate before committing
+	tempCfg := &Config{}
+	if err := v.Unmarshal(tempCfg); err != nil {
 		return err
 	}
 
+	// FIX #3: Validate required fields after unmarshal
+	if tempCfg.NotifierGatewayData == nil {
+		return fmt.Errorf("notifier_gateway config section is missing")
+	}
+
+	if util.LenTrim(tempCfg.NotifierGatewayData.DynamoDBAwsRegion) == 0 {
+		return fmt.Errorf("notifier_gateway.dynamodb_aws_region is required")
+	}
+
+	if awsregion.GetAwsRegion(tempCfg.NotifierGatewayData.DynamoDBAwsRegion) == awsregion.UNKNOWN {
+		return fmt.Errorf("notifier_gateway.dynamodb_aws_region '%s' is not a valid AWS region", tempCfg.NotifierGatewayData.DynamoDBAwsRegion)
+	}
+
+	if util.LenTrim(tempCfg.NotifierGatewayData.DynamoDBTable) == 0 {
+		return fmt.Errorf("notifier_gateway.dynamodb_table is required")
+	}
+
+	if tempCfg.NotifierGatewayData.DynamoDBUseDax && util.LenTrim(tempCfg.NotifierGatewayData.DynamoDBDaxUrl) == 0 {
+		return fmt.Errorf("notifier_gateway.dynamodb_dax_url is required when dynamodb_use_dax is true")
+	}
+
+	// FIX #2: All validation passed — now commit to receiver
+	c._v = v
+	c.ConfigFileName = configFileName
+	c.NotifierGatewayData = tempCfg.NotifierGatewayData
 	return nil
 }
 
-// Save persists config settings to disk
+// Save persists config settings to disk.
+// FIX #6: Returns an error when _v is nil instead of silently succeeding.
 func (c *Config) Save() error {
 	if strings.ToLower(os.Getenv("CONFIG_READ_ONLY")) == "true" {
 		return nil
 	}
-	if c._v != nil {
-		return c._v.Save()
-	} else {
-		return nil
+	if c._v == nil {
+		return fmt.Errorf("cannot save: viper config not initialized (call Read first)")
 	}
+	return c._v.Save()
 }

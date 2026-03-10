@@ -1,6 +1,7 @@
 package notifiergateway
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"strconv"
@@ -99,6 +100,11 @@ type healthreport struct {
 	HashSignature string `json:"HashSignature"`
 }
 
+// secureCompare performs constant-time comparison to prevent timing attacks on token/signature validation.
+func secureCompare(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
 // NewNotifierGateway constructs a new web server object for use as the notifier gateway host
 func NewNotifierGateway(appName string, configFileNameWebServer string, configFileNameGateway string, customConfigPath string) (*webserver.WebServer, error) {
 	// read gateway config data
@@ -113,10 +119,11 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	}
 
 	// establish data store connection
+	// FIX #9: ConnectDataStore already sets DynamoDBActionRetryAttempts atomically,
+	// so the redundant SetDynamoDBActionRetryAttempts call is removed.
 	if err := model.ConnectDataStore(cfg); err != nil {
 		return nil, fmt.Errorf("Connect Notifier Gateway Data Store Failed: %s", err.Error())
 	} else {
-		model.SetDynamoDBActionRetryAttempts(cfg.NotifierGatewayData.DynamoDBActionRetries)
 		model.SetGatewayKey(cfg.NotifierGatewayData.GatewayKey)
 
 		hashKeysMap := make(map[string]string)
@@ -174,7 +181,6 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 
 // escapeUserInput replaces control characters (newlines, carriage returns, tabs) with spaces to mitigate log-injection vulnerability
 func escapeUserInput(data string) string {
-	// Remove newlines, carriage returns, and other common log injection characters
 	result := strings.ReplaceAll(data, "\n", " ")
 	result = strings.ReplaceAll(result, "\r", " ")
 	result = strings.ReplaceAll(result, "\t", " ")
@@ -244,19 +250,24 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
+	// FIX #8: Escape user-controlled HashKeyName before logging
+	escapedHashKeyName := escapeUserInput(data.HashKeyName)
+
 	hashSecret, hsFound := model.GetHashKey(data.HashKeyName)
 	if !hsFound || util.LenTrim(hashSecret) == 0 {
-		log.Println("!!! Inbound Health Report Hash Key Name '" + data.HashKeyName + "' From " + escapeUserInput(c.ClientIP()) + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
-		c.String(401, "Inbound Health Report Hash Key Name '"+data.HashKeyName+"' Not Valid")
+		log.Println("!!! Inbound Health Report Hash Key Name '" + escapedHashKeyName + "' From " + escapeUserInput(c.ClientIP()) + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
+		c.String(401, "Inbound Health Report Hash Key Name Not Valid")
 		return
 	} else {
 		buf := data.NamespaceId + data.ServiceId + data.InstanceId + util.FormatDate(time.Now().UTC())
 		bufHash := crypto.Sha256(buf, hashSecret)
 
-		if bufHash != data.HashSignature {
+		// FIX #7: Use constant-time comparison to prevent timing attacks
+		if !secureCompare(bufHash, data.HashSignature) {
 			log.Println("!!! Inbound Health Report Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: Hash Signature Mismatch !!!")
-			log.Println("... Host = Sha256 Source: " + buf + ", Salt: " + hashSecret + ", Signature: " + bufHash)
-			log.Println("... Client = Sha256 Source: " + data.NamespaceId + data.ServiceId + data.InstanceId + " + Client Side Date, Salt: Client Side Hash Key Secret, Signature: " + data.HashSignature)
+			// FIX #6: Do not log hash secret in plaintext
+			log.Println("... Host = Sha256 Source: " + escapeUserInput(buf) + ", Signature: " + bufHash)
+			log.Println("... Client = Sha256 Signature: " + escapeUserInput(data.HashSignature))
 			c.String(401, "Inbound Health Report Hash Signature Not Valid")
 			return
 		}
@@ -271,11 +282,11 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 
 		trace.Capture("healthReporter.writeToDataStore", func() error {
 			if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo); e != nil {
-				log.Println("!!! Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store Failed: " + e.Error() + " !!!")
+				log.Println("!!! Inbound Health Report (NamespaceID '" + escapeUserInput(data.NamespaceId) + "', ServiceID '" + escapeUserInput(data.ServiceId) + "', InstanceID '" + escapeUserInput(data.InstanceId) + "') Persist to Data Store Failed: " + e.Error() + " !!!")
 				c.String(500, "Persist Instance Status to Data Store Failed")
 				return fmt.Errorf("Persist Instance Status to Data Store Failed: %s", e.Error())
 			} else {
-				log.Println("+++ Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store OK +++")
+				log.Println("+++ Inbound Health Report (NamespaceID '" + escapeUserInput(data.NamespaceId) + "', ServiceID '" + escapeUserInput(data.ServiceId) + "', InstanceID '" + escapeUserInput(data.InstanceId) + "') Persist to Data Store OK +++")
 				c.String(200, "Persist Instance Status to Data Store OK")
 				return nil
 			}
@@ -292,10 +303,10 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 	} else {
 		// store health report update to dynamodb
 		if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo); e != nil {
-			log.Println("!!! Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store Failed: " + e.Error() + " !!!")
+			log.Println("!!! Inbound Health Report (NamespaceID '" + escapeUserInput(data.NamespaceId) + "', ServiceID '" + escapeUserInput(data.ServiceId) + "', InstanceID '" + escapeUserInput(data.InstanceId) + "') Persist to Data Store Failed: " + e.Error() + " !!!")
 			c.String(500, "Persist Instance Status to Data Store Failed")
 		} else {
-			log.Println("+++ Inbound Health Report (NamespaceID '" + data.NamespaceId + "', ServiceID '" + data.ServiceId + "', InstanceID '" + data.InstanceId + "') Persist to Data Store OK +++")
+			log.Println("+++ Inbound Health Report (NamespaceID '" + escapeUserInput(data.NamespaceId) + "', ServiceID '" + escapeUserInput(data.ServiceId) + "', InstanceID '" + escapeUserInput(data.InstanceId) + "') Persist to Data Store OK +++")
 			c.String(200, "Persist Instance Status to Data Store OK")
 		}
 	}
@@ -348,24 +359,26 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 	hashSecret, hsFound := model.GetHashKey(hashKeyName)
 	if !hsFound || util.LenTrim(hashSecret) == 0 {
 		log.Println("!!! Delete Health Report Service Record Request's Hash Key Name '" + hashKeyName + "' From " + escapeUserInput(c.ClientIP()) + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
-		c.String(401, "Delete Health Report Service Record Request's Hash Key Name '"+hashKeyName+"' Not Valid")
+		c.String(401, "Delete Health Report Service Record Request's Hash Key Name Not Valid")
 		return
 	} else {
 		buf := instanceId + util.FormatDate(time.Now().UTC())
 		bufHash := crypto.Sha256(buf, hashSecret)
 
-		if bufHash != hashKeySignature {
+		// FIX #7: Use constant-time comparison to prevent timing attacks
+		if !secureCompare(bufHash, hashKeySignature) {
 			log.Println("!!! Delete Health Report Service Record Request's Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: Hash Signature Mismatch !!!")
-			log.Println("... Host = Sha256 Source: " + buf + ", Salt: " + hashSecret + ", Signature: " + bufHash)
-			log.Println("... Client = Sha256 Source: " + instanceId + " + Client Side Date, Salt: Client Side Hash Key Secret, Signature: " + hashKeySignature)
+			// FIX #6: Do not log hash secret in plaintext
+			log.Println("... Host = Sha256 Source: " + buf + ", Signature: " + bufHash)
+			log.Println("... Client = Sha256 Signature: " + hashKeySignature)
 			c.String(401, "Delete Health Report Service Record Request's Hash Signature Not Valid")
 			return
 		}
 	}
 
-	// delete health report from to dynamodb
-	pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
-	sk := fmt.Sprintf("InstanceID^%s", instanceId)
+	// FIX #10: Use model key builder helpers instead of hardcoded patterns
+	pk := model.BuildHealthPK()
+	sk := model.BuildHealthSK(instanceId)
 
 	if xray.XRayServiceOn() {
 		trace := xray.NewSegmentFromHeader(c.Request)
@@ -420,7 +433,8 @@ func callerid(c *gin.Context, bindingInputPtr interface{}) {
 	if token := c.GetHeader("x-nts-gateway-token"); util.LenTrim(token) > 0 {
 		key := crypto.Sha256(util.FormatDate(time.Now().UTC()), model.GetGatewayKey())
 
-		if token == key {
+		// FIX #7: Use constant-time comparison to prevent timing attacks
+		if secureCompare(token, key) {
 			// match
 			c.String(200, c.ClientIP())
 		} else {
@@ -435,6 +449,11 @@ func callerid(c *gin.Context, bindingInputPtr interface{}) {
 
 // snsrouter is a gin handler that processes inbound sns payload for either confirmation or notification callbacks
 // note: bindingInputPtr is not used by this method, please ignore in code
+//
+// TODO: SNS signature verification (buildConfirmationSigningPayload / buildNotificationSigningPayload)
+// is not currently invoked. For production hardening, verify the SNS message signature using the
+// signing certificate before processing confirmation or notification payloads to prevent SSRF and
+// message injection attacks.
 func snsrouter(c *gin.Context, bindingInputPtr interface{}) {
 	// validate gin context input
 	if c == nil {
@@ -528,7 +547,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 					c.String(412, "Server Key Not Valid")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error()))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error()))
 					}
 
 					return
@@ -537,7 +556,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 					c.String(412, "Server Key Not Exist")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank"))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank"))
 					}
 
 					return
@@ -725,7 +744,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 			c.String(412, "Server Key Not Valid")
 
 			if seg != nil && seg.Ready() {
-				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error()))
+				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error()))
 			}
 		} else if util.LenTrim(serverUrl) == 0 {
 			log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank")
@@ -733,11 +752,10 @@ func snsnotification(c *gin.Context, serverKey string) {
 			c.String(412, "Server Key Not Exist")
 
 			if seg != nil && seg.Ready() {
-				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank"))
+				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Not Found in DDB: (IP Source: %s) %s", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank"))
 			}
 		} else {
 			// perform sns notification routing task
-			// server url begins with http or https, then ip and port as the fully qualified url domain path (controller path not part of the url)
 			if notifyJson, err := util.MarshalJSONCompact(notify); err != nil {
 				log.Printf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error())
 				c.String(412, "Notification Marshal Failed")
@@ -757,7 +775,6 @@ func snsnotification(c *gin.Context, serverKey string) {
 						Value: "application/json",
 					},
 				}, notifyJson); err != nil {
-					// error
 					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error())
 					c.String(412, "Route Notification to Internal Host Failed")
 
@@ -765,15 +782,13 @@ func snsnotification(c *gin.Context, serverKey string) {
 						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error()))
 					}
 				} else if statusCode != 200 {
-					// not status 200
 					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", escapeUserInput(serverKey), serverUrl, statusCode)
 					c.Status(statusCode)
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", serverKey, serverUrl, statusCode))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", escapeUserInput(serverKey), serverUrl, statusCode))
 					}
 				} else {
-					// success, reply to sns success
 					log.Printf("Server Key %s at Host %s Route Notification Complete", escapeUserInput(serverKey), serverUrl)
 					c.Status(200)
 				}
@@ -806,7 +821,7 @@ func buildNotificationSigningPayload(notify *notification) string {
 	}
 }
 
-// unsubscribe sns from notification payload UnsubscribeURL path
+// unsubscribeSNS unsubscribes from an SNS topic using the UnsubscribeURL from the notification payload
 func unsubscribeSNS(notify *notification) {
 	if notify == nil {
 		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic Aborted: Notification Object Parsed from SNS is Nil !!!")
@@ -839,13 +854,10 @@ func unsubscribeSNS(notify *notification) {
 
 	// call HTTP GET to unsubscribe
 	if status, body, err := rest.GET(unsubUrl, []*rest.HeaderKeyValue{}); err != nil {
-		// error when GET
 		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArn + "' Failed for UnsubscribeURL '" + unsubUrl + "': (HTTP GET Error) " + err.Error() + " !!!")
 	} else if status != 200 {
-		// not status 200
 		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArn + "' Failed for UnsubscribeURL '" + unsubUrl + "': (Status " + util.Itoa(status) + ") " + body + " !!!")
 	} else {
-		// unsubscribe success
 		log.Println("$$$ Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArn + "' Successful for UnsubscribeURL '" + unsubUrl + "': " + body + " $$$")
 	}
 }
@@ -854,9 +866,16 @@ func unsubscribeSNS(notify *notification) {
 // instance health clean up helper
 // =====================================================================================================================
 
-var sdMap map[string]*cloudmap.CloudMap
+// FIX #4: Package-level mutex and sdMap to protect against concurrent access
+// from multiple goroutines (e.g. if RunStaleHealthReportRecordsRemoverService is called more than once).
+var (
+	sdMap   map[string]*cloudmap.CloudMap
+	sdMapMu sync.Mutex
+)
 
-// RunStaleHealthReportRecordsRemoverService starts a go-routine and runs loop to continuously clean up stale records
+// RunStaleHealthReportRecordsRemoverService starts a go-routine and runs loop to continuously clean up stale records.
+// FIX #3: Uses time.NewTicker inside select so the stop signal is immediately honored,
+// instead of the original busy-wait select/default + time.Sleep which missed the stop signal during sleep.
 func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 	freq := model.GetHealthReportCleanUpFrequencySeconds()
 
@@ -869,8 +888,12 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 	}
 
 	go func() {
-		// possible race condition
-		var mutex sync.Mutex
+		// Run immediately on startup before waiting for the first tick
+		log.Println(">>> Stale Health Report Record Remover - Processing Invoked <<<")
+		removeInactiveInstancesFromServiceDiscovery()
+
+		ticker := time.NewTicker(time.Duration(freq) * time.Second)
+		defer ticker.Stop()
 
 		for {
 			select {
@@ -878,10 +901,9 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 				log.Println("### Stopping Stale Health Report Record Remover Service ###")
 				return
 
-			default:
+			case <-ticker.C:
 				log.Println(">>> Stale Health Report Record Remover - Processing Invoked <<<")
-				removeInactiveInstancesFromServiceDiscovery(&mutex)
-				time.Sleep(time.Duration(freq) * time.Second)
+				removeInactiveInstancesFromServiceDiscovery()
 			}
 		}
 	}()
@@ -889,76 +911,73 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 
 // removeInactiveInstancesFromServiceDiscovery will query dynamodb table used for instance host health monitor,
 // if greater than 15 minutes of no keep-alive timestamp update, gather for cloudmap service discovery de-register,
-// then remove from dynamodb table upon de-register success,
-//
-// (this function is to be run from goroutine in for loop so it continuously checks for removal needs,
-//
-//	suggest 60 second wait before re-invoke this function from for loop)
-func removeInactiveInstancesFromServiceDiscovery(mutex *sync.Mutex) {
-	if items, e := model.ListInactiveInstancesFromDataStore(); e != nil {
-		// error encountered
+// then remove from dynamodb table upon de-register success.
+// FIX #4: Uses the package-level sdMapMu instead of a per-goroutine mutex.
+func removeInactiveInstancesFromServiceDiscovery() {
+	items, e := model.ListInactiveInstancesFromDataStore()
+	if e != nil {
 		log.Println("!!! Remove Health Report Stale Records Failed: " + e.Error() + " !!!")
-	} else if len(items) == 0 {
-		// no items to remove
+		return
+	}
+
+	if len(items) == 0 {
 		log.Println("~~~ Health Report Stale Record Clean Up: 0 Found, All OK ~~~")
-	} else {
-		// has items to remove
-		keys := []*dynamodb.DynamoDBTableKeyValue{}
-		pk := fmt.Sprintf("%s#%s#service#discovery#host#health", "corems", "all")
+		return
+	}
 
-		mutex.Lock()
-		defer mutex.Unlock()
+	// FIX #4: Lock the package-level mutex to protect sdMap and serialise deregister operations
+	sdMapMu.Lock()
+	defer sdMapMu.Unlock()
 
-		for _, v := range items {
-			if v != nil {
-				if e := sdDeregisterInstance(v.NamespaceId, v.ServiceId, v.InstanceId, v.AwsRegion); e == nil {
-					// deregister success, queue instance for delete from data store
-					keys = append(keys, &dynamodb.DynamoDBTableKeyValue{
-						PK: pk,
-						SK: fmt.Sprintf("InstanceID^%s", v.InstanceId),
-					})
-				}
+	// FIX #10: Use model key builder helpers instead of hardcoded patterns
+	keys := []*dynamodb.DynamoDBTableKeyValue{}
+	pk := model.BuildHealthPK()
+
+	for _, v := range items {
+		if v != nil {
+			if err := sdDeregisterInstance(v.NamespaceId, v.ServiceId, v.InstanceId, v.AwsRegion); err == nil {
+				// deregister success, queue instance for delete from data store
+				keys = append(keys, &dynamodb.DynamoDBTableKeyValue{
+					PK: pk,
+					SK: model.BuildHealthSK(v.InstanceId),
+				})
 			}
 		}
+	}
 
-		if len(keys) > 0 {
-			// delete keys from data store
-			var deleteFailKeys []*dynamodb.DynamoDBTableKeyValue
-
-			if deleteFailKeys, e = model.DeleteInstanceHealthFromDataStore(keys...); e != nil {
-				// all delete from data store failed
-				log.Println("!!! Health Report Stale Record Clean Up: Service Discovery De-Register OK, But Delete Instance From Data Store Failed, " + e.Error() + " !!!")
-
-			} else if len(deleteFailKeys) > 0 {
-				// some delete failed
-				log.Println("@@@ Health Report Stale Record Clean Up: Service Discovery De-Register OK, But " + util.Itoa(len(deleteFailKeys)) + " Instances Fail To Delete From Data Store @@@")
-
-			} else {
-				// delete success
-				log.Println("~~~ Health Report Stale Record Clean Up: OK ~~~")
-			}
+	if len(keys) > 0 {
+		// delete keys from data store
+		deleteFailKeys, err := model.DeleteInstanceHealthFromDataStore(keys...)
+		if err != nil {
+			log.Println("!!! Health Report Stale Record Clean Up: Service Discovery De-Register OK, But Delete Instance From Data Store Failed, " + err.Error() + " !!!")
+		} else if len(deleteFailKeys) > 0 {
+			log.Println("@@@ Health Report Stale Record Clean Up: Service Discovery De-Register OK, But " + util.Itoa(len(deleteFailKeys)) + " Instances Fail To Delete From Data Store @@@")
 		} else {
-			log.Println("~~~ Health Report Stale Record Clean Up: Zero Instance De-Registered From CloudMap ~~~")
+			log.Println("~~~ Health Report Stale Record Clean Up: OK ~~~")
 		}
+	} else {
+		log.Println("~~~ Health Report Stale Record Clean Up: Zero Instance De-Registered From CloudMap ~~~")
 	}
 }
 
-// sdDeregisterInstance handles de-register instance action, along with creating and using sd object for various namespaces
+// sdDeregisterInstance handles de-register instance action, along with creating and using sd object for various namespaces.
+// FIX #1: Returns errors instead of nil for empty params to prevent silent data deletion.
+// Caller must be holding sdMapMu.
 func sdDeregisterInstance(namespaceId string, serviceId string, instanceId string, awsRegion string) error {
 	if util.LenTrim(namespaceId) == 0 {
-		return nil
+		return fmt.Errorf("NamespaceId is required for de-register")
 	}
 
 	if util.LenTrim(serviceId) == 0 {
-		return nil
+		return fmt.Errorf("ServiceId is required for de-register")
 	}
 
 	if util.LenTrim(instanceId) == 0 {
-		return nil
+		return fmt.Errorf("InstanceId is required for de-register")
 	}
 
 	if util.LenTrim(awsRegion) == 0 {
-		return nil
+		return fmt.Errorf("AwsRegion is required for de-register")
 	}
 
 	if sdMap == nil {
@@ -1007,7 +1026,8 @@ func connectSd(namespaceId string, awsRegionName string) (sd *cloudmap.CloudMap,
 	}
 }
 
-// deregisterInstance will remove instance from cloudmap and route 53 (used by sdDeregisterInstance)
+// deregisterInstance will remove instance from cloudmap and route 53 (used by sdDeregisterInstance).
+// FIX #11: Checks for sdoperationstatus.Fail to exit immediately instead of retrying for 5 seconds on a permanent failure.
 func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId string) error {
 	if sd == nil {
 		return fmt.Errorf("Service Discovery Object is Required for Instance Deregister")
@@ -1045,6 +1065,10 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 				if status == sdoperationstatus.Success {
 					log.Println("$$$ Service Discovery De-Register Instance '" + instanceId + "' OK $$$")
 					return nil
+				} else if status == sdoperationstatus.Fail {
+					// FIX #11: Permanent failure — stop retrying immediately
+					log.Println("!!! Service Discovery De-Register Instance '" + instanceId + "' Failed: Operation Returned Fail Status !!!")
+					return fmt.Errorf("service discovery de-register instance '%s' failed with permanent Fail status", instanceId)
 				} else {
 					// wait 250 ms then retry, up until 20 counts of 250 ms (5 seconds)
 					if tryCount < 20 {

@@ -115,7 +115,7 @@ func GetHashKeys() map[string]string {
 	configMu.RLock()
 	defer configMu.RUnlock()
 	// Return a copy to prevent external modification
-	result := make(map[string]string)
+	result := make(map[string]string, len(hashKeys))
 	for k, v := range hashKeys {
 		result[k] = v
 	}
@@ -127,6 +127,21 @@ func SetHashKeys(v map[string]string) {
 	configMu.Lock()
 	defer configMu.Unlock()
 	hashKeys = v
+}
+
+// GetHashKeysCount returns the number of hash keys configured
+func GetHashKeysCount() int {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return len(hashKeys)
+}
+
+// GetHashKey returns the hash secret for a given key name, and whether it was found
+func GetHashKey(name string) (secret string, found bool) {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	secret, found = hashKeys[name]
+	return
 }
 
 // Deprecated: Use GetDynamoDBActionRetryAttempts instead
@@ -155,7 +170,8 @@ type serverRoute struct {
 	LastTimestamp int64  `json:"lasttimestamp" dynamodbav:"LastTimestamp"`
 }
 
-type healthStatus struct {
+// HealthStatus represents a service instance health record in DynamoDB
+type HealthStatus struct {
 	PK             string `json:"pk" dynamodbav:"PK"`
 	SK             string `json:"sk" dynamodbav:"SK"`
 	NamespaceId    string `json:"namespaceid" dynamodbav:"NamespaceId"`
@@ -168,6 +184,30 @@ type healthStatus struct {
 	LastUpdatedUTC string `json:"lastupdatedutc" dynamodbav:"LastUpdatedUTC"`
 }
 
+// DynamoDB key pattern constants
+const (
+	pkPrefix       = "corems"
+	pkService      = "notifier-server"
+	pkHealthPrefix = "all"
+
+	pkPattern       = "%s#%s#service#discovery#host#target" // → "corems#notifier-server#service#discovery#host#target"
+	skPattern       = "ServerKey^%s"                        // → "ServerKey^{serverKey}"
+	pkHealthPattern = "%s#%s#service#discovery#host#health" // → "corems#all#service#discovery#host#health"
+	skHealthPattern = "InstanceID^%s"                       // → "InstanceID^{instanceId}"
+)
+
+// BuildHealthPK returns the fully-formed DynamoDB partition key for health status records.
+// Exported so that gateway code uses the same key construction as model internals.
+func BuildHealthPK() string {
+	return fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
+}
+
+// BuildHealthSK returns the fully-formed DynamoDB sort key for a given instanceId.
+// Exported so that gateway code uses the same key construction as model internals.
+func BuildHealthSK(instanceId string) string {
+	return fmt.Sprintf(skHealthPattern, instanceId)
+}
+
 var _ddbStore *dynamodb.DynamoDB
 var _appName string
 var _ddbTimeoutSeconds uint
@@ -178,7 +218,10 @@ func ConnectDataStore(cfg *config.Config) error {
 		return fmt.Errorf("Config Object is Required")
 	}
 
-	_ddbStore = &dynamodb.DynamoDB{
+	// Build into a local variable first so _ddbStore is never non-nil but unconnected.
+	// Other functions check _ddbStore == nil as their guard, so assigning before Connect()
+	// would let them pass the guard and use a broken connection.
+	store := &dynamodb.DynamoDB{
 		AwsRegion:   awsregion.GetAwsRegion(cfg.NotifierGatewayData.DynamoDBAwsRegion),
 		SkipDax:     !cfg.NotifierGatewayData.DynamoDBUseDax,
 		DaxEndpoint: cfg.NotifierGatewayData.DynamoDBDaxUrl,
@@ -187,34 +230,37 @@ func ConnectDataStore(cfg *config.Config) error {
 		SKName:      "SK",
 	}
 
-	if err := _ddbStore.Connect(); err != nil {
+	if err := store.Connect(); err != nil {
 		return err
-	} else {
-		if cfg.NotifierGatewayData.DynamoDBUseDax {
-			if err = _ddbStore.EnableDax(); err != nil {
-				return err
-			}
-		}
-
-		_appName = cfg.AppName
-		_ddbTimeoutSeconds = cfg.NotifierGatewayData.DynamoDBTimeoutSeconds
-		_ddbActionRetries = cfg.NotifierGatewayData.DynamoDBActionRetries
-
-		SetDynamoDBActionRetryAttempts(cfg.NotifierGatewayData.DynamoDBActionRetries)
-		SetHealthReportCleanUpFrequencySeconds(cfg.NotifierGatewayData.HealthReportCleanUpFrequencySeconds)
-		SetHealthReportRecordStaleMinutes(cfg.NotifierGatewayData.HealthReportRecordStaleMinutes)
-		SetServiceDiscoveryTimeoutSeconds(cfg.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds)
-
-		// Update deprecated variables for backward compatibility (protected by same mutex)
-		configMu.Lock()
-		DynamoDBActionRetryAttempts = dynamoDBActionRetryAttempts
-		HealthReportCleanUpFrequencySeconds = healthReportCleanUpFrequencySeconds
-		HealthReportRecordStaleMinutes = healthReportRecordStaleMinutes
-		ServiceDiscoveryTimeoutSeconds = serviceDiscoveryTimeoutSeconds
-		configMu.Unlock()
-
-		return nil
 	}
+
+	if cfg.NotifierGatewayData.DynamoDBUseDax {
+		if err := store.EnableDax(); err != nil {
+			return err
+		}
+	}
+
+	// Connection fully established — now publish to package-level state
+	_ddbStore = store
+	_appName = cfg.AppName
+	_ddbTimeoutSeconds = cfg.NotifierGatewayData.DynamoDBTimeoutSeconds
+	_ddbActionRetries = cfg.NotifierGatewayData.DynamoDBActionRetries
+
+	// Set all config values and deprecated variables atomically under a single lock
+	configMu.Lock()
+	dynamoDBActionRetryAttempts = cfg.NotifierGatewayData.DynamoDBActionRetries
+	healthReportCleanUpFrequencySeconds = cfg.NotifierGatewayData.HealthReportCleanUpFrequencySeconds
+	healthReportRecordStaleMinutes = cfg.NotifierGatewayData.HealthReportRecordStaleMinutes
+	serviceDiscoveryTimeoutSeconds = cfg.NotifierGatewayData.ServiceDiscoveryTimeoutSeconds
+
+	// Update deprecated variables for backward compatibility
+	DynamoDBActionRetryAttempts = dynamoDBActionRetryAttempts
+	HealthReportCleanUpFrequencySeconds = healthReportCleanUpFrequencySeconds
+	HealthReportRecordStaleMinutes = healthReportRecordStaleMinutes
+	ServiceDiscoveryTimeoutSeconds = serviceDiscoveryTimeoutSeconds
+	configMu.Unlock()
+
+	return nil
 }
 
 func GetServerRouteFromDataStore(serverKey string) (serverUrl string, err error) {
@@ -269,7 +315,7 @@ func GetInstanceHealthFromDataStore(instanceId string) (lastHealthy string, err 
 	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
 	sk := fmt.Sprintf(skHealthPattern, instanceId)
 
-	statusInfo := new(healthStatus)
+	statusInfo := new(HealthStatus)
 
 	if e := _ddbStore.GetItemWithRetry(_ddbActionRetries, statusInfo, pk, sk, _ddbStore.TimeOutDuration(_ddbTimeoutSeconds), nil); e != nil {
 		// error
@@ -313,7 +359,7 @@ func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instance
 	sk := fmt.Sprintf(skHealthPattern, instanceId)
 	timeNowUTC := time.Now().UTC()
 
-	statusInfo := &healthStatus{
+	statusInfo := &HealthStatus{
 		PK:             pk,
 		SK:             sk,
 		NamespaceId:    namespaceId,
@@ -341,7 +387,7 @@ func DeleteInstanceHealthFromDataStore(instanceKeys ...*dynamodb.DynamoDBTableKe
 	}
 
 	if len(instanceKeys) == 0 {
-		return []*dynamodb.DynamoDBTableKeyValue{}, fmt.Errorf("Delete Instance Health From Data Store Failed: %s", "InstanceKeys To Delete is Required")
+		return []*dynamodb.DynamoDBTableKeyValue{}, fmt.Errorf("Delete Instance Health From Data Store Failed: InstanceKeys To Delete is Required")
 	}
 
 	if deleteFailKeys, err = _ddbStore.BatchDeleteItemsWithRetry(_ddbActionRetries, _ddbStore.TimeOutDuration(_ddbTimeoutSeconds), instanceKeys...); err != nil {
@@ -359,9 +405,11 @@ func DeleteInstanceHealthFromDataStore(instanceKeys ...*dynamodb.DynamoDBTableKe
 	}
 }
 
-func ListInactiveInstancesFromDataStore() (inactiveInstances []*healthStatus, err error) {
+func ListInactiveInstancesFromDataStore() (inactiveInstances []*HealthStatus, err error) {
+	// FIX: Original code used named return 'err' (which is nil) in the error message:
+	//   fmt.Errorf("...Failed: %s", err) — produced "...Failed: %!s(<nil>)"
 	if _ddbStore == nil {
-		return []*healthStatus{}, fmt.Errorf("List Inactive Instances From Data Store Failed: %s", err)
+		return []*HealthStatus{}, fmt.Errorf("List Inactive Instances From Data Store Failed: DynamoDB Connection Not Established")
 	}
 
 	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
@@ -378,7 +426,7 @@ func ListInactiveInstancesFromDataStore() (inactiveInstances []*healthStatus, er
 
 	ts := util.Int64ToString(time.Now().UTC().Add(time.Duration(staleMinutes) * time.Minute * -1).Unix())
 
-	if itemsList, e := _ddbStore.QueryPagedItemsWithRetry(_ddbActionRetries, &[]*healthStatus{}, &[]*healthStatus{},
+	if itemsList, e := _ddbStore.QueryPagedItemsWithRetry(_ddbActionRetries, &[]*HealthStatus{}, &[]*HealthStatus{},
 		_ddbStore.TimeOutDuration(_ddbTimeoutSeconds),
 		"LSI-LastTimestamp",
 		"PK=:pk AND LastTimestamp<:lasttimestamp",
@@ -391,13 +439,13 @@ func ListInactiveInstancesFromDataStore() (inactiveInstances []*healthStatus, er
 			},
 		}, nil); e != nil {
 		// error
-		return []*healthStatus{}, fmt.Errorf("List Inactive Instances From Data Store Failed: %s", e)
+		return []*HealthStatus{}, fmt.Errorf("List Inactive Instances From Data Store Failed: %s", e)
 	} else {
 		// success
 		ok := false
 
-		if inactiveInstances, ok = itemsList.([]*healthStatus); !ok {
-			return []*healthStatus{}, nil
+		if inactiveInstances, ok = itemsList.([]*HealthStatus); !ok {
+			return []*HealthStatus{}, nil
 		} else {
 			return inactiveInstances, nil
 		}

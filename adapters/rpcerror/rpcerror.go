@@ -81,13 +81,28 @@ func (d RpcErrorDetails) list() (lst []proto.Message) {
 }
 
 // helper to convert typed slices to []proto.Message without allocations for each element.
-func sliceToProto[T proto.Message](in []T) []proto.Message { // use proto.Message
+//
+// FIX: The original used `any(v) != nil` to filter nils, but this fails for typed nils.
+// When T is e.g. *epb.ErrorInfo, a nil value like (*epb.ErrorInfo)(nil) creates an
+// interface{} with type=*epb.ErrorInfo and value=nil. Since the interface has a type,
+// `any(v) != nil` evaluates to TRUE — the typed nil leaks through.
+//
+// Downstream, anypb.New on a typed-nil proto.Message doesn't crash (protobuf handles
+// nil receivers), but it produces an Any with empty value bytes, sending a meaningless
+// empty error detail to the client.
+//
+// Fix: compare against the zero value of T. For all proto.Message implementations
+// (which are pointer types), the zero value is nil. When v is a typed nil,
+// any(v) == any(zero) is true because both have the same dynamic type and nil value.
+// For non-nil v, the pointer values differ so the comparison is false.
+func sliceToProto[T proto.Message](in []T) []proto.Message {
 	out := make([]proto.Message, 0, len(in))
+	var zero T
 	for _, v := range in {
-		// Convert to any first to allow nil check, then back to proto.Message
-		if any(v) != nil {
-			out = append(out, v)
+		if any(v) == any(zero) {
+			continue
 		}
+		out = append(out, v)
 	}
 	return out
 }
@@ -103,7 +118,7 @@ func NewRpcError(code codes.Code, message string, details RpcErrorDetails) error
 
 	s := status.New(code, message)
 
-	detailsList := details.list() // clarify name and ensure we pass the exact proto.Message slice
+	detailsList := details.list()
 
 	if len(detailsList) == 0 { // early return for no details
 		return s.Err()

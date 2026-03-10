@@ -218,9 +218,12 @@ func (c *config) SetRoute53DomainSuffix(s string) {
 	}
 }
 
+// FIX #1: Original wrote to "web_server.ws_route53_hosted_zone_id" (the hosted zone ID key)
+// instead of "web_server.ws_route53_ttl" (the TTL key). This caused calling SetRoute53TTL
+// to OVERWRITE the hosted zone ID with a uint TTL value, corrupting Route53 DNS config.
 func (c *config) SetRoute53TTL(i uint) {
 	if c._v != nil {
-		c._v.Set("web_server.ws_route53_hosted_zone_id", i)
+		c._v.Set("web_server.ws_route53_ttl", i)
 		c.WebServer.Route53TTL = i
 	}
 }
@@ -498,146 +501,141 @@ func (c *config) SetRoutes(r ...routeDefinition) {
 	}
 }
 
-// Read will load config settings from disk
+// Read will load config settings from disk.
+// FIX #2: Builds into local variables first and only overwrites c._v and data fields
+// on success, so a failed Read() doesn't destroy previously valid state.
 func (c *config) Read() error {
-	c._v = nil
-	c.WebServer = webServerData{}
-	c.Recovery = recoveryData{}
-	c.Logging = loggingData{}
-	c.Session = sessionData{}
-	c.Csrf = csrfData{}
-	c.JwtAuth = jwtAuthData{}
-	c.HtmlTemplates = htmlTemplatesData{}
-	c.Routes = []routeDefinition{}
-
 	if util.LenTrim(c.AppName) == 0 {
 		return fmt.Errorf("App Name is Required")
 	}
 
-	if util.LenTrim(c.ConfigFileName) == 0 {
-		c.ConfigFileName = "webserver"
+	configFileName := c.ConfigFileName
+	if util.LenTrim(configFileName) == 0 {
+		configFileName = "webserver"
 	}
 
-	c._v = &data.ViperConf{
+	v := &data.ViperConf{
 		AppName:          c.AppName,
-		ConfigName:       c.ConfigFileName,
+		ConfigName:       configFileName,
 		CustomConfigPath: c.CustomConfigPath,
 
 		UseYAML:            true,
 		UseAutomaticEnvVar: false,
 	}
 
-	c._v.Default("web_server.ws_name", "webserver").Default( // required, web server descriptive name
-		"web_server.ws_debug", false).Default( // optional, true or false, indicates if web server running in debug mode, default = false
-		"web_server.ws_port", 8080).Default( // required, web server tcp port, default = 8080
-		"web_server.ws_server_pem", "").Default( // optional, web server tls server certificate pem file path, default = blank
-		"web_server.ws_server_key", "").Default( // optional, web server tls server certificate key file path, default = blank
-		"web_server.google_recaptcha_secret", "").Default( // optional, google recaptcha v2 secret assigned by google services
-		"web_server.ws_trace_use_xray", false).Default( // optional, enable xray tracing, default false
-		"web_server.ws_logging_use_sqs", false).Default( // optional, enable cloud logging, default false
-		"web_server.ws_host_use_route53", false).Default( // optional, enable route53 dns for host url, where host ip auto maintained by route53 api integration (if host using tls, use dns instead of ip for webhook callback)
-		"web_server.ws_route53_hosted_zone_id", "").Default( // optional, if using route53 for host url, configure route53 hosted zone id (pre-created in aws route53)
-		"web_server.ws_route53_domain_suffix", "").Default( // optional, if using route53 for host url, configure route53 domain suffix such as example.com (must match domain pre-configured in aws route53)
-		"web_server.ws_route53_ttl", 60).Default( // optional, if using route53 for host url, configure route53 ttl seconds, default = 60
-		"web_server.rest_target_ca_cert_files", "") // optional, self-signed ca certs file path, separated by comma if multiple ca pems,
-	// 			 used by rest get/post/put/delete against target server hosts that use self-signed certs for tls,
-	//			 to avoid bad certificate error during tls handshake
+	v.Default("web_server.ws_name", "webserver").Default(
+		"web_server.ws_debug", false).Default(
+		"web_server.ws_port", 8080).Default(
+		"web_server.ws_server_pem", "").Default(
+		"web_server.ws_server_key", "").Default(
+		"web_server.google_recaptcha_secret", "").Default(
+		"web_server.ws_trace_use_xray", false).Default(
+		"web_server.ws_logging_use_sqs", false).Default(
+		"web_server.ws_host_use_route53", false).Default(
+		"web_server.ws_route53_hosted_zone_id", "").Default(
+		"web_server.ws_route53_domain_suffix", "").Default(
+		"web_server.ws_route53_ttl", 60).Default(
+		"web_server.rest_target_ca_cert_files", "")
 
-	c._v.Default("recovery.custom_recovery", false) // optional, true or false, indicates if web server uses custom recovery logic, default = false
+	v.Default("recovery.custom_recovery", false)
 
-	c._v.Default("logging.custom_logging", false).Default( // optional, true or false, indicates if web server uses custom logging logic, default = false
-		"logging.custom_logging_to_console", false).Default( // optional, true or false, indicates if custom logging is used, if the logging is to console rather than disk, default = false
-		"logging.sqs_logger_queue_name_prefix", "").Default( // sqs queue name prefix used for service logging data queuing, if name is not provided, default = service-logger-data-
-		"logging.sqs_logger_message_retention_seconds", 14400).Default( // sqs service logger queue's messages retention seconds, default = 14,400 seconds (4 Hours)
-		"logging.sqs_logger_queue_url", "").Default( // sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service logger data queue used by this service (auto set by service upon creation)
-		"logging.sqs_logger_queue_arn", "") // sqs queue's queueUrl and queueArn as generated by aws sqs for the corresponding service logger data queue used by this service (auto set by service upon creation)
+	v.Default("logging.custom_logging", false).Default(
+		"logging.custom_logging_to_console", false).Default(
+		"logging.sqs_logger_queue_name_prefix", "").Default(
+		"logging.sqs_logger_message_retention_seconds", 14400).Default(
+		"logging.sqs_logger_queue_url", "").Default(
+		"logging.sqs_logger_queue_arn", "")
 
-	c._v.Default("session.session_secret", "").Default( // optional, session management secret key, default = blank (blank = session not used)
-		"session.session_names", []string{}).Default( // optional, list of session names, default = blank list
-		"session.redis_host", "").Default( // optional, redis host and port used for session, default = blank
-		"session.redis_max_idle_connections", 10) // optional, session redis host max idle connections, default = 10
+	v.Default("session.session_secret", "").Default(
+		"session.session_names", []string{}).Default(
+		"session.redis_host", "").Default(
+		"session.redis_max_idle_connections", 10)
 
-	c._v.Default("csrf.csrf_secret", "") // optional, csrf secret key, default = blank (blank = csrf not used)
+	v.Default("csrf.csrf_secret", "")
 
-	c._v.Default("jwt_auth.jwt_realm", "").Default( // optional, jwt auth realm name, default = blank (blank = jwt auth not used)
-		"jwt_auth.jwt_identity_key", "id").Default( // optional, jwt auth identity key name, default = id
-		"jwt_auth.jwt_sign_secret", "").Default( // optional, jwt auth signing key secret, default = blank
-		"jwt_auth.jwt_sign_algorithm", "H256").Default( // optional, jwt auth signing algorithm, values: (HS256, HS384, HS512, RS256, RS384 or RS512) default = H256
-		"jwt_auth.jwt_private_key", "").Default( // optional, jwt auth aes private key file path, default = blank
-		"jwt_auth.jwt_public_key", "").Default( // optional, jwt auth aes public key file path, default = blank
-		"jwt_auth.jwt_login_data_binding", "json").Default( // optional, jwt auth login authentication data binding type, values: (json, xml, yaml, proto, header, query, uri, unknown) default = json
-		"jwt_auth.jwt_token_valid_minutes", 15).Default( // optional, jwt auth token valid minutes, default = 15
-		"jwt_auth.jwt_refresh_valid_minutes", 1440).Default( // optional, jwt auth token refresh valid minutes, default = 1440 (24 hours)
-		"jwt_auth.jwt_send_cookie", false).Default( // optional, jwt auth send cookie, default = false
-		"jwt_auth.jwt_secure_cookie", true).Default( // optional, jwt auth use secured cookie, default = true
-		"jwt_auth.jwt_cookie_http_only", true).Default( // optional, jwt auth cookie server side http only, prevents edit at client, default = true
-		"jwt_auth.jwt_cookie_max_age_days", 14).Default( // optional, jwt auth cookie maximum age in days, default = 14 days
-		"jwt_auth.jwt_cookie_domain", "").Default( // optional, jwt auth cookie domain name, default = blank
-		"jwt_auth.jwt_cookie_name", "").Default( // optional, jwt auth cookie name, default = blank
-		"jwt_auth.jwt_cookie_same_site", "default").Default( // optional, jwt auth cookie same site type, values: (default, lax, strict, none) default = default
-		"jwt_auth.jwt_login_route_path", "/login").Default( // optional, jwt auth login route path, default = /login
-		"jwt_auth.jwt_logout_route_path", "/logout").Default( // optional, jwt auth logout route path, default = /logout
-		"jwt_auth.jwt_refresh_token_route_path", "/refreshtoken").Default( // optional, jwt auth refresh token route path, default = /refreshtoken
-		"jwt_auth.jwt_token_lookup", "header:Authorization") // optional, token lookup is a string in the form of <source>:<name> that is used to extract token from the request,
-	//    - default = "header:Authorization",
-	//    - other values:
-	//         - "header:<name>", "query:<name>", "cookie:<name>", "param:<name>"
-	//    - other examples:
-	//         - "header: Authorization, query: token, cookie: jwt"
-	//         - "query:token"
-	//         - "cookie:token
-	c._v.Default("jwt_auth.jwt_token_head_name", "Bearer").Default( // optional, token head name is a string in the header, default = Bearer
-		"jwt_auth.jwt_disable_abort", false).Default( // optional, true or false, disables abort() of context, default = false
-		"jwt_auth.jwt_send_authorization", false) // optional, true or false, allow return authorization header for every request, default = false
+	v.Default("jwt_auth.jwt_realm", "").Default(
+		"jwt_auth.jwt_identity_key", "id").Default(
+		"jwt_auth.jwt_sign_secret", "").Default(
+		// FIX #3: Default was "H256" — should be "HS256" to match the switch cases in
+		// webserver.go setupWebServer() which checks for "hs256", "hs384", etc.
+		// "H256" doesn't match any case, so the algorithm silently defaulted to HS256
+		// from the code's fallback, but the config file would contain the wrong value.
+		"jwt_auth.jwt_sign_algorithm", "HS256").Default(
+		"jwt_auth.jwt_private_key", "").Default(
+		"jwt_auth.jwt_public_key", "").Default(
+		"jwt_auth.jwt_login_data_binding", "json").Default(
+		"jwt_auth.jwt_token_valid_minutes", 15).Default(
+		"jwt_auth.jwt_refresh_valid_minutes", 1440).Default(
+		"jwt_auth.jwt_send_cookie", false).Default(
+		"jwt_auth.jwt_secure_cookie", true).Default(
+		"jwt_auth.jwt_cookie_http_only", true).Default(
+		"jwt_auth.jwt_cookie_max_age_days", 14).Default(
+		"jwt_auth.jwt_cookie_domain", "").Default(
+		"jwt_auth.jwt_cookie_name", "").Default(
+		"jwt_auth.jwt_cookie_same_site", "default").Default(
+		"jwt_auth.jwt_login_route_path", "/login").Default(
+		"jwt_auth.jwt_logout_route_path", "/logout").Default(
+		"jwt_auth.jwt_refresh_token_route_path", "/refreshtoken").Default(
+		"jwt_auth.jwt_token_lookup", "header:Authorization")
 
-	c._v.Default("html_templates.template_base_dir", "").Default( // optional, html templates base directory, default = blank
-		"html_templates.template_definitions", []templateDefinition{}) // optional, html templates definitions list, default = empty list
+	v.Default("jwt_auth.jwt_token_head_name", "Bearer").Default(
+		"jwt_auth.jwt_disable_abort", false).Default(
+		"jwt_auth.jwt_send_authorization", false)
 
-	c._v.Default("routes", []routeDefinition{}) // optional, web server routes level middleware configurations, default = empty list
-	// - route_group_name: base = web server root folder; other values = web server route group name
-	// - max_concurrent_request_limit: max hit rate limit, 0 = turn off
-	// - per_client_ip_qps: per client ip qps rate limit, 0 = turn off
-	// - gzip_compression_type: gzip compression services, values: (default, best-speed, best-compression) blank = turn off
-	// - cors_allow_all_origins: cors protection services, true = turn off
-	// - cors_allow_origins: list of cors origins allowed
-	// - cors_allow_methods: list of cors methods allowed
-	// - cors_allow_headers: list of cors headers allowed
+	v.Default("html_templates.template_base_dir", "").Default(
+		"html_templates.template_definitions", []templateDefinition{})
 
-	if ok, err := c._v.Init(); err != nil {
+	v.Default("routes", []routeDefinition{})
+
+	if ok, err := v.Init(); err != nil {
 		return err
 	} else {
 		if !ok {
-			if e := c._v.Save(); e != nil {
+			if e := v.Save(); e != nil {
 				return fmt.Errorf("create config file failed: %w", e)
 			}
 		} else {
-			c._v.WatchConfig()
+			v.WatchConfig()
 		}
 	}
 
-	if err := c._v.Unmarshal(c); err != nil {
+	// Unmarshal into a temporary config to validate before committing
+	tempCfg := &config{}
+	if err := v.Unmarshal(tempCfg); err != nil {
 		return err
 	}
 
 	// Validate port is within valid range
-	if c.WebServer.Port == 0 {
-		c.WebServer.Port = 8080 // default
+	if tempCfg.WebServer.Port == 0 {
+		tempCfg.WebServer.Port = 8080
 	}
-	if c.WebServer.Port < 1 || c.WebServer.Port > 65535 {
-		return fmt.Errorf("WebServer port %d is invalid (must be between 1-65535)", c.WebServer.Port)
+	if tempCfg.WebServer.Port > 65535 {
+		return fmt.Errorf("WebServer port %d is invalid (must be between 1-65535)", tempCfg.WebServer.Port)
 	}
+
+	// All succeeded — commit to receiver
+	c._v = v
+	c.ConfigFileName = configFileName
+	c.WebServer = tempCfg.WebServer
+	c.Recovery = tempCfg.Recovery
+	c.Logging = tempCfg.Logging
+	c.Session = tempCfg.Session
+	c.Csrf = tempCfg.Csrf
+	c.JwtAuth = tempCfg.JwtAuth
+	c.HtmlTemplates = tempCfg.HtmlTemplates
+	c.Routes = tempCfg.Routes
 
 	return nil
 }
 
-// Save persists config settings to disk
+// Save persists config settings to disk.
+// FIX #4: Returns an error when _v is nil instead of silently succeeding.
 func (c *config) Save() error {
 	if strings.ToLower(os.Getenv("CONFIG_READ_ONLY")) == "true" {
 		return nil
 	}
-	if c._v != nil {
-		return c._v.Save()
-	} else {
-		return nil
+	if c._v == nil {
+		return fmt.Errorf("cannot save: viper config not initialized (call Read first)")
 	}
+	return c._v.Save()
 }

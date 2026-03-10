@@ -41,76 +41,83 @@ func SetTokenValidator(validator func(token string) bool) {
 }
 
 // getTokenValidator safely retrieves the current token validator.
+// FIX #1: If the new-style validator is nil, falls back to the deprecated
+// TokenValidator variable — but reads it under the same lock to prevent a
+// data race. If the deprecated variable has a value, it is promoted into
+// the guarded field so subsequent calls take the fast path.
 func getTokenValidator() func(token string) bool {
 	tokenValidatorMu.RLock()
-	defer tokenValidatorMu.RUnlock()
+	v := tokenValidator
+	tokenValidatorMu.RUnlock()
+
+	if v != nil {
+		return v
+	}
+
+	// Promote the deprecated variable under a write lock.
+	tokenValidatorMu.Lock()
+	defer tokenValidatorMu.Unlock()
+
+	// Double-check: another goroutine may have set it between the RUnlock and Lock.
+	if tokenValidator != nil {
+		return tokenValidator
+	}
+
+	// Read the deprecated variable while holding the write lock.
+	// This is safe because all concurrent readers are blocked by the write lock,
+	// and the deprecated variable is only expected to be written once at init time.
+	if TokenValidator != nil {
+		tokenValidator = TokenValidator
+	}
+
 	return tokenValidator
 }
 
 // Deprecated: Use SetTokenValidator instead.
-// TokenValidator is maintained for backward compatibility but is not thread-safe.
+// TokenValidator is maintained for backward compatibility.
+// It must be set during initialization before the server starts serving.
 var TokenValidator func(token string) bool
 
-// ServerAuthUnaryInterceptor is an unary rpc server interceptor handler that handles auth via request's metadata
-// this interceptor will block rpc call if auth fails
-func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+// authenticate extracts the bearer token from metadata and validates it.
+// Shared by both unary and stream interceptors to eliminate duplication.
+func authenticate(ctx context.Context) error {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return nil, status.Errorf(codes.InvalidArgument, "Metadata Missing")
+		return status.Errorf(codes.InvalidArgument, "Metadata Missing")
 	}
 
-		if len(a) <= 0 {
-			return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
-		} else {
-			token := strings.TrimPrefix(a[0], "Bearer ")
-
-			// Validate token using configured validator
-			validator := getTokenValidator()
-			if validator == nil {
-				// Fallback to deprecated variable for backward compatibility
-				validator = TokenValidator
-			}
-			if validator == nil {
-				return nil, status.Errorf(codes.Internal, "Token validator not configured")
-			}
-			if !validator(token) {
-				return nil, status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
-			}
-
-			return handler(ctx, req)
-		}
+	a := md["authorization"]
+	if len(a) == 0 {
+		return status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
 	}
 
-	// Auth token validation not implemented - reject all requests until properly configured
-	return nil, status.Errorf(codes.Unimplemented, "Auth Token Validation Not Implemented - Configure ValidateToken handler")
+	token := strings.TrimPrefix(a[0], "Bearer ")
+
+	validator := getTokenValidator()
+	if validator == nil {
+		return status.Errorf(codes.Internal, "Token validator not configured")
+	}
+	if !validator(token) {
+		return status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
+	}
+
+	return nil
 }
 
-func ServerAuthStreamInterceptor(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	ctx := stream.Context()
-
-	if md, ok := metadata.FromIncomingContext(ctx); !ok {
-		return status.Errorf(codes.InvalidArgument, "Metadata Missing")
-	} else {
-		a := md["authorization"]
-
-		if len(a) <= 0 {
-			return status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
-		}
-
-		token := strings.TrimPrefix(a[0], "Bearer ")
-
-		validator := getTokenValidator()
-		if validator == nil {
-			// Fallback to deprecated variable for backward compatibility
-			validator = TokenValidator
-		}
-		if validator == nil {
-			return status.Errorf(codes.Internal, "Token validator not configured")
-		}
-		if !validator(token) {
-			return status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
-		}
-
-		return handler(srv, stream)
+// ServerAuthUnaryInterceptor is a unary RPC server interceptor that validates
+// auth via the request's metadata. It blocks the RPC call if auth fails.
+func ServerAuthUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	if err := authenticate(ctx); err != nil {
+		return nil, err
 	}
+	return handler(ctx, req)
+}
+
+// ServerAuthStreamInterceptor is a streaming RPC server interceptor that validates
+// auth via the request's metadata. It blocks the stream if auth fails.
+func ServerAuthStreamInterceptor(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if err := authenticate(stream.Context()); err != nil {
+		return err
+	}
+	return handler(srv, stream)
 }

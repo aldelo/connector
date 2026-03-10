@@ -32,11 +32,13 @@ type Config struct {
 
 	_v *data.ViperConf `mapstructure:"-"`
 
-	NotifierServerData *notifierServerData  `mapstructure:"notifier_server"`
-	SubscriptionsData  []*subscriptionsData `mapstructure:"subscriptions"`
+	// FIX #1: Exported types so other packages can declare variables of these types
+	NotifierServerData *NotifierServerData  `mapstructure:"notifier_server"`
+	SubscriptionsData  []*SubscriptionsData `mapstructure:"subscriptions"`
 }
 
-type notifierServerData struct {
+// FIX #1: Exported so other packages can reference this type directly
+type NotifierServerData struct {
 	GatewayUrl             string `mapstructure:"gateway_url"`
 	ServerKey              string `mapstructure:"server_key"`
 	DynamoDBAwsRegion      string `mapstructure:"dynamodb_aws_region"`
@@ -48,211 +50,308 @@ type notifierServerData struct {
 	SnsAwsRegion           string `mapstructure:"sns_aws_region"`
 }
 
-type subscriptionsData struct {
+// FIX #1: Exported so other packages can reference this type directly
+type SubscriptionsData struct {
 	TopicArn        string `mapstructure:"topic_arn"`
 	SubscriptionArn string `mapstructure:"subscription_arn"`
 }
 
+// ensureServerData initializes NotifierServerData if nil.
+// FIX #2: Prevents nil-pointer panics when setters are called before Read().
+func (c *Config) ensureServerData() {
+	if c.NotifierServerData == nil {
+		c.NotifierServerData = &NotifierServerData{}
+	}
+}
+
+// FIX #3: GetSubscriptionArn — added nil receiver check and nil element check
+// to prevent panic on bare Config{} or if SubscriptionsData contains nil entries.
 func (c *Config) GetSubscriptionArn(topicArn string) string {
+	if c == nil {
+		return ""
+	}
+
 	for _, v := range c.SubscriptionsData {
-		if strings.ToLower(v.TopicArn) == strings.ToLower(topicArn) {
-			// match
+		if v != nil && strings.EqualFold(v.TopicArn, topicArn) {
 			return v.SubscriptionArn
 		}
 	}
 
-	// no match
 	return ""
 }
 
+// FIX #4: SetSubscriptionData — added nil receiver check, nil element check in loop,
+// and ensureServerData guard. Uses strings.EqualFold for consistency.
 func (c *Config) SetSubscriptionData(topicArn string, subscriptionArn string) {
-	if c._v != nil {
-		if util.LenTrim(topicArn) == 0 {
-			return
+	if c == nil || c._v == nil {
+		return
+	}
+
+	if util.LenTrim(topicArn) == 0 {
+		return
+	}
+
+	found := false
+
+	for _, p := range c.SubscriptionsData {
+		if p != nil && strings.EqualFold(p.TopicArn, topicArn) {
+			p.SubscriptionArn = subscriptionArn
+			found = true
+			break
 		}
+	}
 
-		found := false
+	if !found {
+		c.SubscriptionsData = append(c.SubscriptionsData, &SubscriptionsData{
+			TopicArn:        topicArn,
+			SubscriptionArn: subscriptionArn,
+		})
+	}
 
-		for _, p := range c.SubscriptionsData {
-			if strings.ToLower(p.TopicArn) == strings.ToLower(topicArn) {
-				// match
-				p.SubscriptionArn = subscriptionArn
-				found = true
+	c._v.Set("subscriptions", c.SubscriptionsData)
+}
+
+// RemoveSubscriptionData removes subscription data from config.
+// hint: topicArn = blank to remove all subscription data from config.
+// FIX #5: Added nil receiver check, nil element check in loop,
+// and uses strings.EqualFold for consistency.
+func (c *Config) RemoveSubscriptionData(topicArn string) {
+	if c == nil || c._v == nil {
+		return
+	}
+
+	if util.LenTrim(topicArn) == 0 {
+		// remove all
+		c.SubscriptionsData = []*SubscriptionsData{}
+		c._v.Set("subscriptions", []*SubscriptionsData{})
+	} else {
+		// remove specific topic arn
+		splitIndex := -1
+
+		for i, p := range c.SubscriptionsData {
+			if p != nil && strings.EqualFold(p.TopicArn, topicArn) {
+				splitIndex = i
 				break
 			}
 		}
 
-		if !found {
-			c.SubscriptionsData = append(c.SubscriptionsData, &subscriptionsData{
-				TopicArn:        topicArn,
-				SubscriptionArn: subscriptionArn,
-			})
-		}
+		if splitIndex >= 0 {
+			tempIFace := util.SliceDeleteElement(c.SubscriptionsData, splitIndex)
 
-		c._v.Set("subscriptions", c.SubscriptionsData)
-	}
-}
-
-// RemoveSubscriptionData hint: topicArn = blank to remove all subscription data from config
-func (c *Config) RemoveSubscriptionData(topicArn string) {
-	if c._v != nil {
-		if util.LenTrim(topicArn) == 0 {
-			// remove all
-			c.SubscriptionsData = []*subscriptionsData{}
-			c._v.Set("subscriptions", []*subscriptionsData{})
-		} else {
-			// remove specific topic arn
-			var temp []*subscriptionsData
-			splitIndex := -1
-
-			for i, p := range c.SubscriptionsData {
-				if strings.ToLower(p.TopicArn) == strings.ToLower(topicArn) {
-					// match
-					splitIndex = i
-					break
-				}
-			}
-
-			if splitIndex >= 0 {
-				tempIFace := util.SliceDeleteElement(c.SubscriptionsData, splitIndex)
-
-				if tempIFace != nil {
-					ok := false
-					if temp, ok = tempIFace.([]*subscriptionsData); ok {
-						c.SubscriptionsData = temp
-						c._v.Set("subscriptions", temp)
-					}
+			if tempIFace != nil {
+				if temp, ok := tempIFace.([]*SubscriptionsData); ok {
+					c.SubscriptionsData = temp
+					c._v.Set("subscriptions", temp)
 				}
 			}
 		}
 	}
 }
 
-func (c *Config) SetNotifierGatewayUrl(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_server.gateway_url", s)
-		c.NotifierServerData.GatewayUrl = s
+// FIX #2: All setters now call ensureServerData() to prevent nil-pointer panics
+// when called before Read().
+// FIX #6: All setters now return error instead of silently doing nothing,
+// so callers know when the operation was skipped.
+
+func (c *Config) SetNotifierGatewayUrl(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureServerData()
+	c._v.Set("notifier_server.gateway_url", s)
+	c.NotifierServerData.GatewayUrl = s
+	return nil
 }
 
-func (c *Config) SetServerKey(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_server.server_key", s)
-		c.NotifierServerData.ServerKey = s
+func (c *Config) SetServerKey(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureServerData()
+	c._v.Set("notifier_server.server_key", s)
+	c.NotifierServerData.ServerKey = s
+	return nil
 }
 
-func (c *Config) SetDynamoDBAwsRegion(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_server.dynamodb_aws_region", s)
-		c.NotifierServerData.DynamoDBAwsRegion = s
+func (c *Config) SetDynamoDBAwsRegion(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureServerData()
+	c._v.Set("notifier_server.dynamodb_aws_region", s)
+	c.NotifierServerData.DynamoDBAwsRegion = s
+	return nil
 }
 
-func (c *Config) SetDynamoDBUseDax(b bool) {
-	if c._v != nil {
-		c._v.Set("notifier_server.dynamodb_use_dax", b)
-		c.NotifierServerData.DynamoDBUseDax = b
+func (c *Config) SetDynamoDBUseDax(b bool) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureServerData()
+	c._v.Set("notifier_server.dynamodb_use_dax", b)
+	c.NotifierServerData.DynamoDBUseDax = b
+	return nil
 }
 
-func (c *Config) SetDynamoDBDaxUrl(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_server.dynamodb_dax_url", s)
-		c.NotifierServerData.DynamoDBDaxUrl = s
+func (c *Config) SetDynamoDBDaxUrl(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureServerData()
+	c._v.Set("notifier_server.dynamodb_dax_url", s)
+	c.NotifierServerData.DynamoDBDaxUrl = s
+	return nil
 }
 
-func (c *Config) SetDynamoDBTable(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_server.dynamodb_table", s)
-		c.NotifierServerData.DynamoDBTable = s
+func (c *Config) SetDynamoDBTable(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureServerData()
+	c._v.Set("notifier_server.dynamodb_table", s)
+	c.NotifierServerData.DynamoDBTable = s
+	return nil
 }
 
-func (c *Config) SetDynamoDBTimeoutSeconds(i uint) {
-	if c._v != nil {
-		c._v.Set("notifier_server.dynamodb_timeout_seconds", i)
-		c.NotifierServerData.DynamoDBTimeoutSeconds = i
+func (c *Config) SetDynamoDBTimeoutSeconds(i uint) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureServerData()
+	c._v.Set("notifier_server.dynamodb_timeout_seconds", i)
+	c.NotifierServerData.DynamoDBTimeoutSeconds = i
+	return nil
 }
 
-func (c *Config) SetDynamoDBActionRetries(i uint) {
-	if c._v != nil {
-		c._v.Set("notifier_server.dynamodb_action_retries", i)
-		c.NotifierServerData.DynamoDBActionRetries = i
+func (c *Config) SetDynamoDBActionRetries(i uint) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureServerData()
+	c._v.Set("notifier_server.dynamodb_action_retries", i)
+	c.NotifierServerData.DynamoDBActionRetries = i
+	return nil
 }
 
-func (c *Config) SetSnsAwsRegion(s string) {
-	if c._v != nil {
-		c._v.Set("notifier_server.sns_aws_region", s)
-		c.NotifierServerData.SnsAwsRegion = s
+func (c *Config) SetSnsAwsRegion(s string) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
 	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureServerData()
+	c._v.Set("notifier_server.sns_aws_region", s)
+	c.NotifierServerData.SnsAwsRegion = s
+	return nil
 }
 
-// Read will load config settings from disk
+// Read will load config settings from disk.
+// FIX #7: Builds into local variables first and only overwrites c._v,
+// c.NotifierServerData, and c.SubscriptionsData on success, so a failed
+// Read() doesn't destroy previously valid state.
 func (c *Config) Read() error {
-	c._v = nil
-	c.NotifierServerData = &notifierServerData{}
-	c.SubscriptionsData = []*subscriptionsData{}
-
 	if util.LenTrim(c.AppName) == 0 {
 		return fmt.Errorf("App Name is Required")
 	}
 
-	if util.LenTrim(c.ConfigFileName) == 0 {
-		c.ConfigFileName = "notifier-config"
+	configFileName := c.ConfigFileName
+	if util.LenTrim(configFileName) == 0 {
+		configFileName = "notifier-config"
 	}
 
-	c._v = &data.ViperConf{
+	v := &data.ViperConf{
 		AppName:          c.AppName,
-		ConfigName:       c.ConfigFileName,
+		ConfigName:       configFileName,
 		CustomConfigPath: c.CustomConfigPath,
 
 		UseYAML:            true,
 		UseAutomaticEnvVar: false,
 	}
 
-	c._v.Default("notifier_server.gateway_url", "").Default( // required, notifier gateway url to be called back by sns, must begin with http or https
-		"notifier_server.server_key", "").Default( // auto-created, notifier server key auto created upon launch
-		"notifier_server.dynamodb_aws_region", "").Default( // required, valid aws region such as us-east-1
-		"notifier_server.dynamodb_use_dax", false).Default( // optional, true = uses dax
-		"notifier_server.dynamodb_dax_url", "").Default( // conditional, required if use dax = true
-		"notifier_server.dynamodb_table", "").Default( // required, dynamodb table name
-		"notifier_server.dynamodb_timeout_seconds", 5).Default( // optional, dynamodb action timeout seconds
-		"notifier_server.dynamodb_action_retries", 3).Default( // optional, dynamodb action retries count
-		"notifier_server.sns_aws_region", "") // required, valid aws region such as us-east-1
+	v.Default("notifier_server.gateway_url", "").Default(
+		"notifier_server.server_key", "").Default(
+		"notifier_server.dynamodb_aws_region", "").Default(
+		"notifier_server.dynamodb_use_dax", false).Default(
+		"notifier_server.dynamodb_dax_url", "").Default(
+		"notifier_server.dynamodb_table", "").Default(
+		"notifier_server.dynamodb_timeout_seconds", 5).Default(
+		"notifier_server.dynamodb_action_retries", 3).Default(
+		"notifier_server.sns_aws_region", "")
 
-	c._v.Default("subscriptions", []*subscriptionsData{}) // required, slice of subscriptions (topic_arn, subscription_arn)
+	v.Default("subscriptions", []*SubscriptionsData{})
 
-	if ok, err := c._v.Init(); err != nil {
+	if ok, err := v.Init(); err != nil {
 		return err
 	} else {
 		if !ok {
-			if e := c._v.Save(); e != nil {
+			if e := v.Save(); e != nil {
 				return fmt.Errorf("create config file failed: %w", e)
 			}
 		} else {
-			c._v.WatchConfig()
+			v.WatchConfig()
 		}
 	}
 
-	if err := c._v.Unmarshal(c); err != nil {
+	// Unmarshal into a temporary Config to validate before committing
+	tempCfg := &Config{}
+	if err := v.Unmarshal(tempCfg); err != nil {
 		return err
 	}
+
+	// All succeeded — commit to receiver
+	c._v = v
+	c.ConfigFileName = configFileName
+	c.NotifierServerData = tempCfg.NotifierServerData
+	c.SubscriptionsData = tempCfg.SubscriptionsData
+
+	// Ensure NotifierServerData is never nil after Read
+	c.ensureServerData()
 
 	return nil
 }
 
-// Save persists config settings to disk
+// Save persists config settings to disk.
+// FIX #8: Returns an error when _v is nil instead of silently succeeding.
 func (c *Config) Save() error {
 	if strings.ToLower(os.Getenv("CONFIG_READ_ONLY")) == "true" {
 		return nil
 	}
-	if c._v != nil {
-		return c._v.Save()
-	} else {
-		return nil
+	if c._v == nil {
+		return fmt.Errorf("cannot save: viper config not initialized (call Read first)")
 	}
+	return c._v.Save()
 }

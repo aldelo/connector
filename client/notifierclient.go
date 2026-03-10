@@ -19,16 +19,28 @@ package client
 import (
 	"context"
 	"fmt"
-	util "github.com/aldelo/common"
-	"github.com/aldelo/common/wrapper/xray"
-	notifierpb "github.com/aldelo/connector/notifierserver/proto"
-	"google.golang.org/grpc"
 	"io"
 	"log"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	util "github.com/aldelo/common"
+	"github.com/aldelo/common/wrapper/xray"
+	notifierpb "github.com/aldelo/connector/notifierserver/proto"
+	"google.golang.org/grpc"
 )
+
+// recvMapMaxSize is the maximum number of entries in the deduplication map
+// before a full reset is performed. Prevents unbounded memory growth.
+const recvMapMaxSize = 2000
+
+// recvMapCleanupInterval controls how often (in processed messages) we scan
+// the deduplication map for stale entries.
+const recvMapCleanupInterval = 100
+
+// recvMapEntryTTL is how long a deduplication entry stays valid.
+const recvMapEntryTTL = 60 * time.Second
 
 // HostDiscoveryNotification struct contains the field values for notification discovery payload
 //
@@ -242,20 +254,26 @@ func (n *NotifierClient) NotifierClientAlertServicesStarted() bool {
 }
 
 // PurgeEndpointCache removes current client connection's service name ip port from cache,
-// if current service name ip port not found, entire cache will be purged
+// if current service name ip port not found, entire cache will be purged.
+//
+// FIX #1: Uses RemoteAddress() (which holds connMu) instead of directly accessing _remoteAddress.
+// FIX #2: Uses cacheMu-protected helpers instead of directly accessing _cache.
 func (n *NotifierClient) PurgeEndpointCache() {
 	if n == nil {
 		return
 	}
 
-	// Reset global cache if client or config is unavailable to prevent accessing nil fields
 	if n._grpcClient == nil || n._grpcClient._config == nil {
-		_cache = new(Cache)
+		ClearEndpointCache()
 		return
 	}
 
 	serviceName := strings.ToLower(n._grpcClient._config.Target.ServiceName + "." + n._grpcClient._config.Target.NamespaceName)
-	buf := strings.Split(n._grpcClient._remoteAddress, ":")
+
+	// FIX #1: Use the thread-safe RemoteAddress() getter instead of direct field access
+	remoteAddr := n._grpcClient.RemoteAddress()
+	buf := strings.Split(remoteAddr, ":")
+
 	ip := ""
 	port := uint(0)
 	if len(buf) == 2 {
@@ -264,11 +282,11 @@ func (n *NotifierClient) PurgeEndpointCache() {
 	}
 
 	if util.LenTrim(serviceName) == 0 || len(ip) == 0 || port == 0 {
-		_cache = new(Cache)
-	} else if _cache == nil {
-		_cache = new(Cache)
+		// FIX #2: Use the thread-safe ClearEndpointCache() instead of direct _cache assignment
+		ClearEndpointCache()
 	} else {
-		_cache.PurgeServiceEndpointByHostAndPort(serviceName, ip, port)
+		// FIX #2: Use the thread-safe cache helper instead of direct _cache access
+		cachePurgeServiceEndpointByHostAndPort(serviceName, ip, port)
 	}
 }
 
@@ -415,6 +433,10 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 	n._subscriberTopicArn = topicArn
 
 	ctxDone := nsClient.Context()
+
+	// FIX #3 & #4: Consolidated deduplication map management.
+	// Single cleanup threshold (recvMapMaxSize), single cleanup interval (recvMapCleanupInterval),
+	// and removed duplicate recvMap[recvKey] = now write.
 	recvMap := make(map[string]time.Time)
 	cleanupCounter := 0
 
@@ -456,11 +478,6 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 						continue
 					}
 
-					// evaluate sns callback relay message
-					// Id = sns message id (assigned by sns) < Id is not used in this code block
-					// Timestamp = sns message timestamp, formatted as "yyyy-mm-ddThh:mm:ss.mmmZ"
-					// Message = sns message content:
-					// 			 `{"msg_type":"host-discovery", "action":"online | offline", "host":"123.123.123.123"}`
 					if util.LenTrim(data.Message) == 0 {
 						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data's Message is Blank, Recv Loop Skips to Next Cycle !!!")
 
@@ -472,8 +489,6 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					}
 
 					// ensure message was within the last 15 minutes
-					// t1 is utc value
-					// t2 converts to utc for comparison
 					var t1 time.Time
 					var parseErr error
 					t1, parseErr = time.Parse(time.RFC3339, data.Timestamp)
@@ -548,47 +563,32 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 								continue
 							}
 
-							// check if already received within the last 10 seconds
+							// check if already received within the last 10 seconds (deduplication)
 							recvKey := fmt.Sprintf("%s:%d", ip, port)
 							now := time.Now()
 							if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(now, t)) <= 10 {
-								// already in map, skip this one
+								// already in map within dedup window, skip
 								n._grpcClient.ZLog().Warnf("*** Notification Client Received Repeated Notification Same Data '" + recvKey + "' Within 10 Seconds Duration, Alert Bypassed ***")
 								continue
-							} else {
-								// add or update to map with TTL-based cleanup
-								if len(recvMap) > 5000 {
-									// Clean up entries older than 60 seconds to prevent unbounded memory growth
-									for k, v := range recvMap {
-										if util.AbsInt(util.SecondsDiff(now, v)) > 60 {
-											delete(recvMap, k)
-										}
-									}
-									// If still too large after cleanup, reset the map
-									if len(recvMap) > 5000 {
-										recvMap = make(map[string]time.Time)
-									}
-								}
-								recvMap[recvKey] = now
 							}
 
+							// FIX #3: Single write to recvMap (was written twice in original code)
+							recvMap[recvKey] = now
+
+							// FIX #4: Unified cleanup with single threshold
 							cleanupCounter++
-							// Periodically clean up entries older than 60 seconds
-							// Trigger cleanup every 100 entries processed OR when map exceeds 1000 entries
-							if cleanupCounter >= 100 || len(recvMap) > 1000 {
+							if cleanupCounter >= recvMapCleanupInterval || len(recvMap) > recvMapMaxSize {
 								cleanupCounter = 0
 								for k, v := range recvMap {
-									if now.Sub(v) > 60*time.Second {
+									if now.Sub(v) > recvMapEntryTTL {
 										delete(recvMap, k)
 									}
 								}
+								// If still over capacity after TTL cleanup, hard reset
+								if len(recvMap) > recvMapMaxSize {
+									recvMap = make(map[string]time.Time)
+								}
 							}
-							// If still too large after cleanup, reset (lowered from 5000 to 2000 to prevent excessive growth)
-							if len(recvMap) > 2000 {
-								recvMap = make(map[string]time.Time)
-								cleanupCounter = 0
-							}
-							recvMap[recvKey] = now
 
 							isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
 
