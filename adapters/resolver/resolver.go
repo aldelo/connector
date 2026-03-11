@@ -195,13 +195,19 @@ func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Addre
 	return addrs, nil
 }
 
+// FIX: NewManualResolver now performs an upsert instead of always creating a new resolver.
+// On re-dial (e.g., after client.Close() + client.Dial()), the scheme+service pair already
+// exists in the resolver map from the first dial. The original code rejected this with
+// "Resolver already registered" — but this is a legitimate reconnect scenario.
+//
+// Now: if a resolver already exists for the scheme+service, we update its state with the
+// new addresses. If it doesn't exist, we create and register a new one.
 func NewManualResolver(schemeName string, serviceName string, endpointAddrs []string) error {
 	schemeName, err := normalizeAndValidateSchemeName(schemeName)
 	if err != nil {
 		return err
 	}
 
-	// centralized service-name validation to avoid inconsistent checks.
 	svc, err := normalizeServiceName(serviceName)
 	if err != nil {
 		return err
@@ -212,12 +218,22 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 		return err
 	}
 
+	// Check if a resolver already exists for this scheme+service pair.
+	// If so, update its state instead of creating a new one.
+	existing, _ := getResolver(schemeName, svc)
+	if existing != nil {
+		existing.UpdateState(resolver.State{
+			Addresses: addrs,
+		})
+		return nil
+	}
+
+	// No existing resolver — create and register a new one.
 	r := manual.NewBuilderWithScheme(schemeName)
 	r.InitialState(resolver.State{
 		Addresses: addrs,
 	})
 
-	// wrap for clearer context when registration fails.
 	if err := setResolver(schemeName, svc, r); err != nil {
 		return fmt.Errorf("register manual resolver: %w", err)
 	}
@@ -236,7 +252,6 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		return err
 	}
 
-	// centralized service-name validation to avoid inconsistent checks.
 	svc, err := normalizeServiceName(serviceName)
 	if err != nil {
 		return err
@@ -247,7 +262,6 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		return err
 	}
 
-	// manual.Resolver.UpdateState does not return an error.
 	r.UpdateState(resolver.State{
 		Addresses: addrs,
 	})
@@ -261,7 +275,6 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 		return fmt.Errorf("Resolver is nil; cannot register")
 	}
 
-	// enforce normalization inside the setter to avoid caller mistakes.
 	schemeName, err := normalizeAndValidateSchemeName(schemeName)
 	if err != nil {
 		return err
@@ -282,30 +295,28 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 
 	key := composeKey(schemeName, svc)
 
-	if _, exists := schemeMap[key]; exists {
-		return fmt.Errorf("Resolver already registered for scheme '%s' and service '%s'", schemeName, svc)
-	}
-
+	// FIX: Allow re-registration for the same scheme+service pair.
+	// The original code rejected this, but re-dial after Close() needs it.
+	// Only reject if the scheme is being reused for a DIFFERENT service.
 	if existingService, taken := registeredSchemes[schemeName]; taken && existingService != svc {
 		return fmt.Errorf("Scheme '%s' already registered for service '%s'; use a unique scheme per service", schemeName, existingService)
 	}
 
+	// If same key already exists, overwrite (upsert semantics for reconnect).
 	schemeMap[key] = r
 	registeredSchemes[schemeName] = svc
 
 	// guard resolver.Register against panic and roll back on failure
 	if err := safeRegister(r); err != nil {
-		delete(schemeMap, key)                // rollback
-		delete(registeredSchemes, schemeName) // rollback
+		delete(schemeMap, key)
+		delete(registeredSchemes, schemeName)
 		return err
 	}
 
-	//resolver.SetDefaultScheme(r.Scheme()) // optional
 	return nil
 }
 
 func getResolver(schemeName string, serviceName string) (*manual.Resolver, error) {
-	// normalize inside getter to ensure consistent map keying.
 	schemeName, err := normalizeAndValidateSchemeName(schemeName)
 	if err != nil {
 		return nil, err
