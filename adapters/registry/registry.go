@@ -58,7 +58,7 @@ var serviceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,62}
 var namespaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
 
 // broaden namespace validation to allow HTTP/custom namespace rules (mixed case, dash, longer length)
-var namespaceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,1022}[A-Za-z0-9])?$`)
+var namespaceNameHTTPPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,1000}[A-Za-z0-9])?$`)
 
 const serviceNameDNSMaxLen = 63
 const serviceNameHTTPMaxLen = 64
