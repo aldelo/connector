@@ -75,10 +75,8 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 		var seg *xray.XSegment
 		createdSeg := false
 
-		// track incoming trace headers (if any) to parent synthetic segment when context lacks a segment
 		parentSegID, parentTraceID, sampled, _ := "", "", (*bool)(nil), ""
 
-		// global panic guard always installed to prevent client crashes on any path
 		defer func() {
 			if r := recover(); r != nil {
 				traceErr := panicTraceError(r)
@@ -89,10 +87,10 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 				} else if segCtx := awsxray.GetSegment(ctx); segCtx != nil {
 					_ = segCtx.AddError(traceErr)
 				}
-				err = status.Error(codes.Internal, clientErr.Error()) // sanitized message
+				err = status.Error(codes.Internal, clientErr.Error())
 				return
 			}
-			if createdSeg && seg != nil && seg.Seg != nil { // only close synthetic segment
+			if createdSeg && seg != nil && seg.Seg != nil {
 				if err != nil {
 					_ = seg.Seg.AddError(err)
 				}
@@ -100,11 +98,9 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 			}
 		}()
 
-		// honor upstream Sampled=0 headers even when no segment is present
 		if md, ok := metadata.FromOutgoingContext(ctx); ok {
 			parentSegID, parentTraceID, sampled, _ = extractParentIDs(md)
 			if sampled != nil && !*sampled {
-				// do not create or propagate tracing; respect upstream opt-out
 				return invoker(ctx, method, req, reply, cc, opts...)
 			}
 		}
@@ -113,16 +109,13 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
 
-		// bypass health check
 		if strings.HasPrefix(method, "/grpc.health") {
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
 
-		// If there is no current segment, create a temporary one to ensure trace propagation.
 		if awsxray.GetSegment(ctx) == nil {
 			segName := sanitizeSegmentName("GrpcClient-UnaryRPC-", method)
 
-			// adopt parent trace/segment IDs when available to avoid trace breaks
 			if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
 				seg = xray.NewSegment(segName, &xray.XRayParentSegment{
 					SegmentID: parentSegID,
@@ -136,7 +129,6 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 				createdSeg = true
 				ctx = context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
 			} else {
-				// fallback: run without tracing if segment creation failed
 				seg = nil
 				return invoker(ctx, method, req, reply, cc, opts...)
 			}
@@ -150,9 +142,8 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 
 func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-		var seg *xray.XSegment // keep segment in outer scope for deferred recovery/close
+		var seg *xray.XSegment
 
-		// global panic guard even when X-Ray is disabled, to avoid crashing the server
 		defer func() {
 			if r := recover(); r != nil {
 				traceErr := panicTraceError(r)
@@ -181,18 +172,15 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 			fullMethod = info.FullMethod
 		}
 
-		// Skip noisy health checks.
 		if strings.HasPrefix(fullMethod, "/grpc.health") {
 			return handler(ctx, req)
 		}
 
-		// Extract parent IDs from incoming metadata.
 		parentSegID, parentTraceID, sampled, rawHeader := "", "", (*bool)(nil), ""
 		if md, ok := metadata.FromIncomingContext(ctx); ok {
 			parentSegID, parentTraceID, sampled, rawHeader = extractParentIDs(md)
 		}
 
-		// If parent said Sampled=0, propagate headers without creating a segment.
 		if sampled != nil && !*sampled {
 			outgoingMD := metadata.New(nil)
 			if rawHeader != "" {
@@ -213,7 +201,6 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 			return handler(ctx, req)
 		}
 
-		// include serviceName in segment naming when provided.
 		segPrefix := "GrpcService-UnaryRPC-"
 		if strings.TrimSpace(serviceName) != "" {
 			segPrefix = sanitizeSegmentName("", serviceName+"-GrpcService-UnaryRPC-")
@@ -229,16 +216,13 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 			seg = xray.NewSegment(segName)
 		}
 
-		// guard segment creation to avoid panics
 		if seg == nil || seg.Seg == nil {
 			seg = nil
 			return handler(ctx, req)
 		}
 
-		// Bind segment to context for downstream code.
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
 
-		// Propagate tracing headers back to caller.
 		outgoingMD := metadata.New(nil)
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
 		traceHeader := formatTraceHeader(seg.Seg.TraceID, seg.Seg.ID, seg.Seg.Sampled)
@@ -247,7 +231,6 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		}
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
-		// stage headers (do not flush yet) so the handler can merge/override its own metadata
 		if hdrErr := grpc.SetHeader(segCtx, outgoingMD); hdrErr != nil {
 			_ = seg.Seg.AddError(hdrErr)
 			err = status.Error(codes.Internal, hdrErr.Error())
@@ -258,7 +241,8 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 	}
 }
 
-// bind the created segment into the stream context and use the wrapped stream for SendHeader and handler.
+// contextServerStream wraps grpc.ServerStream to bind the X-Ray segment into the
+// stream context and manage header lifecycle (stage → merge → send-once).
 type contextServerStream struct {
 	grpc.ServerStream
 	ctx        context.Context
@@ -272,47 +256,68 @@ func (w *contextServerStream) Context() context.Context {
 	return w.ctx
 }
 
-// stage headers (merge with existing) without sending; preserves handler-set headers
+// SetHeader stages headers (merged with existing) without sending.
+// Preserves handler-set headers for later merge in SendHeader.
 func (w *contextServerStream) SetHeader(md metadata.MD) error {
-	// If caller provides nil, do nothing; avoid sending nil metadata.
 	if md == nil {
 		return nil
 	}
-	// Make a copy of incoming MD to avoid mutating caller-owned maps.
 	incoming := metadata.Join(nil, md)
 
 	w.mu.Lock()
 	w.stagedMD = metadata.Join(w.stagedMD, incoming)
 	if w.stagedMD == nil {
-		// Ensure we never attempt to send a nil header block.
 		w.stagedMD = metadata.MD{}
 	}
 	w.mu.Unlock()
 	return nil
 }
 
-// track header send when handler or interceptor calls SendHeader.
-// send exactly once, merging staged + provided metadata
+// SendHeader sends headers exactly once, merging staged + provided metadata.
+//
+// FIX: The original code had a race condition:
+//   - The headerSent check was outside the lock (atomic read)
+//   - The headerSent set was inside the lock
+//   - The actual ServerStream.SendHeader was OUTSIDE the lock
+//
+// Two goroutines could both pass the outer check (both see 0), then serialize
+// through the lock (both set headerSent=1), then BOTH call ServerStream.SendHeader,
+// causing "SendHeader called multiple times" at the transport layer.
+//
+// Fix: Use atomic.CompareAndSwapUint32 as the single gate. Only the goroutine that
+// wins the CAS (0→1) gets to call ServerStream.SendHeader. All others return nil.
+// This eliminates the race without holding the mu lock during the transport write.
 func (w *contextServerStream) SendHeader(md metadata.MD) error {
-	if w.headerSent != nil && atomic.LoadUint32(w.headerSent) == 1 {
+	if w.headerSent == nil {
+		// No tracking — just forward directly
+		return w.ServerStream.SendHeader(md)
+	}
+
+	// Fast path: already sent
+	if atomic.LoadUint32(w.headerSent) == 1 {
 		return nil
 	}
 
+	// Merge staged metadata with the provided md under lock
 	w.mu.Lock()
 	merged := metadata.Join(w.stagedMD, md)
 	if merged == nil {
 		merged = metadata.MD{}
 	}
-	if w.headerSent != nil {
-		atomic.StoreUint32(w.headerSent, 1)
-	}
 	w.mu.Unlock()
+
+	// Gate: exactly one goroutine wins the CAS and performs the send.
+	// Losers return nil — headers were (or will be) sent by the winner.
+	if !atomic.CompareAndSwapUint32(w.headerSent, 0, 1) {
+		return nil
+	}
 
 	return w.ServerStream.SendHeader(merged)
 }
 
-// mark headers as sent when the first message goes out (gRPC auto-sends headers on first SendMsg).
-// ensure a single header send before first message
+// SendMsg ensures headers are sent before the first message.
+// gRPC auto-sends headers on first SendMsg, but we need to flush our staged
+// metadata first, so we explicitly call SendHeader if not yet sent.
 func (w *contextServerStream) SendMsg(m interface{}) error {
 	if w.headerSent != nil && atomic.LoadUint32(w.headerSent) == 0 {
 		if err := w.SendHeader(nil); err != nil {
@@ -324,7 +329,6 @@ func (w *contextServerStream) SendMsg(m interface{}) error {
 
 // helper to extract parent IDs from metadata with both canonical and legacy keys
 func extractParentIDs(md metadata.MD) (segID, traceID string, sampled *bool, rawHeader string) {
-	// 1) canonical AWS header: "Root=1-...;Parent=...;Sampled=1"
 	if v, ok := md["x-amzn-trace-id"]; ok && len(v) > 0 {
 		rawHeader = v[0]
 		for _, part := range strings.Split(rawHeader, ";") {
@@ -350,7 +354,6 @@ func extractParentIDs(md metadata.MD) (segID, traceID string, sampled *bool, raw
 		}
 	}
 
-	// 2) legacy split headers
 	if segID == "" {
 		if v, ok := md["x-amzn-seg-id"]; ok && len(v) > 0 {
 			segID = v[0]
@@ -368,7 +371,6 @@ func extractParentIDs(md metadata.MD) (segID, traceID string, sampled *bool, raw
 // formatTraceHeader builds the canonical AWS X-Ray header value.
 func formatTraceHeader(traceID, parentID string, sampled bool) string {
 	if strings.TrimSpace(traceID) == "" {
-		// No Root => do not construct a header; callers should skip setting it.
 		return ""
 	}
 
@@ -386,87 +388,11 @@ func formatTraceHeader(traceID, parentID string, sampled bool) string {
 	return strings.Join(parts, ";")
 }
 
-// TracerUnaryServerInterceptor will perform xray tracing for each unary RPC call
-//
-// to pass in parent xray segment id and trace id, set the metadata keys with:
-//
-//	x-amzn-seg-id = parent xray segment id, assign value to this key via metadata.MD
-//	x-amzn-tr-id = parent xray trace id, assign value to this key via metadata.MD
-//
-// how to set metadata at client side?
-//
-//	ctx := context.Background()
-//	md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
-//	ctx = metadata.NewOutgoingContext(ctx, md)
-//func TracerUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-//	if xray.XRayServiceOn() {
-//		parentSegID := ""
-//		parentTraceID := ""
-//
-//		var md metadata.MD
-//		var ok bool
-//
-//		if md, ok = metadata.FromIncomingContext(ctx); ok {
-//			if v, ok2 := md["x-amzn-seg-id"]; ok2 && len(v) > 0 {
-//				parentSegID = v[0]
-//			}
-//
-//			if v, ok2 := md["x-amzn-tr-id"]; ok2 && len(v) > 0 {
-//				parentTraceID = v[0]
-//			}
-//		}
-//
-//		var seg *xray.XSegment
-//
-//		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-//			seg = xray.NewSegment("GrpcService-UnaryRPC-"+info.FullMethod, &xray.XRayParentSegment{
-//				SegmentID: parentSegID,
-//				TraceID:   parentTraceID,
-//			})
-//		} else {
-//			seg = xray.NewSegment("GrpcService-UnaryRPC-" + info.FullMethod)
-//		}
-//		defer seg.Close()
-//		defer func() {
-//			if err != nil {
-//				_ = seg.Seg.AddError(err)
-//			}
-//		}()
-//
-//		if md == nil {
-//			md = make(metadata.MD)
-//		}
-//
-//		md.Set("x-amzn-seg-id", seg.Seg.ID)
-//		md.Set("x-amzn-tr-id", seg.Seg.TraceID)
-//
-//		// header is sent by itself
-//		_ = grpc.SendHeader(ctx, md)
-//
-//		resp, err = handler(ctx, req)
-//		return resp, err
-//	} else {
-//		return handler(ctx, req)
-//	}
-//}
-
 // TracerStreamServerInterceptor will perform xray tracing for each stream RPC call
-//
-// to pass in parent xray segment id and trace id, set the metadata keys with:
-//
-//	x-amzn-seg-id = parent xray segment id, assign value to this key via metadata.MD
-//	x-amzn-tr-id = parent xray trace id, assign value to this key via metadata.MD
-//
-// how to set metadata at client side?
-//
-//	ctx := context.Background()
-//	md := metadata.Pairs("x-amzn-seg-id", "abc", "x-amzn-tr-id", "def")
-//	ctx = metadata.NewOutgoingContext(ctx, md)
 func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
-	var seg *xray.XSegment // outer-scope segment for recovery/close
+	var seg *xray.XSegment
 	headerSent := uint32(0)
 
-	// global panic guard even when X-Ray is disabled
 	defer func() {
 		if r := recover(); r != nil {
 			traceErr := panicTraceError(r)
@@ -487,7 +413,6 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 	}()
 
 	if xray.XRayServiceOn() {
-		// skip health check calls from tracing noise
 		fullMethod := "unknown"
 		if info != nil {
 			fullMethod = info.FullMethod
@@ -539,7 +464,6 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 				stagedMD:     nil,
 			}
 
-			// Stage headers (do not force-send yet) to avoid duplicate-send errors if handler calls SendHeader.
 			if hdrErr := wrappedStream.SetHeader(outgoingMD); hdrErr != nil {
 				err = status.Error(codes.Internal, hdrErr.Error())
 				return err
@@ -548,7 +472,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			err = handler(srv, wrappedStream)
 
 			// Ensure headers flush once if handler sent nothing.
-			if atomic.LoadUint32(&headerSent) == 0 { // atomic read
+			if atomic.LoadUint32(&headerSent) == 0 {
 				if hdrErr := wrappedStream.SendHeader(nil); hdrErr != nil {
 					if err == nil {
 						err = status.Error(codes.Internal, hdrErr.Error())
@@ -569,13 +493,11 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			seg = xray.NewSegment(segmentName)
 		}
 
-		// guard segment before binding/propagation
 		if seg == nil || seg.Seg == nil {
 			seg = nil
 			return handler(srv, ss)
 		}
 
-		// bind the segment into the stream context so downstream code can see it
 		segCtx := context.WithValue(ctx, awsxray.ContextKey, seg.Seg)
 		outgoingMD := metadata.New(nil)
 		outgoingMD.Set("x-amzn-seg-id", seg.Seg.ID)
@@ -592,7 +514,6 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			stagedMD:     nil,
 		}
 
-		// only stage headers here; let handler add/override, and flush later to avoid ErrIllegalHeaderWrite.
 		if hdrErr := wrappedStream.SetHeader(outgoingMD); hdrErr != nil {
 			_ = seg.Seg.AddError(hdrErr)
 			err = status.Error(codes.Internal, hdrErr.Error())
@@ -602,7 +523,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		err = handler(srv, wrappedStream)
 
 		// ensure headers are flushed once even if handler sent nothing
-		if atomic.LoadUint32(&headerSent) == 0 { // atomic read
+		if atomic.LoadUint32(&headerSent) == 0 {
 			if hdrErr := wrappedStream.SendHeader(nil); hdrErr != nil {
 				_ = seg.Seg.AddError(hdrErr)
 				if err == nil {
