@@ -208,10 +208,14 @@ func retryWithBackoff(ctx context.Context, maxRetries int, operation func() erro
 			return nil
 		}
 
+		// FIX #14: Use time.NewTimer instead of time.After to avoid goroutine leak
+		// when ctx.Done fires first.
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 
 		backoff = time.Duration(float64(backoff) * backoffFactor)
@@ -464,7 +468,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 				return nil, "", 0, errors.New(buf)
 			} else {
-				if util.IsNumericIntOnly(strings.Replace(body, ".", "", -1)) {
+				if util.IsNumericIntOnly(strings.ReplaceAll(body, ".", "")) {
 					if publicIPSeg != nil {
 						_ = publicIPSeg.Seg.AddMetadata("Result-Private-IP", ip)
 						_ = publicIPSeg.Seg.AddMetadata("Result-Public-IP", body)
@@ -489,7 +493,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			if s._config.Instance.FavorPublicIP {
 				buf := "!!! Instance Favors Public IP, However, Service Config Missing Public IP Discovery Gateway and/or Public IP Gateway Key, Service Launch Stopped !!!"
 				log.Println(buf)
-				return nil, "", 0, fmt.Errorf(buf)
+				return nil, "", 0, fmt.Errorf("%s", buf)
 			} else {
 				log.Println("=== Instance Using LocalIP Per Service Config Setting ===")
 			}
@@ -660,7 +664,14 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 			}
 
 			if serveErr := s._grpcServer.Serve(lis); serveErr != nil {
-				log.Fatalf("Serve gRPC Service %s on %s Failed: (Server Halt) %s", s._config.AppName, s._localAddress, serveErr.Error())
+				// FIX #13: Was log.Fatalf which calls os.Exit(1) and bypasses ALL deferred
+				// cleanup (SD deregister, SNS unsubscribe, health report removal, etc.).
+				// Send SIGTERM to self instead, which triggers awaitOsSigExit() and runs
+				// the full graceful shutdown path.
+				log.Printf("Serve gRPC Service %s on %s Failed: (Server Halt) %s", s._config.AppName, s._localAddress, serveErr.Error())
+				if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
+					_ = p.Signal(syscall.SIGTERM)
+				}
 			} else {
 				log.Println("... gRPC Server Quit Command Received")
 			}

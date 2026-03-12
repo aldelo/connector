@@ -848,9 +848,9 @@ func unsubscribeSNS(notify *notification) {
 
 	// unescape \u0026 to &
 	// unescape \" to "
-	unsubUrl = strings.Replace(unsubUrl, `\u0026`, `&`, -1)
-	unsubUrl = strings.Replace(unsubUrl, `\"`, `"`, -1)
-	unsubUrl = strings.Replace(unsubUrl, `"`, "", -1)
+	unsubUrl = strings.ReplaceAll(unsubUrl, `\u0026`, `&`)
+	unsubUrl = strings.ReplaceAll(unsubUrl, `\"`, `"`)
+	unsubUrl = strings.ReplaceAll(unsubUrl, `"`, "")
 
 	// call HTTP GET to unsubscribe
 	if status, body, err := rest.GET(unsubUrl, []*rest.HeaderKeyValue{}); err != nil {

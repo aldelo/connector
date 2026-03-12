@@ -89,10 +89,14 @@ func (ep *clientEndpoint) safeSend(data *pb.NotificationData, timeout time.Durat
 	ch := ep.DataToSend
 	ep.closeMux.Unlock()
 
+	// FIX: Use time.NewTimer instead of time.After to avoid goroutine leak
+	// when the channel send fires first.
+	timer := time.NewTimer(timeout)
 	select {
 	case ch <- data:
+		timer.Stop()
 		return true
-	case <-time.After(timeout):
+	case <-timer.C:
 		return false
 	}
 }

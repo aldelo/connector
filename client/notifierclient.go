@@ -543,7 +543,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 							ip := ipPort[0]
 							port := util.StrToUint(ipPort[1])
 
-							if ipParts := strings.Split(ip, "."); len(ipParts) != 4 || !util.IsNumericIntOnly(strings.Replace(ip, ".", "", -1)) {
+							if ipParts := strings.Split(ip, "."); len(ipParts) != 4 || !util.IsNumericIntOnly(strings.ReplaceAll(ip, ".", "")) {
 								n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host IP Not Valid: Received '" + ip + "', Recv Loop Skips to Next Cycle !!!")
 
 								if n.ServiceAlertSkippedHandler != nil {

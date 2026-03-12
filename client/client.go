@@ -849,10 +849,13 @@ func (c *Client) shutdownWebServerLocked(timeout time.Duration, callCleanup bool
 	}
 
 	// wait for server goroutine to signal completion or timeout
+	// FIX: Use time.NewTimer instead of time.After to avoid goroutine leak
 	if c.webServerStop != nil {
+		stopTimer := time.NewTimer(timeout + time.Second)
 		select {
 		case <-c.webServerStop:
-		case <-time.After(timeout + time.Second):
+			stopTimer.Stop()
+		case <-stopTimer.C:
 		}
 		c.webServerStop = nil
 	}
@@ -1863,11 +1866,14 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		}
 		if state == connectivity.TransientFailure {
 			warnf("Health Status Check: connection in transient failure; retrying until deadline...")
-			// honor ctx/close while backing off to avoid hanging shutdown.
+			// FIX: Use time.NewTimer instead of time.After to avoid goroutine leak
+			// when ctx.Done or closed fires first.
+			backoffTimer := time.NewTimer(interval)
 			select {
 			case <-ctx.Done():
+				backoffTimer.Stop()
 				return ctx.Err()
-			case <-time.After(interval):
+			case <-backoffTimer.C:
 			case <-func() <-chan struct{} {
 				if !c.closed.Load() {
 					return nil
@@ -1876,6 +1882,7 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 				close(ch)
 				return ch
 			}():
+				backoffTimer.Stop()
 				return fmt.Errorf("Health Status Check Failed: client is closed")
 			}
 			continue
@@ -1902,10 +1909,13 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			sleep = remaining
 		}
 
+		// FIX: Use time.NewTimer instead of time.After to avoid goroutine leak
+		sleepTimer := time.NewTimer(sleep)
 		select { // honor ctx/closed during sleep
 		case <-ctx.Done():
+			sleepTimer.Stop()
 			return ctx.Err()
-		case <-time.After(sleep):
+		case <-sleepTimer.C:
 		case <-func() <-chan struct{} {
 			if !c.closed.Load() {
 				return nil // no signal, keep waiting
@@ -1914,6 +1924,7 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			close(ch)
 			return ch
 		}():
+			sleepTimer.Stop()
 			return fmt.Errorf("Health Status Check Failed: client is closed")
 		}
 	}

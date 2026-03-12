@@ -128,8 +128,13 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	}
 
 	// stable, deduplicated merge (preserve existing order, then new)
-	seen := make(map[string]int)
-	merged := make([]*serviceEndpoint, 0)
+	// FIX: Pre-allocate with capacity hint to reduce allocations in hot path
+	existingLen := 0
+	if list, ok := c.serviceEndpoints[serviceName]; ok {
+		existingLen = len(list)
+	}
+	seen := make(map[string]int, existingLen+len(eps))
+	merged := make([]*serviceEndpoint, 0, existingLen+len(eps))
 
 	if list, ok := c.serviceEndpoints[serviceName]; ok {
 		for _, v := range list {
