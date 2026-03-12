@@ -187,6 +187,14 @@ func escapeUserInput(data string) string {
 	return result
 }
 
+// isValidSNSUrl validates that a URL matches the expected AWS SNS domain pattern
+// to prevent SSRF attacks via attacker-controlled SubscribeURL/UnsubscribeURL.
+// Legitimate AWS SNS URLs follow: https://sns.<region>.amazonaws.com/...
+func isValidSNSUrl(rawUrl string) bool {
+	lower := strings.ToLower(rawUrl)
+	return strings.HasPrefix(lower, "https://sns.") && strings.Contains(lower, ".amazonaws.com/")
+}
+
 // healthreporter handles client reporting to host health status of the client,
 // the intent is so that the constant client (grpc services) reporting enables the host to monitor health,
 // in the even health is lapsed, host can decide to mark client as unhealthy or deregister accordingly;
@@ -522,6 +530,19 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 		if url := confirm.SubscribeURL; util.LenTrim(url) > 0 {
 			log.Println("/snsrouter 'subscriptionconfirmation' SubscribeURL From SNS = " + escapeUserInput(url))
 
+			// FIX: Validate SubscribeURL domain to prevent SSRF.
+			// Legitimate AWS SNS confirmation URLs always match https://sns.<region>.amazonaws.com/
+			if !isValidSNSUrl(url) {
+				log.Println("/snsrouter 'subscriptionconfirmation' SubscribeURL rejected: does not match expected AWS SNS domain")
+				c.String(403, "SubscribeURL domain not allowed")
+
+				if seg != nil && seg.Ready() {
+					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' SubscribeURL rejected: %s", escapeUserInput(url)))
+				}
+
+				return
+			}
+
 			// validate serverKey
 			if util.LenTrim(serverKey) <= 0 {
 				log.Println("/snsrouter 'subscriptionconfirmation' Missing serverKey From Invoker")
@@ -828,21 +849,30 @@ func unsubscribeSNS(notify *notification) {
 		return
 	}
 
-	topicArn := escapeUserInput(notify.TopicArn)
-	unsubUrl := escapeUserInput(notify.UnsubscribeURL)
+	// FIX: Use escapeUserInput only for log-safe strings, not for the actual URL.
+	// escapeUserInput replaces \n \r \t with spaces, which corrupts URLs.
+	topicArnLog := escapeUserInput(notify.TopicArn)
+	unsubUrl := notify.UnsubscribeURL
 
-	if util.LenTrim(topicArn) == 0 {
+	if util.LenTrim(notify.TopicArn) == 0 {
 		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic Aborted: TopicArn Not Set in Notification Object Parsed from SNS !!!")
 		return
 	}
 
 	if util.LenTrim(unsubUrl) == 0 {
-		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArn + "' Aborted: UnsubscribeURL Not Set in Notification Object Parsed from SNS !!!")
+		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' Aborted: UnsubscribeURL Not Set in Notification Object Parsed from SNS !!!")
 		return
 	}
 
 	if strings.ToUpper(util.Left(unsubUrl, 8)) != "HTTPS://" {
-		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArn + "' From UnsubscribeURL '" + unsubUrl + "' Aborted: UnsubscribeURL is Not Https or Malformed !!!")
+		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' From UnsubscribeURL '" + escapeUserInput(unsubUrl) + "' Aborted: UnsubscribeURL is Not Https or Malformed !!!")
+		return
+	}
+
+	// FIX: Validate UnsubscribeURL domain to prevent SSRF.
+	// Legitimate AWS SNS unsubscribe URLs always match https://sns.<region>.amazonaws.com/
+	if !isValidSNSUrl(unsubUrl) {
+		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' From UnsubscribeURL '" + escapeUserInput(unsubUrl) + "' Aborted: URL domain not allowed !!!")
 		return
 	}
 
@@ -853,12 +883,13 @@ func unsubscribeSNS(notify *notification) {
 	unsubUrl = strings.ReplaceAll(unsubUrl, `"`, "")
 
 	// call HTTP GET to unsubscribe
+	unsubUrlLog := escapeUserInput(unsubUrl)
 	if status, body, err := rest.GET(unsubUrl, []*rest.HeaderKeyValue{}); err != nil {
-		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArn + "' Failed for UnsubscribeURL '" + unsubUrl + "': (HTTP GET Error) " + err.Error() + " !!!")
+		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' Failed for UnsubscribeURL '" + unsubUrlLog + "': (HTTP GET Error) " + err.Error() + " !!!")
 	} else if status != 200 {
-		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArn + "' Failed for UnsubscribeURL '" + unsubUrl + "': (Status " + util.Itoa(status) + ") " + body + " !!!")
+		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' Failed for UnsubscribeURL '" + unsubUrlLog + "': (Status " + util.Itoa(status) + ") " + body + " !!!")
 	} else {
-		log.Println("$$$ Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArn + "' Successful for UnsubscribeURL '" + unsubUrl + "': " + body + " $$$")
+		log.Println("$$$ Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' Successful for UnsubscribeURL '" + unsubUrlLog + "': " + body + " $$$")
 	}
 }
 

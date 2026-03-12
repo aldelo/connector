@@ -22,6 +22,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -100,7 +101,9 @@ type NotifierClient struct {
 	_grpcClient                  *Client
 	_subscriberID                string
 	_subscriberTopicArn          string
-	_notificationServicesStarted int32 // Use int32 for atomic operations
+	_subscribeCancel             context.CancelFunc // cancels the Subscribe gRPC stream
+	_subMu                       sync.Mutex         // protects _subscriberID, _subscriberTopicArn, and _subscribeCancel
+	_notificationServicesStarted int32              // Use int32 for atomic operations
 }
 
 // NewNotifierClient creates a new prepared notifier client for use in service discovery notification
@@ -351,12 +354,19 @@ func (n *NotifierClient) Close() {
 		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 	}
 
+	// FIX #25: Cancel the subscribe stream context to stop the Recv loop
+	n._subMu.Lock()
+	if n._subscribeCancel != nil {
+		n._subscribeCancel()
+		n._subscribeCancel = nil
+	}
+	n._subscriberID = ""
+	n._subscriberTopicArn = ""
+	n._subMu.Unlock()
+
 	if n._grpcClient != nil {
 		n._grpcClient.Close()
 	}
-
-	n._subscriberID = ""
-	n._subscriberTopicArn = ""
 }
 
 // Subscribe will subscribe this notifier client to a specified topicArn with sns, via notifier server;
@@ -370,19 +380,23 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 	if n._grpcClient == nil {
 		atomic.StoreInt32(&n._notificationServicesStarted, 0)
+		n._subMu.Lock()
 		n._subscriberID = ""
 		n._subscriberTopicArn = ""
+		n._subMu.Unlock()
 		err = fmt.Errorf("Notifier Client is Not Initialized, Obtain via NewNotifierClient Factory Func First")
 		return err
 	}
 
+	n._subMu.Lock()
 	if util.LenTrim(n._subscriberID) > 0 && util.LenTrim(n._subscriberTopicArn) > 0 {
+		n._subMu.Unlock()
 		err = fmt.Errorf("Notifier Client Subscription Already Engaged, Please Use Unsubscribe() First")
 		return err
-	} else {
-		n._subscriberID = ""
-		n._subscriberTopicArn = ""
 	}
+	n._subscriberID = ""
+	n._subscriberTopicArn = ""
+	n._subMu.Unlock()
 
 	if util.LenTrim(topicArn) == 0 {
 		atomic.StoreInt32(&n._notificationServicesStarted, 0)
@@ -410,8 +424,14 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 		}()
 	}
 
+	// FIX #25: Use a cancellable context so Close() can stop the stream
+	subCtx, subCancel := context.WithCancel(context.Background())
+	n._subMu.Lock()
+	n._subscribeCancel = subCancel
+	n._subMu.Unlock()
+
 	var nsClient notifierpb.NotifierService_SubscribeClient
-	nsClient, err = nc.Subscribe(context.Background(), &notifierpb.NotificationSubscriber{
+	nsClient, err = nc.Subscribe(subCtx, &notifierpb.NotificationSubscriber{
 		Id:    sessionId,
 		Topic: topicArn,
 	})
@@ -429,8 +449,10 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 	n._grpcClient.ZLog().Printf("+++ Notifier Client Subscribe TopicArn Success +++")
 
 	atomic.StoreInt32(&n._notificationServicesStarted, 1)
+	n._subMu.Lock()
 	n._subscriberID = sessionId
 	n._subscriberTopicArn = topicArn
+	n._subMu.Unlock()
 
 	ctxDone := nsClient.Context()
 
@@ -674,18 +696,24 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 	}
 
 	// second, perform unsubscribe?
-	if util.LenTrim(n._subscriberID) == 0 || util.LenTrim(n._subscriberTopicArn) == 0 {
+	// FIX #17: Protect _subscriberID and _subscriberTopicArn with _subMu
+	n._subMu.Lock()
+	subID := n._subscriberID
+	subTopic := n._subscriberTopicArn
+	if util.LenTrim(subID) == 0 || util.LenTrim(subTopic) == 0 {
 		n._subscriberID = ""
 		n._subscriberTopicArn = ""
+		n._subMu.Unlock()
 		n._grpcClient.ZLog().Errorf("!!! Notifier Client Unsubscribe Failed: Subscriber ID and/or TopicArn Not Found, Client Not Yet Subscribed !!!")
 		err = fmt.Errorf("Notifier Client Subscriber ID and TopicArn Not Found, Client Not Yet Subscribed")
 		return err
 	}
+	n._subMu.Unlock()
 
 	seg := xray.NewSegmentNullable("GrpcClient-NotifierClient-Unsubscribe")
 	if seg != nil {
-		_ = seg.Seg.AddMetadata("GrpcClient-SessionID", n._subscriberID)
-		_ = seg.Seg.AddMetadata("Subscribe-TopicARN", n._subscriberTopicArn)
+		_ = seg.Seg.AddMetadata("GrpcClient-SessionID", subID)
+		_ = seg.Seg.AddMetadata("Subscribe-TopicARN", subTopic)
 
 		defer seg.Close()
 		defer func() {
@@ -702,17 +730,19 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 	defer cancel()
 
 	if _, err = nc.Unsubscribe(ctx, &notifierpb.NotificationSubscriber{
-		Id:    n._subscriberID,
-		Topic: n._subscriberTopicArn,
+		Id:    subID,
+		Topic: subTopic,
 	}); err != nil {
-		n._grpcClient.ZLog().Errorf("!!! Notifier Client Unsubscribe Client ID '" + n._subscriberID + "' From TopicArn '" + n._subscriberTopicArn + "' Failed: " + err.Error() + " !!!")
-		err = fmt.Errorf("Notifier Client ID %s Unsubscribe From TopicARN %s Failed: %s", n._subscriberID, n._subscriberTopicArn, err.Error())
+		n._grpcClient.ZLog().Errorf("!!! Notifier Client Unsubscribe Client ID '" + subID + "' From TopicArn '" + subTopic + "' Failed: " + err.Error() + " !!!")
+		err = fmt.Errorf("Notifier Client ID %s Unsubscribe From TopicARN %s Failed: %s", subID, subTopic, err.Error())
 		return err
 	} else {
 		// unsubscribe ok
-		n._grpcClient.ZLog().Printf("### Notifier Client Unsubscribe Client ID '" + n._subscriberID + "' From TopicArn '" + n._subscriberTopicArn + "' Success ###")
+		n._grpcClient.ZLog().Printf("### Notifier Client Unsubscribe Client ID '" + subID + "' From TopicArn '" + subTopic + "' Success ###")
+		n._subMu.Lock()
 		n._subscriberID = ""
 		n._subscriberTopicArn = ""
+		n._subMu.Unlock()
 		return nil
 	}
 }

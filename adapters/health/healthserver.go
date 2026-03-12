@@ -32,7 +32,7 @@ import (
 
 type HealthServer struct {
 	grpc_health_v1.UnimplementedHealthServer // embed for forward compatibility
-	DefaultHealthCheck                       func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	defaultHealthCheck                       func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus // unexported: no external consumers access this directly
 
 	mu       sync.RWMutex
 	handlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
@@ -44,7 +44,7 @@ func NewHealthServer(
 ) *HealthServer {
 
 	h := &HealthServer{
-		DefaultHealthCheck: defaultCheck,
+		defaultHealthCheck: defaultCheck,
 		handlers:           make(map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus),
 	}
 
@@ -134,8 +134,8 @@ func (h *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthChec
 
 	// invoke health check handler
 	fn := h.handlerFor(svcName)
-	if fn == nil && h.DefaultHealthCheck != nil {
-		fn = h.DefaultHealthCheck
+	if fn == nil && h.defaultHealthCheck != nil {
+		fn = h.defaultHealthCheck
 	}
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -196,7 +196,9 @@ func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, stream grpc
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			// FIX: Return proper gRPC status error (Canceled/DeadlineExceeded)
+			// instead of raw Go error which maps to codes.Unknown.
+			return status.FromContextError(ctx.Err()).Err()
 		case <-ticker.C:
 			// Send periodic heartbeat
 			statusResp, err := h.Check(ctx, req)

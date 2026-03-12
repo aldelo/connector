@@ -198,14 +198,21 @@ func (s *Service) readConfig() error {
 // retryWithBackoff executes an operation with exponential backoff
 func retryWithBackoff(ctx context.Context, maxRetries int, operation func() error) error {
 	backoff := initialBackoff
+	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		if err := operation(); err == nil {
+		lastErr = operation()
+		if lastErr == nil {
 			return nil
+		}
+
+		// Skip backoff sleep after the last attempt — no point waiting.
+		if attempt == maxRetries-1 {
+			break
 		}
 
 		// FIX #14: Use time.NewTimer instead of time.After to avoid goroutine leak
@@ -224,7 +231,7 @@ func retryWithBackoff(ctx context.Context, maxRetries int, operation func() erro
 		}
 	}
 
-	return fmt.Errorf("operation failed after %d retries", maxRetries)
+	return fmt.Errorf("operation failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // setupServer sets up tcp listener, and creates grpc server
@@ -501,7 +508,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 		// set port
 		port = util.StrToUint(util.SplitString(lis.Addr().String(), ":", -1))
-		s._localAddress = fmt.Sprintf("%s:%d", ip, port)
+		s.setLocalAddress(fmt.Sprintf("%s:%d", ip, port))
 
 		//
 		// setup sqs and sns if needed
@@ -882,7 +889,11 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 		// on exit, stop serving
 		s.setServing(false)
 
-		s._grpcServer.Stop()
+		// FIX: Guard against nil — GracefulStop/ImmediateStop may have already
+		// stopped the server and set _grpcServer to nil.
+		if s._grpcServer != nil {
+			s._grpcServer.Stop()
+		}
 		_ = lis.Close()
 	}()
 
@@ -965,6 +976,9 @@ func (s *Service) awaitOsSigExit() {
 	log.Printf("Please Wait for Instance Service Discovery To Complete... (This may take %v Seconds)", s._config.SvcCreateData.HealthFailThreshold*45)
 
 	<-done
+
+	// FIX #29: Stop signal delivery so the channel does not leak
+	signal.Stop(sigs)
 
 	log.Println("*** Shutdown Invoked ***")
 }
@@ -1193,7 +1207,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 
 // Serve will setup grpc service and start serving
 func (s *Service) Serve() error {
-	s._localAddress = ""
+	s.setLocalAddress("")
 
 	if err := s.readConfig(); err != nil {
 		return err
@@ -1208,20 +1222,27 @@ func (s *Service) Serve() error {
 	log.Println("Service " + s._config.AppName + " Starting On " + s._localAddress + "...")
 
 	if err = s.connectSd(); err != nil {
+		_ = lis.Close()
 		return err
 	}
 
 	if err = s.autoCreateService(); err != nil {
+		_ = lis.Close()
 		return err
 	}
 
 	quit := make(chan bool)
 
 	if err = s.startServer(lis, quit); err != nil {
+		_ = lis.Close()
 		return err
 	}
 
+	// FIX: If registerSd fails after startServer, the server goroutines are
+	// already running. Signal quit to trigger cleanup (stop gRPC, close listener)
+	// instead of leaking goroutines and the listener.
 	if err = s.registerSd(ip, port); err != nil {
+		quit <- true
 		return err
 	}
 
@@ -1575,7 +1596,7 @@ func (s *Service) GracefulStop() {
 		s.WebServerConfig.CleanUp()
 	}
 
-	s._localAddress = ""
+	s.setLocalAddress("")
 
 	log.Println("Stopping gRPC Server (Graceful)")
 
@@ -1624,7 +1645,7 @@ func (s *Service) ImmediateStop() {
 		s.WebServerConfig.CleanUp()
 	}
 
-	s._localAddress = ""
+	s.setLocalAddress("")
 
 	log.Println("Stopping gRPC Server (Immediate)")
 
@@ -1662,7 +1683,16 @@ func (s *Service) LocalAddress() string {
 	if s == nil {
 		return ""
 	}
+	s._mu.RLock()
+	defer s._mu.RUnlock()
 	return s._localAddress
+}
+
+// setLocalAddress sets the local address in a thread-safe manner
+func (s *Service) setLocalAddress(addr string) {
+	s._mu.Lock()
+	defer s._mu.Unlock()
+	s._localAddress = addr
 }
 
 // =====================================================================================================================

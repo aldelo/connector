@@ -50,34 +50,6 @@ func NewQueueAdapter(awsRegion awsregion.AWSRegion, httpOptions *awshttp2.HttpCl
 	}
 }
 
-// composeSnsPolicy builds the policy that allows an SNS topic to send to the queue
-func composeSnsPolicy(snsTopicArn, queueArn string) string {
-	if util.LenTrim(snsTopicArn) == 0 || util.LenTrim(queueArn) == 0 {
-		return ""
-	}
-
-	policy := `{
-		  "Version":"2012-10-17",
-		  "Statement": [{ 
-			"Effect":"Allow", 
-			"Principal": { 
-			  "Service": "sns.amazonaws.com" 
-			}, 
-			"Action":"sqs:SendMessage", 
-			"Resource":"[QUEUE-ARN]", 
-			"Condition":{ 
-			  "ArnEquals":{ 
-				"aws:SourceArn":"[TOPIC-ARN]" 
-			  } 
-			} 
-		  }] 
-		}`
-
-	policy = util.Replace(policy, "[TOPIC-ARN]", snsTopicArn)
-	policy = util.Replace(policy, "[QUEUE-ARN]", queueArn)
-	return policy
-}
-
 // helper to safely merge SNS policy without overwriting existing statements
 func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeoutDuration ...time.Duration) error {
 	const sqsPolicySizeLimit = 20480 // enforce AWS 20 KB policy limit

@@ -32,11 +32,11 @@ import (
 // circuit breaker is tracking against multiple commands
 // use a map to track all commands and invoke circuit breaker per command
 //
-// HystrixGo must not be set to nil or swapped after initialization unless
+// hystrixGo must not be set to nil or swapped after initialization unless
 // the plugin is discarded and not currently in service. Methods are concurrency-safe,
 // but best practice is one plugin per command lifecycle.
 type HystrixGoPlugin struct {
-	HystrixGo *hystrixgo.CircuitBreaker
+	hystrixGo *hystrixgo.CircuitBreaker // unexported: no external consumers access this directly
 	mu        sync.RWMutex
 }
 
@@ -83,7 +83,7 @@ func NewHystrixGoPlugin(commandName string,
 
 	// create plugin
 	p := &HystrixGoPlugin{
-		HystrixGo: &hystrixgo.CircuitBreaker{
+		hystrixGo: &hystrixgo.CircuitBreaker{
 			CommandName:            commandName,
 			TimeOut:                timeout,
 			MaxConcurrentRequests:  maxConcurrentRequests,
@@ -96,7 +96,7 @@ func NewHystrixGoPlugin(commandName string,
 	}
 
 	// invoke hystrixgo init
-	if err := p.HystrixGo.Init(); err != nil {
+	if err := p.hystrixGo.Init(); err != nil {
 		return nil, fmt.Errorf("failed to initialize HystrixGo: %w", err) // preserve context
 	}
 
@@ -116,7 +116,7 @@ func (p *HystrixGoPlugin) Exec(async bool,
 	dataIn interface{}) (interface{}, error) {
 
 	p.mu.RLock()
-	hystrixGo := p.HystrixGo
+	hystrixGo := p.hystrixGo
 
 	if hystrixGo == nil {
 		p.mu.RUnlock()
@@ -150,7 +150,7 @@ func (p *HystrixGoPlugin) ExecWithContext(async bool,
 	dataIn interface{}) (interface{}, error) {
 
 	p.mu.RLock()
-	hystrixGo := p.HystrixGo
+	hystrixGo := p.hystrixGo
 
 	if hystrixGo == nil {
 		p.mu.RUnlock()
@@ -190,7 +190,7 @@ func (p *HystrixGoPlugin) Reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	hystrixGo := p.HystrixGo
+	hystrixGo := p.hystrixGo
 
 	if hystrixGo != nil {
 		hystrixGo.FlushAll()
@@ -214,7 +214,7 @@ func (p *HystrixGoPlugin) Update(timeout int,
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	hystrixGo := p.HystrixGo
+	hystrixGo := p.hystrixGo
 	if hystrixGo == nil {
 		return fmt.Errorf("HystrixGo Object Not Initialized")
 	}
@@ -252,7 +252,7 @@ func (p *HystrixGoPlugin) Disable(b bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	hystrixGo := p.HystrixGo
+	hystrixGo := p.hystrixGo
 	if hystrixGo == nil {
 		log.Printf("Warning: Cannot disable circuit breaker - HystrixGo is nil")
 		return

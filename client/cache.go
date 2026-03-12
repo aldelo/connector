@@ -262,16 +262,17 @@ func (c *Cache) PurgeServiceEndpointByHostAndPort(serviceName string, host strin
 	found := false
 
 	for _, v := range eps {
-		if v != nil {
-			vHost := strings.ToLower(strings.TrimSpace(v.Host))
-			if vHost == "" || v.Port == 0 { // drop invalid cached entries while purging
-				continue
-			}
-			if vHost == hostNormalized && v.Port == port {
-				// found
-				found = true
-				continue
-			}
+		if v == nil { // FIX: drop nil entries instead of retaining them
+			continue
+		}
+		vHost := strings.ToLower(strings.TrimSpace(v.Host))
+		if vHost == "" || v.Port == 0 { // drop invalid cached entries while purging
+			continue
+		}
+		if vHost == hostNormalized && v.Port == port {
+			// found
+			found = true
+			continue
 		}
 		newEps = append(newEps, v)
 	}

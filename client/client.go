@@ -101,7 +101,10 @@ func cacheDisableLogging(disable bool) {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	if _cache != nil {
+		// FIX: Acquire _mu as well, since Cache methods read DisableLogging under _mu
+		_cache._mu.Lock()
 		_cache.DisableLogging = disable
+		_cache._mu.Unlock()
 	}
 }
 
@@ -171,8 +174,8 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 		hc, err := health.NewHealthClient(conn)
 		if err != nil {
 			c._healthManualChecker = nil
-			if c._z != nil {
-				c._z.Errorf("Init health client failed: %v", err)
+			if z := c.ZLog(); z != nil {
+				z.Errorf("Init health client failed: %v", err)
 			} else {
 				log.Printf("Init health client failed: %v", err)
 			}
@@ -368,9 +371,10 @@ type Client struct {
 	// guard notifier client access to avoid races across callbacks/reconnect/close
 	notifierMu sync.Mutex
 
-	webServer     *ws.WebServer // track started web server for shutdown
-	webServerStop chan struct{} // signal channel to stop web server
-	webServerMu   sync.Mutex
+	webServer        *ws.WebServer // track started web server for shutdown
+	webServerStop    chan struct{}  // signal channel to stop web server
+	webServerMu      sync.Mutex
+	_origWebCleanUp  func()        // FIX #33: original user-provided cleanup, prevents closure accumulation
 }
 
 // safely replace the current endpoints slice
@@ -1249,6 +1253,7 @@ func (c *Client) Dial(ctx context.Context) error {
 
 		if c.WaitForServerReady {
 			healthCtx, healthCancel := context.WithTimeout(ctx, time.Duration(dialSec)*time.Second)
+			defer healthCancel() // FIX #32: Ensure cancel is always called, even on panic
 			if e := c.waitForEndpointReady(healthCtx, time.Duration(dialSec)*time.Second); e != nil {
 				// health probe failed
 				if closedConn := c.clearConnection(); closedConn != nil {
@@ -1258,10 +1263,8 @@ func (c *Client) Dial(ctx context.Context) error {
 				if seg != nil {
 					_ = seg.Seg.AddError(fmt.Errorf("gRPC service server not ready: %w", e))
 				}
-				healthCancel()
 				return fmt.Errorf("gRPC service server not ready: %w", e)
 			}
-			healthCancel()
 		}
 
 		// dial successful, now start web server for notification callbacks (webhook)
@@ -1948,8 +1951,8 @@ func (c *Client) setupHealthManualChecker() {
 	hc, err := health.NewHealthClient(conn)
 	if err != nil {
 		c._healthManualChecker = nil
-		if c._z != nil {
-			c._z.Errorf("Init health client failed: %v", err)
+		if z := c.ZLog(); z != nil {
+			z.Errorf("Init health client failed: %v", err)
 		} else {
 			log.Printf("Init health client failed: %v", err)
 		}
@@ -1992,16 +1995,13 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 	}
 
 	if hc == nil {
-		if conn != nil {
-			c.setupHealthManualChecker()
-			c.connMu.RLock()
-			hc = c._healthManualChecker
-			c.connMu.RUnlock()
-			if hc == nil {
-				return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: (Auto Instantiate) %s", "Health Manual Checker is Nil")
-			}
-		} else {
-			return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: %s", "Health Manual Checker is Nil")
+		// conn is guaranteed non-nil here (checked above)
+		c.setupHealthManualChecker()
+		c.connMu.RLock()
+		hc = c._healthManualChecker
+		c.connMu.RUnlock()
+		if hc == nil {
+			return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: (Auto Instantiate) %s", "Health Manual Checker is Nil")
 		}
 	}
 
@@ -2711,8 +2711,10 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 			int(c._config.Grpc.CircuitBreakerSleepWindow),
 			int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
 			z); e != nil {
-			c._z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
-			c._z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+			if z := c.ZLog(); z != nil {
+				z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+				z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+			}
 
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
@@ -3100,11 +3102,15 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 
 	c.WebServerConfig.WebServerLocalAddress = fmt.Sprintf("%s://%s:%d", httpVerb, server.GetHostAddress(), server.Port())
 
-	// preserve caller-provided cleanup and chain with DNS cleanup.
-	prevCleanup := c.WebServerConfig.CleanUp
+	// FIX #33: Store the original user-provided cleanup on first call to prevent
+	// accumulating a closure chain across reconnects.
+	if c._origWebCleanUp == nil && c.WebServerConfig.CleanUp != nil {
+		c._origWebCleanUp = c.WebServerConfig.CleanUp
+	}
+	origCleanup := c._origWebCleanUp
 	c.WebServerConfig.CleanUp = func() {
-		if prevCleanup != nil {
-			prevCleanup()
+		if origCleanup != nil {
+			origCleanup()
 		}
 		server.RemoveDNSRecordset()
 	}
@@ -3115,8 +3121,11 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 	c.webServerStop = make(chan struct{})
 
 	// serve asynchronously so Dial can continue; capture error for logging
+	// FIX: Capture channel in local var so deferred close is not affected
+	// if shutdownWebServerLocked sets c.webServerStop = nil on timeout.
+	stopCh := c.webServerStop
 	go func() {
-		defer close(c.webServerStop) // signal completion/shutdown
+		defer close(stopCh) // signal completion/shutdown
 		defer func() {
 			if r := recover(); r != nil {
 				server.RemoveDNSRecordset()

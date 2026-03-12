@@ -24,7 +24,7 @@ import (
 )
 
 type RateLimitPlugin struct {
-	RateLimit *ratelimit.RateLimiter
+	rateLimit *ratelimit.RateLimiter // unexported: no external consumers access this directly
 	mu        sync.Mutex
 
 	// track per-pointer initialization so externally swapped limiters get Init() exactly once.
@@ -47,7 +47,7 @@ func sanitizeRateLimitPerSecond(v int) int {
 // initializeWithoutSlack = true: no slack (disallow initial spike consideration)
 func NewRateLimitPlugin(rateLimitPerSecond int, initializeWithoutSlack bool) *RateLimitPlugin {
 	p := &RateLimitPlugin{
-		RateLimit: &ratelimit.RateLimiter{
+		rateLimit: &ratelimit.RateLimiter{
 			RateLimitPerSecond:     sanitizeRateLimitPerSecond(rateLimitPerSecond),
 			InitializeWithoutSlack: initializeWithoutSlack,
 		},
@@ -55,9 +55,9 @@ func NewRateLimitPlugin(rateLimitPerSecond int, initializeWithoutSlack bool) *Ra
 	}
 
 	// initialize via initOnce so the first limiter is only initialized once
-	p.lastInitTarget = p.RateLimit
+	p.lastInitTarget = p.rateLimit
 	p.initOnce.Do(func() {
-		p.RateLimit.Init()
+		p.rateLimit.Init()
 	})
 	return p
 }
@@ -74,7 +74,7 @@ func (p *RateLimitPlugin) SetRateLimiter(rl *ratelimit.RateLimiter) {
 
 	p.mu.Lock()
 
-	p.RateLimit = rl
+	p.rateLimit = rl
 	p.initOnce = new(sync.Once)
 	p.lastInitTarget = rl
 
@@ -86,7 +86,7 @@ func (p *RateLimitPlugin) RateLimiter() *ratelimit.RateLimiter {
 	return p.ensureRateLimiter()
 }
 
-// ensureRateLimiter guarantees RateLimit is non-nil and initialized
+// ensureRateLimiter guarantees rateLimit is non-nil and initialized
 func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 	for { // retry until we return the current, initialized limiter
 		p.mu.Lock()
@@ -95,15 +95,15 @@ func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 			p.initOnce = new(sync.Once)
 		}
 
-		if p.RateLimit == nil { // lazy create if missing
-			p.RateLimit = &ratelimit.RateLimiter{
+		if p.rateLimit == nil { // lazy create if missing
+			p.rateLimit = &ratelimit.RateLimiter{
 				RateLimitPerSecond:     0,     // unlimited default
 				InitializeWithoutSlack: false, // default slack
 			}
 		}
-		rl := p.RateLimit
+		rl := p.rateLimit
 
-		// if the RateLimit pointer was swapped externally, reset initOnce so we can init the new instance.
+		// if the rateLimit pointer was swapped externally, reset initOnce so we can init the new instance.
 		if p.lastInitTarget != rl {
 			p.initOnce = new(sync.Once)
 			p.lastInitTarget = rl
@@ -119,7 +119,7 @@ func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 
 		// verify the limiter wasn't swapped during init; if it was, retry to init the new one
 		p.mu.Lock()
-		current := p.RateLimit
+		current := p.rateLimit
 		p.mu.Unlock()
 
 		if current == rl {

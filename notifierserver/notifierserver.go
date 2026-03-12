@@ -252,12 +252,9 @@ func snsupdate(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	// FIX #5: Use io.ReadAll instead of fixed 1024-byte buffer.
-	// The original code used `buf := make([]byte, 1024)` with a single Read call that:
-	// - Silently ignored the error from Read
-	// - Truncated bodies longer than 1024 bytes
-	// - Could return fewer bytes than available (io.Read contract allows partial reads)
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	// FIX: Limit body read to 1 KB to prevent memory exhaustion DoS.
+	// A subscription ARN is at most ~300 bytes; 1024 is generous.
+	bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, 1024))
 	if err != nil {
 		c.String(412, "SNS Update Failed to Read Http Request Body")
 		return
