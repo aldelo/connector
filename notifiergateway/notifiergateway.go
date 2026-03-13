@@ -216,43 +216,43 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 
 	if !ok || data == nil {
 		log.Println("!!! Inbound Health Report Payload Missing or Malformed From " + escapeUserInput(c.ClientIP()) + " !!!")
-		c.String(404, "Inbound Health Report Payload Missing or Malformed")
+		c.String(400, "Inbound Health Report Payload Missing or Malformed")
 		return
 	}
 
 	if util.LenTrim(data.NamespaceId) == 0 {
 		log.Println("!!! Inbound Health Report Payload Missing NamespaceId !!!")
-		c.String(404, "Inbound Health Report Payload Missing Required Value (Namespace)")
+		c.String(400, "Inbound Health Report Payload Missing Required Value (Namespace)")
 		return
 	}
 
 	if util.LenTrim(data.ServiceId) == 0 {
 		log.Println("!!! Inbound Health Report Payload Missing ServiceId !!!")
-		c.String(404, "Inbound Health Report Payload Missing Required Value (Service)")
+		c.String(400, "Inbound Health Report Payload Missing Required Value (Service)")
 		return
 	}
 
 	if util.LenTrim(data.InstanceId) == 0 {
 		log.Println("!!! Inbound Health Report Payload Missing InstanceId !!!")
-		c.String(404, "Inbound Health Report Payload Missing Required Value (Instance)")
+		c.String(400, "Inbound Health Report Payload Missing Required Value (Instance)")
 		return
 	}
 
 	if util.LenTrim(data.AwsRegion) == 0 {
 		log.Println("!!! Inbound Health Report Payload Missing AWSRegion !!!")
-		c.String(404, "Inbound Health Report Payload Missing Required Value (Region)")
+		c.String(400, "Inbound Health Report Payload Missing Required Value (Region)")
 		return
 	}
 
 	if util.LenTrim(data.ServiceInfo) == 0 {
 		log.Println("!!! Inbound Health Report Payload Missing ServiceInfo !!!")
-		c.String(404, "Inbound Health Report Payload Missing Required Value (ServiceInfo)")
+		c.String(400, "Inbound Health Report Payload Missing Required Value (ServiceInfo)")
 		return
 	}
 
 	if util.LenTrim(data.HostInfo) == 0 {
 		log.Println("!!! Inbound Health Report Payload Missing HostInfo !!!")
-		c.String(404, "Inbound Health Report Payload Missing Required Value (HostInfo)")
+		c.String(400, "Inbound Health Report Payload Missing Required Value (HostInfo)")
 		return
 	}
 
@@ -342,7 +342,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 
 	if util.LenTrim(instanceId) == 0 {
 		log.Println("!!! Delete Health Report Service Record Failed: InstanceID Missing From Path !!!")
-		c.String(404, "Delete Health Report Service Record Request Missing InstanceID")
+		c.String(400, "Delete Health Report Service Record Request Missing InstanceID")
 		return
 	}
 
@@ -350,7 +350,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 
 	if util.LenTrim(hashKeyName) == 0 {
 		log.Println("!!! Delete Health Report Service Record Failed: Hash Key Name is Missing From Header 'x-nts-gateway-hash-name' !!!")
-		c.String(404, "Delete Health Report Service Record Request Missing Key Name")
+		c.String(400, "Delete Health Report Service Record Request Missing Key Name")
 		return
 	}
 
@@ -358,7 +358,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 
 	if util.LenTrim(hashKeySignature) == 0 {
 		log.Println("!!! Delete Health Report Service Record Failed: Hash Signature is Missing From Header 'x-nts-gateway-hash-signature' !!!")
-		c.String(404, "Delete Health Report Service Record Request Missing Signature")
+		c.String(400, "Delete Health Report Service Record Request Missing Signature")
 		return
 	}
 
@@ -562,9 +562,11 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 			log.Println("/snsrouter 'subscriptionconfirmation' serverKey From Invoker = " + escapeUserInput(serverKey))
 
 			// wait 250ms for notifier server to update ddb with server endpoint info
+			waitTimer := time.NewTimer(250 * time.Millisecond)
 			select {
-			case <-time.After(250 * time.Millisecond):
+			case <-waitTimer.C:
 			case <-c.Request.Context().Done():
+				waitTimer.Stop()
 				c.String(499, "Client Disconnected")
 				return
 			}
@@ -594,9 +596,11 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 					serverEndpointUrl = serverUrl
 					break
 				} else {
+					retryTimer := time.NewTimer(250 * time.Millisecond)
 					select {
-					case <-time.After(250 * time.Millisecond):
+					case <-retryTimer.C:
 					case <-c.Request.Context().Done():
+						retryTimer.Stop()
 						c.String(499, "Client Disconnected")
 						return
 					}
@@ -894,18 +898,17 @@ func unsubscribeSNS(notify *notification) {
 		return
 	}
 
+	// Unescape BEFORE SSRF validation so the validated URL matches the fetched URL
+	unsubUrl = strings.ReplaceAll(unsubUrl, `\u0026`, `&`)
+	unsubUrl = strings.ReplaceAll(unsubUrl, `\"`, `"`)
+	unsubUrl = strings.ReplaceAll(unsubUrl, `"`, "")
+
 	// FIX: Validate UnsubscribeURL domain to prevent SSRF.
 	// Legitimate AWS SNS unsubscribe URLs always match https://sns.<region>.amazonaws.com/
 	if !isValidSNSUrl(unsubUrl) {
 		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' From UnsubscribeURL '" + escapeUserInput(unsubUrl) + "' Aborted: URL domain not allowed !!!")
 		return
 	}
-
-	// unescape \u0026 to &
-	// unescape \" to "
-	unsubUrl = strings.ReplaceAll(unsubUrl, `\u0026`, `&`)
-	unsubUrl = strings.ReplaceAll(unsubUrl, `\"`, `"`)
-	unsubUrl = strings.ReplaceAll(unsubUrl, `"`, "")
 
 	// call HTTP GET to unsubscribe
 	unsubUrlLog := escapeUserInput(unsubUrl)

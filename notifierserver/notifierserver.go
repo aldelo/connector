@@ -95,9 +95,6 @@ type snsNotification struct {
 //	if notifier server is discovered via public ip, then inbound security group must be setup to indicate inbound ec2 ip address rather than its security groups
 func NewNotifierServer(appName string, configFileNameGrpcServer string, configFileNameWebServer string, configFileNameNotifier string, customConfigPath string) (*service.Service, error) {
 	ns := new(impl.NotifierImpl)
-	notifierServerMu.Lock()
-	notifierServer = ns
-	notifierServerMu.Unlock()
 
 	if err := ns.ReadConfig(appName, configFileNameNotifier, customConfigPath); err != nil {
 		return nil, fmt.Errorf("WARNING: Notifier-Config.yaml Not Ready: %s", err)
@@ -155,6 +152,12 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 	}
 
 	ns.WebServerLocalAddressFunc = svr.WebServerConfig.GetWebServerLocalAddress
+
+	// Publish fully-initialized server only after all init is complete
+	// to prevent races where other goroutines see a partially-initialized instance
+	notifierServerMu.Lock()
+	notifierServer = ns
+	notifierServerMu.Unlock()
 
 	// clean up prior sns subscriptions logged in config, upon initial launch
 	ns.UnsubscribeAllPriorSNSTopics()

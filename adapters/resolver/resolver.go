@@ -218,15 +218,21 @@ func NewManualResolver(schemeName string, serviceName string, endpointAddrs []st
 		return err
 	}
 
-	// Check if a resolver already exists for this scheme+service pair.
-	// If so, update its state instead of creating a new one.
-	existing, _ := getResolver(schemeName, svc)
-	if existing != nil {
+	// Atomicize check-and-create under single lock to prevent TOCTOU race
+	// where two goroutines both see nil and both try to register.
+	_mux.Lock()
+	ensureMapsInitialized()
+	key := composeKey(schemeName, svc)
+	if existing, ok := schemeMap[key]; ok && existing != nil {
+		_mux.Unlock()
+		// Update existing resolver state (may be stale CC from previous connection,
+		// but InitialState will be used on next Build call by gRPC dialer)
 		existing.UpdateState(resolver.State{
 			Addresses: addrs,
 		})
 		return nil
 	}
+	_mux.Unlock()
 
 	// No existing resolver — create and register a new one.
 	r := manual.NewBuilderWithScheme(schemeName)
@@ -306,16 +312,15 @@ func setResolver(schemeName string, serviceName string, r *manual.Resolver) erro
 		return fmt.Errorf("Scheme '%s' already registered for service '%s'; use a unique scheme per service", schemeName, existingService)
 	}
 
-	// If same key already exists, overwrite (upsert semantics for reconnect).
-	schemeMap[key] = r
-	registeredSchemes[schemeName] = svc
-
-	// guard resolver.Register against panic and roll back on failure
+	// Register with gRPC BEFORE inserting into internal maps.
+	// If registration panics, no internal state was changed — clean failure.
 	if err := safeRegister(r); err != nil {
-		delete(schemeMap, key)
-		delete(registeredSchemes, schemeName)
 		return err
 	}
+
+	// Registration succeeded — now update internal maps (upsert for reconnect).
+	schemeMap[key] = r
+	registeredSchemes[schemeName] = svc
 
 	return nil
 }

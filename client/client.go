@@ -1143,26 +1143,35 @@ func (c *Client) Dial(ctx context.Context) error {
 
 	// setup sqs and sns if configured
 	if util.LenTrim(c._config.Queues.SqsLoggerQueueUrl) > 0 {
-		var e error
-		if c._sqs, e = queue.NewQueueAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil); e != nil {
+		sqsAdapter, e := queue.NewQueueAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil)
+		if e != nil {
 			if z := c.ZLog(); z != nil {
 				z.Errorf("Get SQS Queue Adapter Failed: %s", e.Error())
 			}
-			c._sqs = nil
+			sqsAdapter = nil
 		}
-		cleanupSqs = c._sqs != nil
+		c.connMu.Lock()
+		c._sqs = sqsAdapter
+		c.connMu.Unlock()
+		cleanupSqs = sqsAdapter != nil
 	} else {
+		c.connMu.Lock()
 		c._sqs = nil
+		c.connMu.Unlock()
 	}
 
 	// circuit breakers prep
+	c.cbMu.Lock()
 	c._circuitBreakers = map[string]circuitbreaker.CircuitBreakerIFace{}
+	c.cbMu.Unlock()
 
 	// connect sd
 	if err := c.connectSd(); err != nil {
 		return err
 	}
+	c.connMu.RLock()
 	cleanupSd = c._sd != nil
+	c.connMu.RUnlock()
 
 	// discover service endpoints
 	if err := c.discoverEndpoints(true); err != nil {
@@ -2213,9 +2222,13 @@ func (c *Client) connectSd() error {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
 
-	if c._sd != nil { // ensure previous CloudMap client is disconnected before reconfiguring
-		c._sd.Disconnect()
-		c._sd = nil
+	// Protect _sd reads/writes with connMu to prevent races with Close() and discovery functions
+	c.connMu.Lock()
+	oldSd := c._sd
+	c._sd = nil
+	c.connMu.Unlock()
+	if oldSd != nil {
+		oldSd.Disconnect()
 	}
 
 	// skip CloudMap wiring when using direct discovery to avoid unnecessary AWS dependency
@@ -2230,9 +2243,9 @@ func (c *Client) connectSd() error {
 		if err := cm.Connect(); err != nil {
 			return fmt.Errorf("Connect SD Failed: %s", err.Error())
 		}
+		c.connMu.Lock()
 		c._sd = cm
-	} else {
-		c._sd = nil
+		c.connMu.Unlock()
 	}
 
 	return nil
@@ -2640,8 +2653,13 @@ func (c *Client) updateHealth(p *serviceEndpoint, healthy bool) error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
-	if c._sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
-		return registry.UpdateHealthStatus(c._sd, p.InstanceId, p.ServiceId, healthy)
+	// Snapshot _sd under connMu to prevent race with Close()/connectSd()
+	c.connMu.RLock()
+	sd := c._sd
+	c.connMu.RUnlock()
+
+	if sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
+		return registry.UpdateHealthStatus(sd, p.InstanceId, p.ServiceId, healthy)
 	} else {
 		return nil
 	}
@@ -2668,15 +2686,21 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		}
 	}
 
-	if c._sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
+	// Snapshot _sd and _config under connMu to prevent race with Close()/connectSd()
+	c.connMu.RLock()
+	sd := c._sd
+	c.connMu.RUnlock()
+	cfg := c._config
+
+	if sd != nil && cfg != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
 		logprintf("De-Register Instance '%s:%s-%s' Begin...", p.Host, util.UintToStr(p.Port), p.InstanceId)
 
 		var timeoutDuration []time.Duration
-		if c._config.Target.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(c._config.Target.SdTimeout)*time.Second)
+		if cfg.Target.SdTimeout > 0 {
+			timeoutDuration = append(timeoutDuration, time.Duration(cfg.Target.SdTimeout)*time.Second)
 		}
 
-		operationId, err := registry.DeregisterInstance(c._sd, p.InstanceId, p.ServiceId, timeoutDuration...)
+		operationId, err := registry.DeregisterInstance(sd, p.InstanceId, p.ServiceId, timeoutDuration...)
 		if err != nil {
 			errorf("... De-Register Instance '%s:%s-%s' Failed: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
 			return fmt.Errorf("De-Register Instance '%s:%s-%s' Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
@@ -2686,7 +2710,7 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		time.Sleep(deregisterInstanceCheckInterval)
 
 		for {
-			status, e := registry.GetOperationStatus(c._sd, operationId, timeoutDuration...)
+			status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration...)
 			if e != nil {
 				errorf("... De-Register Instance '%s:%s-%s' Failed: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, e.Error())
 				return fmt.Errorf("De-Register Instance '%s:%s-%s' Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, e.Error())

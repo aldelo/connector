@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -480,7 +481,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 				return nil, "", 0, errors.New(buf)
 			} else {
-				if util.IsNumericIntOnly(strings.ReplaceAll(body, ".", "")) {
+				if net.ParseIP(strings.TrimSpace(body)) != nil {
 					if publicIPSeg != nil {
 						_ = publicIPSeg.Seg.AddMetadata("Result-Private-IP", ip)
 						_ = publicIPSeg.Seg.AddMetadata("Result-Public-IP", body)
@@ -639,7 +640,7 @@ func (s *Service) CurrentlyServing() bool {
 // startServer will start and serve grpc services, it will run in goroutine until terminated.
 // FIX #8: Replaced busy-wait (default + time.Sleep(10ms)) with blocking on quit channel
 // after server startup is complete.
-func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
+func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan struct{}) (err error) {
 	seg := xray.NewSegmentNullable("GrpcService-StartServer")
 	if seg != nil {
 		defer seg.Close()
@@ -739,7 +740,14 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 			waitTime := int(healthFailThreshold * 45)
 
 			log.Println(">>> Instance Health Check Warm-Up: " + util.Itoa(waitTime) + " Seconds - Please Wait >>>")
-			time.Sleep(time.Duration(waitTime) * time.Second)
+			warmupTimer := time.NewTimer(time.Duration(waitTime) * time.Second)
+			select {
+			case <-warmupTimer.C:
+			case <-stopHealthReportService:
+				warmupTimer.Stop()
+				log.Println("<<< Instance Health Check Warm-Up: Interrupted by shutdown <<<")
+				return
+			}
 			log.Println("<<< Instance Health Check Warm-Up: OK <<<")
 
 			log.Println("+++ Updating Instance as Healthy with Service Discovery: Please Wait +++")
@@ -749,7 +757,14 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 			if healthErr := s.updateHealth(true); healthErr != nil {
 				if strings.Contains(healthErr.Error(), "ServiceNotFound") {
 					log.Println("~~~ Service Discovery Not Ready - Waiting 45 More Seconds ~~~")
-					time.Sleep(45 * time.Second)
+					retryTimer := time.NewTimer(45 * time.Second)
+					select {
+					case <-retryTimer.C:
+					case <-stopHealthReportService:
+						retryTimer.Stop()
+						log.Println("<<< Instance Health Check Retry: Interrupted by shutdown <<<")
+						return
+					}
 
 					if healthErr = s.updateHealth(true); healthErr != nil {
 						log.Println("!!! Update Instance Health Status with Service Discovery Failed: (With Retry) " + healthErr.Error() + " !!!")
@@ -893,13 +908,27 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 		}
 	}()
 
-	// FIX #8: Wait for quit signal in a separate goroutine to handle shutdown.
-	// The original code used a busy-wait loop with time.Sleep(10ms) which wasted CPU.
+	// Quit handler goroutine: performs full graceful cleanup on shutdown signal,
+	// matching the cleanup done by GracefulStop()/ImmediateStop().
+	// Closes quitDone when all cleanup is complete so Serve() can wait.
 	go func() {
+		defer close(quitDone)
 		<-quit
 
 		log.Println("gRPC Server Quit Invoked")
 
+		// Publish offline notification via SNS
+		s._mu.RLock()
+		cfg := s._config
+		s._mu.RUnlock()
+		if cfg != nil {
+			s.publishToSNS(cfg.Topics.SnsDiscoveryTopicArn, "Discovery Push Notification", s.getHostDiscoveryMessage(false), nil)
+		}
+
+		// Unsubscribe from SNS topics
+		s.unsubscribeSNS()
+
+		// Delete health report from data store
 		s._mu.RLock()
 		instanceId := s._config.Instance.Id
 		s._mu.RUnlock()
@@ -927,14 +956,45 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 			s.WebServerConfig.CleanUp()
 		}
 
+		// clear local address
+		s.setLocalAddress("")
+
 		// on exit, stop serving
 		s.setServing(false)
 
-		// Copy and nil under lock to prevent race with GracefulStop/ImmediateStop
+		// Deregister SD instance
+		s._mu.RLock()
+		hasSd := s._sd != nil
+		s._mu.RUnlock()
+		if hasSd {
+			if err := s.deregisterInstance(); err != nil {
+				log.Println("De-Register Instance Failed From Serve Shutdown: " + err.Error())
+			} else {
+				log.Println("De-Register Instance OK From Serve Shutdown")
+			}
+		}
+
+		// Disconnect AWS clients and stop gRPC server under lock
 		s._mu.Lock()
+		sd := s._sd
+		s._sd = nil
+		sqsC := s._sqs
+		s._sqs = nil
+		snsC := s._sns
+		s._sns = nil
 		gs := s._grpcServer
 		s._grpcServer = nil
 		s._mu.Unlock()
+
+		if sd != nil {
+			sd.Disconnect()
+		}
+		if sqsC != nil {
+			sqsC.Disconnect()
+		}
+		if snsC != nil {
+			snsC.Disconnect()
+		}
 		if gs != nil {
 			gs.Stop()
 		}
@@ -958,7 +1018,9 @@ func (s *Service) getHostDiscoveryMessage(online bool) string {
 		onlineStatus = "offline"
 	}
 
-	return fmt.Sprintf(`{"msg_type":"host-discovery", "action":"%s", "host":"%s"}`, onlineStatus, s.LocalAddress())
+	// Escape host for JSON safety (defense-in-depth against malformed gateway responses)
+	host := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s.LocalAddress())
+	return fmt.Sprintf(`{"msg_type":"host-discovery", "action":"%s", "host":"%s"}`, onlineStatus, host)
 }
 
 // publishToSNS publishes message to an sns topic, if sns is setup
@@ -1091,7 +1153,7 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-name", cfg.Instance.HashKeyName)
 	}
 
-	statusCode, _, e := rest.DELETE(cfg.Instance.HealthReportServiceUrl+"/"+instanceId, []*rest.HeaderKeyValue{
+	statusCode, _, e := rest.DELETE(cfg.Instance.HealthReportServiceUrl+"/"+url.PathEscape(instanceId), []*rest.HeaderKeyValue{
 		{
 			Key:   "Content-Type",
 			Value: "application/json",
@@ -1300,9 +1362,10 @@ func (s *Service) Serve() error {
 		return err
 	}
 
-	quit := make(chan bool, 1) // buffered to prevent deadlock if handler goroutine exits early
+	quit := make(chan bool, 1)     // buffered to prevent deadlock if handler goroutine exits early
+	quitDone := make(chan struct{}) // closed by quit handler when all cleanup is complete
 
-	if err = s.startServer(lis, quit); err != nil {
+	if err = s.startServer(lis, quit, quitDone); err != nil {
 		_ = lis.Close()
 		return err
 	}
@@ -1324,6 +1387,7 @@ func (s *Service) Serve() error {
 	}
 
 	quit <- true
+	<-quitDone // wait for quit handler to complete full cleanup before proceeding
 
 	if s.AfterServerShutdown != nil {
 		log.Println("After gRPC Server Shutdown Begin...")

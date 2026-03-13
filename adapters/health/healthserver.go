@@ -34,8 +34,9 @@ type HealthServer struct {
 	grpc_health_v1.UnimplementedHealthServer // embed for forward compatibility
 	defaultHealthCheck                       func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus // unexported: no external consumers access this directly
 
-	mu       sync.RWMutex
-	handlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	mu           sync.RWMutex
+	handlers     map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	statusNotify chan struct{} // non-blocking notification channel for Watch to detect status changes
 }
 
 func NewHealthServer(
@@ -46,6 +47,7 @@ func NewHealthServer(
 	h := &HealthServer{
 		defaultHealthCheck: defaultCheck,
 		handlers:           make(map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus),
+		statusNotify:       make(chan struct{}, 1), // buffered so non-blocking send never blocks caller
 	}
 
 	for name, fn := range serviceChecks {
@@ -59,6 +61,22 @@ func NewHealthServer(
 
 	return h
 
+}
+
+// NotifyStatusChange signals Watch streams to re-check health status immediately
+// instead of waiting for the next polling interval. This should be called whenever
+// the health state of the service changes (e.g., readiness probe becomes ready,
+// dependency goes down, etc.). Non-blocking: safe to call from any goroutine.
+func (h *HealthServer) NotifyStatusChange() {
+	if h == nil || h.statusNotify == nil {
+		return
+	}
+	// Non-blocking send: if the channel already has a pending notification, skip.
+	// Watch will drain and re-check.
+	select {
+	case h.statusNotify <- struct{}{}:
+	default:
+	}
 }
 
 // public helper for safe, concurrent registration.
@@ -75,6 +93,9 @@ func (h *HealthServer) RegisterHandler(service string, fn func(ctx context.Conte
 		h.handlers = make(map[string]func(context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus)
 	}
 	h.handlers[service] = fn
+
+	// Notify Watch streams that handlers changed — they should re-check status
+	h.NotifyStatusChange()
 }
 
 // centralized, concurrency-safe handler lookup with wildcard support
@@ -175,7 +196,7 @@ func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, stream grpc
 		ctx = context.Background()
 	}
 
-	ticker := time.NewTicker(30 * time.Second) // Heartbeat interval
+	ticker := time.NewTicker(5 * time.Second) // Heartbeat interval (reduced from 30s for faster detection)
 	defer ticker.Stop()
 
 	// Send initial status
@@ -186,24 +207,39 @@ func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, stream grpc
 	if err := stream.Send(statusResp); err != nil {
 		return err
 	}
+	lastStatus := statusResp.Status
+
+	// sendUpdate checks health and sends to stream if status changed or force is true
+	sendUpdate := func(force bool) error {
+		if ctx.Err() != nil {
+			return status.FromContextError(ctx.Err()).Err()
+		}
+		resp, checkErr := h.Check(ctx, req)
+		if checkErr != nil {
+			return checkErr
+		}
+		// Only send if status changed or forced (heartbeat) — reduces unnecessary traffic
+		if force || resp.Status != lastStatus {
+			if sendErr := stream.Send(resp); sendErr != nil {
+				return sendErr
+			}
+			lastStatus = resp.Status
+		}
+		return nil
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			// FIX: Return proper gRPC status error (Canceled/DeadlineExceeded)
-			// instead of raw Go error which maps to codes.Unknown.
 			return status.FromContextError(ctx.Err()).Err()
-		case <-ticker.C:
-			// Re-check context before doing work — it may have been cancelled
-			// while we were waiting on the ticker
-			if ctx.Err() != nil {
-				return status.FromContextError(ctx.Err()).Err()
-			}
-			statusResp, err := h.Check(ctx, req)
-			if err != nil {
+		case <-h.statusNotify:
+			// Event-driven: status change was signaled via NotifyStatusChange()
+			if err := sendUpdate(false); err != nil {
 				return err
 			}
-			if err := stream.Send(statusResp); err != nil {
+		case <-ticker.C:
+			// Periodic heartbeat: ensures eventual consistency even without explicit notification
+			if err := sendUpdate(true); err != nil {
 				return err
 			}
 		}

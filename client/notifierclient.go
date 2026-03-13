@@ -330,6 +330,10 @@ func (n *NotifierClient) Dial() error {
 
 	atomic.StoreInt32(&n._notificationServicesStarted, 0)
 	n._subMu.Lock()
+	if n._subscribeCancel != nil {
+		n._subscribeCancel()
+		n._subscribeCancel = nil
+	}
 	n._subscriberID = ""
 	n._subscriberTopicArn = ""
 	n._subMu.Unlock()
@@ -409,7 +413,13 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 	n._grpcClient.ZLog().Printf("Notifier Client Subscribe to TopicArn '" + topicArn + "' Started...")
 
-	nc := notifierpb.NewNotifierServiceClient(n._grpcClient.ClientConnection())
+	conn := n._grpcClient.ClientConnection()
+	if conn == nil {
+		atomic.StoreInt32(&n._notificationServicesStarted, 0)
+		err = fmt.Errorf("Notifier Client Subscribe Failed: gRPC client connection is nil")
+		return err
+	}
+	nc := notifierpb.NewNotifierServiceClient(conn)
 
 	sessionId := util.NewULID() + util.GetLocalIP()
 	n._grpcClient.ZLog().Printf("Notifier Client " + n.AppName + " Session ID Generated: " + sessionId)
@@ -606,7 +616,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 							}
 
 							// check if already received within the last 10 seconds (deduplication)
-							recvKey := fmt.Sprintf("%s:%d", ip, port)
+							// Include action in key so ONLINE and OFFLINE for the same host are not deduplicated
+							recvKey := fmt.Sprintf("%s:%d:%s", ip, port, strings.ToUpper(hostDiscNotification.Action))
 							now := time.Now()
 							if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(now, t)) <= 10 {
 								// already in map within dedup window, skip
@@ -738,8 +749,12 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 	subTopic := n._subscriberTopicArn
 	subCancel := n._subscribeCancel
 	if util.LenTrim(subID) == 0 || util.LenTrim(subTopic) == 0 {
+		if subCancel != nil {
+			subCancel()
+		}
 		n._subscriberID = ""
 		n._subscriberTopicArn = ""
+		n._subscribeCancel = nil
 		n._subMu.Unlock()
 		n._grpcClient.ZLog().Errorf("!!! Notifier Client Unsubscribe Failed: Subscriber ID and/or TopicArn Not Found, Client Not Yet Subscribed !!!")
 		err = fmt.Errorf("Notifier Client Subscriber ID and TopicArn Not Found, Client Not Yet Subscribed")
@@ -761,7 +776,20 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 	}
 
 	// perform unsubscribe action
-	nc := notifierpb.NewNotifierServiceClient(n._grpcClient.ClientConnection())
+	conn := n._grpcClient.ClientConnection()
+	if conn == nil {
+		if subCancel != nil {
+			subCancel()
+		}
+		n._subMu.Lock()
+		n._subscriberID = ""
+		n._subscriberTopicArn = ""
+		n._subscribeCancel = nil
+		n._subMu.Unlock()
+		err = fmt.Errorf("Notifier Client Unsubscribe Failed: gRPC client connection is nil")
+		return err
+	}
+	nc := notifierpb.NewNotifierServiceClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

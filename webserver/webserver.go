@@ -347,7 +347,9 @@ func (w *WebServer) setupWebServer() error {
 		// pass in via http headers:
 		//		X-Amzn-Seg-Id = Parent Segment ID
 		//		X-Amzn-Tr-Id = Segment Trace ID
-		_ = xray.Init("127.0.0.1:2000", "1.2.0")
+		if err := xray.Init("127.0.0.1:2000", "1.2.0"); err != nil {
+			log.Printf("!!! X-Ray Init Failed: %s (tracing may not be available) !!!", err.Error())
+		}
 		xray.SetXRayServiceOn()
 	}
 

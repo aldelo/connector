@@ -381,12 +381,14 @@ func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend 
 
 	log.Println("Trace: SetDataToSendByTopicArn - GetTopicArn Has epList")
 
+	anySuccess := false
 	for _, ep := range epList {
 		if ep != nil {
 			log.Println("Trace: SetDataSendByTopicArn (Loop) - Before <-dataToSend Assign to ep.DataToSend")
 			// FIX #6: Use endpoint-level safeSend with the defined constant
 			if ep.safeSend(dataToSend, dataChannelSendTimeout) {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - After <-dataToSend Assign to ep.DataToSend")
+				anySuccess = true
 			} else {
 				log.Println("Trace: SetDataSendByTopicArn (Loop) - Failed to send data (timeout or closed channel)")
 			}
@@ -395,7 +397,7 @@ func (m *clientEndpointMap) SetDataToSendByTopicArn(topicArn string, dataToSend 
 		}
 	}
 
-	return true
+	return anySuccess
 }
 
 // FIX #5: Read-only count methods now use RLock instead of Lock

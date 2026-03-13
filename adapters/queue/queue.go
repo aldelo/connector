@@ -382,6 +382,8 @@ func SendMessage(q *sqs.SQS, queueUrl string, messageBody string, messageAttribu
 	if result, err := q.SendMessage(queueUrl, messageBody, messageAttributes, 0, timeoutDuration...); err != nil {
 		// send message error
 		return "", fmt.Errorf("send message failed: %w", err)
+	} else if result == nil {
+		return "", fmt.Errorf("send message succeeded but result is nil")
 	} else {
 		// send message successful
 		return result.MessageId, nil
@@ -432,6 +434,9 @@ func SendMessageFIFO(
 	res, sendErr := q.SendMessageFifo(queueUrl, messageDeduplicationId, messageGroupId, messageBody, messageAttributes, timeoutDuration...)
 	if sendErr != nil {
 		return "", fmt.Errorf("SendMessageFIFO Failed: %s", sendErr.Error())
+	}
+	if res == nil {
+		return "", fmt.Errorf("SendMessageFIFO succeeded but result is nil")
 	}
 	return res.MessageId, nil
 }

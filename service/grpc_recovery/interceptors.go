@@ -51,7 +51,9 @@ func StreamServerInterceptor(opts ...Option) grpc.StreamServerInterceptor {
 
 func recoverFrom(ctx context.Context, p interface{}, r RecoveryHandlerFuncContext) error {
 	if r == nil {
-		return status.Errorf(codes.Internal, "%v", p)
+		// Return generic message to client to prevent leaking sensitive panic details
+		// (stack trace, internal state). The panic value is already logged by the caller.
+		return status.Errorf(codes.Internal, "internal server error")
 	}
 	return r(ctx, p)
 }
