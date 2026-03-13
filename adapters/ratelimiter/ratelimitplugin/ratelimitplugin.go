@@ -88,7 +88,8 @@ func (p *RateLimitPlugin) RateLimiter() *ratelimit.RateLimiter {
 
 // ensureRateLimiter guarantees rateLimit is non-nil and initialized
 func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
-	for { // retry until we return the current, initialized limiter
+	const maxRetries = 10
+	for i := 0; i < maxRetries; i++ { // retry until we return the current, initialized limiter
 		p.mu.Lock()
 
 		if p.initOnce == nil {
@@ -127,6 +128,11 @@ func (p *RateLimitPlugin) ensureRateLimiter() *ratelimit.RateLimiter {
 		}
 		// loop to initialize the newly swapped-in limiter instead of returning nil
 	}
+	// retries exhausted — return whatever is currently set (may be nil)
+	p.mu.Lock()
+	rl := p.rateLimit
+	p.mu.Unlock()
+	return rl
 }
 
 // Take is called by each method needing rate limit applied

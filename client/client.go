@@ -198,7 +198,7 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 					log.Printf("Failed to close old connection: %v", err)
 				}
 			}
-		}(old, c._z)
+		}(old, c.ZLog())
 	}
 }
 
@@ -1091,13 +1091,23 @@ func (c *Client) Dial(ctx context.Context) error {
 				_ = closedConn.Close()
 			}
 		}
-		if cleanupSqs && c._sqs != nil {
-			c._sqs.Disconnect()
+		if cleanupSqs {
+			c.connMu.Lock()
+			sqsCleanup := c._sqs
 			c._sqs = nil
+			c.connMu.Unlock()
+			if sqsCleanup != nil {
+				sqsCleanup.Disconnect()
+			}
 		}
-		if cleanupSd && c._sd != nil {
-			c._sd.Disconnect()
+		if cleanupSd {
+			c.connMu.Lock()
+			sdCleanup := c._sd
 			c._sd = nil
+			c.connMu.Unlock()
+			if sdCleanup != nil {
+				sdCleanup.Disconnect()
+			}
 		}
 	}()
 
@@ -1121,17 +1131,23 @@ func (c *Client) Dial(ctx context.Context) error {
 	// if rest target ca cert files defined, load self-signed ca certs so that this service may use those host resources
 	if util.LenTrim(c._config.Target.RestTargetCACertFiles) > 0 {
 		if err := rest.AppendServerCAPemFiles(strings.Split(c._config.Target.RestTargetCACertFiles, ",")...); err != nil {
-			c._z.Errorf("!!! Load Rest Target Self-Signed CA Cert Files '" + c._config.Target.RestTargetCACertFiles + "' Failed: " + err.Error() + " !!!")
+			if z := c.ZLog(); z != nil {
+				z.Errorf("!!! Load Rest Target Self-Signed CA Cert Files '" + c._config.Target.RestTargetCACertFiles + "' Failed: " + err.Error() + " !!!")
+			}
 		}
 	}
 
-	c._z.Printf("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
+	if z := c.ZLog(); z != nil {
+		z.Printf("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
+	}
 
 	// setup sqs and sns if configured
 	if util.LenTrim(c._config.Queues.SqsLoggerQueueUrl) > 0 {
 		var e error
 		if c._sqs, e = queue.NewQueueAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil); e != nil {
-			c._z.Errorf("Get SQS Queue Adapter Failed: %s", e.Error())
+			if z := c.ZLog(); z != nil {
+				z.Errorf("Get SQS Queue Adapter Failed: %s", e.Error())
+			}
 			c._sqs = nil
 		}
 		cleanupSqs = c._sqs != nil
@@ -1157,7 +1173,9 @@ func (c *Client) Dial(ctx context.Context) error {
 		return fmt.Errorf("no service endpoints discovered for %s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
 	}
 
-	c._z.Printf("... Service Discovery for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + " Found " + strconv.Itoa(len(eps)) + " Endpoints:")
+	if z := c.ZLog(); z != nil {
+		z.Printf("... Service Discovery for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + " Found " + strconv.Itoa(len(eps)) + " Endpoints:")
+	}
 
 	// get endpoint addresses
 	endpointAddrs := make([]string, 0, len(eps))
@@ -1169,7 +1187,9 @@ func (c *Client) Dial(ctx context.Context) error {
 		info += "Version=" + ep.Version + ", "
 		info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
 
-		c._z.Printf("       - " + info)
+		if z := c.ZLog(); z != nil {
+			z.Printf("       - " + info)
+		}
 	}
 
 	// setup resolver and setup load balancer
@@ -1199,24 +1219,35 @@ func (c *Client) Dial(ctx context.Context) error {
 		return fmt.Errorf("build gRPC client dial options failed: %w", err)
 	} else {
 		if c.BeforeClientDial != nil {
-			c._z.Printf("Before gRPC Client Dial Begin...")
+			if z := c.ZLog(); z != nil {
+				z.Printf("Before gRPC Client Dial Begin...")
+			}
 
 			c.BeforeClientDial(c)
 
-			c._z.Printf("... Before gRPC Client Dial End")
+			if z := c.ZLog(); z != nil {
+				z.Printf("... Before gRPC Client Dial End")
+			}
 		}
 
+		dialSuccess := false
 		defer func() {
-			if c.AfterClientDial != nil {
-				c._z.Printf("After gRPC Client Dial Begin...")
+			if dialSuccess && c.AfterClientDial != nil {
+				if z := c.ZLog(); z != nil {
+					z.Printf("After gRPC Client Dial Begin...")
+				}
 
 				c.AfterClientDial(c)
 
-				c._z.Printf("... After gRPC Client Dial End")
+				if z := c.ZLog(); z != nil {
+					z.Printf("... After gRPC Client Dial End")
+				}
 			}
 		}()
 
-		c._z.Printf("Dialing gRPC Service @ " + target + "...")
+		if z := c.ZLog(); z != nil {
+			z.Printf("Dialing gRPC Service @ " + target + "...")
+		}
 
 		dialSec := c._config.Grpc.DialMinConnectTimeout
 		if dialSec == 0 {
@@ -1233,7 +1264,9 @@ func (c *Client) Dial(ctx context.Context) error {
 
 		conn, err := muxDialContext(ctxWithTimeout, target, opts...)
 		if err != nil {
-			c._z.Errorf("Dial Failed: (If TLS/mTLS, Check Certificate SAN) %s", err.Error())
+			if z := c.ZLog(); z != nil {
+				z.Errorf("Dial Failed: (If TLS/mTLS, Check Certificate SAN) %s", err.Error())
+			}
 			e := fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: (If TLS/mTLS, Check Certificate SAN) %s", target, err.Error())
 			if seg != nil {
 				_ = seg.Seg.AddError(e)
@@ -1242,14 +1275,20 @@ func (c *Client) Dial(ctx context.Context) error {
 		}
 
 		// dial grpc service endpoint success
-		c._z.Printf("Dial Successful")
+		if z := c.ZLog(); z != nil {
+			z.Printf("Dial Successful")
+		}
 
 		c.setConnection(conn, target)
 		cleanupConn = true
 
-		c._z.Printf("Remote Address = " + target)
+		if z := c.ZLog(); z != nil {
+			z.Printf("Remote Address = " + target)
+		}
 
-		c._z.Printf("... gRPC Service @ " + target + " [" + c.RemoteAddress() + "] Connected")
+		if z := c.ZLog(); z != nil {
+			z.Printf("... gRPC Service @ " + target + " [" + c.RemoteAddress() + "] Connected")
+		}
 
 		if c.WaitForServerReady {
 			healthCtx, healthCancel := context.WithTimeout(ctx, time.Duration(dialSec)*time.Second)
@@ -1269,7 +1308,9 @@ func (c *Client) Dial(ctx context.Context) error {
 
 		// dial successful, now start web server for notification callbacks (webhook)
 		if c.WebServerConfig != nil && util.LenTrim(c.WebServerConfig.ConfigFileName) > 0 {
-			c._z.Printf("Starting Http Web Server...")
+			if z := c.ZLog(); z != nil {
+				z.Printf("Starting Http Web Server...")
+			}
 			serveErrCh := make(chan error, 1)
 
 			// start server and capture immediate config/start errors
@@ -1283,7 +1324,9 @@ func (c *Client) Dial(ctx context.Context) error {
 
 			// wait for readiness first; propagate deterministic readiness failures
 			if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
-				c._z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
+				if z := c.ZLog(); z != nil {
+					z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
+				}
 				if seg != nil {
 					_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
 				}
@@ -1317,7 +1360,9 @@ func (c *Client) Dial(ctx context.Context) error {
 				}()
 			}
 
-			c._z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
+			if z := c.ZLog(); z != nil {
+				z.Printf("... Http Web Server Started: %s", c.WebServerConfig.WebServerLocalAddress)
+			}
 		}
 
 		//
@@ -1327,6 +1372,7 @@ func (c *Client) Dial(ctx context.Context) error {
 		cleanupWeb = false
 		cleanupSd = false
 		cleanupSqs = false
+		dialSuccess = true
 		return nil
 	}
 }
@@ -1999,10 +2045,12 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 		c.setupHealthManualChecker()
 		c.connMu.RLock()
 		hc = c._healthManualChecker
-		c.connMu.RUnlock()
 		if hc == nil {
+			c.connMu.RUnlock()
 			return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: (Auto Instantiate) %s", "Health Manual Checker is Nil")
 		}
+		// Hold RLock through the nil check to prevent TOCTOU race
+		c.connMu.RUnlock()
 	}
 
 	printf("Health Probe - Manual Check Begin...")
@@ -2080,12 +2128,11 @@ func (c *Client) Close() {
 		}
 	}()
 
-	// clean up web server route53 dns if applicable
+	// clean up web server route53 dns and shutdown web server
+	c.webServerMu.Lock()
 	if c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
 		c.WebServerConfig.CleanUp()
 	}
-
-	c.webServerMu.Lock()
 	// Issue #18: Use shared shutdown helper
 	c.shutdownWebServerLocked(webServerShutdownTimeout, false) // CleanUp already called above
 	c.webServerMu.Unlock()
@@ -2103,14 +2150,19 @@ func (c *Client) Close() {
 	}
 	c.notifierReconnectActive.Store(false)
 
-	if c._sqs != nil {
-		c._sqs.Disconnect()
-		c._sqs = nil
+	c.connMu.Lock()
+	sqsLocal := c._sqs
+	c._sqs = nil
+	sdLocal := c._sd
+	c._sd = nil
+	c.connMu.Unlock()
+
+	if sqsLocal != nil {
+		sqsLocal.Disconnect()
 	}
 
-	if c._sd != nil {
-		c._sd.Disconnect()
-		c._sd = nil
+	if sdLocal != nil {
+		sdLocal.Disconnect()
 	}
 
 	if conn := c.clearConnection(); conn != nil {
@@ -2416,7 +2468,11 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		}
 	}
 
-	if c._sd == nil {
+	c.connMu.RLock()
+	sd := c._sd
+	c.connMu.RUnlock()
+
+	if sd == nil {
 		return fmt.Errorf("Service Discovery Client Not Connected")
 	}
 
@@ -2464,7 +2520,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	}
 
 	log.Printf("Start DiscoverInstances %s.%s attr=%v count=%d", serviceName, namespaceName, customAttr, maxCount)
-	instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, true, customAttr, &maxCount, timeoutDuration...)
+	instanceList, err := registry.DiscoverInstances(sd, serviceName, namespaceName, true, customAttr, &maxCount, timeoutDuration...)
 	if err != nil {
 		return fmt.Errorf("service discovery by API failed: %w", err)
 	}
@@ -2516,7 +2572,11 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 		return []*serviceEndpoint{}, fmt.Errorf("Client Object Nil")
 	}
 
-	if c._sd == nil {
+	c.connMu.RLock()
+	sd := c._sd
+	c.connMu.RUnlock()
+
+	if sd == nil {
 		return []*serviceEndpoint{}, fmt.Errorf("Service Discovery Client Not Connected")
 	}
 
@@ -2546,7 +2606,7 @@ func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string
 		customAttr = nil
 	}
 
-	instanceList, err := registry.DiscoverInstances(c._sd, serviceName, namespaceName, false, customAttr, &maxCount, timeoutDuration...)
+	instanceList, err := registry.DiscoverInstances(sd, serviceName, namespaceName, false, customAttr, &maxCount, timeoutDuration...)
 	if err != nil {
 		return []*serviceEndpoint{}, fmt.Errorf("service discovery by API failed: %w", err)
 	}
@@ -2619,7 +2679,7 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		operationId, err := registry.DeregisterInstance(c._sd, p.InstanceId, p.ServiceId, timeoutDuration...)
 		if err != nil {
 			errorf("... De-Register Instance '%s:%s-%s' Failed: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
-			return fmt.Errorf("De-Register Instance '%s:%s-%s'Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
+			return fmt.Errorf("De-Register Instance '%s:%s-%s' Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
 		}
 
 		tryCount := 0
@@ -2629,7 +2689,7 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 			status, e := registry.GetOperationStatus(c._sd, operationId, timeoutDuration...)
 			if e != nil {
 				errorf("... De-Register Instance '%s:%s-%s' Failed: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, e.Error())
-				return fmt.Errorf("De-Register Instance '%s:%s-%s'Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, e.Error())
+				return fmt.Errorf("De-Register Instance '%s:%s-%s' Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, e.Error())
 			}
 
 			if status == sdoperationstatus.Success {
@@ -2740,7 +2800,11 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 
 	}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
 		logWarnf("Circuit Breaker Action for " + method + " Fallback...")
-		logWarnf("... Error = " + errIn.Error())
+		errMsg := "nil"
+		if errIn != nil {
+			errMsg = errIn.Error()
+		}
+		logWarnf("... Error = " + errMsg)
 
 		return nil, errIn
 	}, nil)
@@ -2842,7 +2906,11 @@ func (c *Client) streamCircuitBreakerHandler(
 		return dataOut, err
 	}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
 		logWarnf("Circuit Breaker Action for " + method + " Fallback...")
-		logWarnf("... Error = " + errIn.Error())
+		errMsg := "nil"
+		if errIn != nil {
+			errMsg = errIn.Error()
+		}
+		logWarnf("... Error = " + errMsg)
 
 		return nil, errIn
 	}, nil)
@@ -3128,7 +3196,6 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		defer close(stopCh) // signal completion/shutdown
 		defer func() {
 			if r := recover(); r != nil {
-				server.RemoveDNSRecordset()
 				if z := c.ZLog(); z != nil {
 					z.Errorf("Start Web Server panic: %v", r)
 				} else {
@@ -3146,7 +3213,6 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 				return
 			}
 
-			server.RemoveDNSRecordset()
 			if z := c.ZLog(); z != nil {
 				z.Errorf("Start Web Server Failed: (Serve Error) %s", err)
 			} else {

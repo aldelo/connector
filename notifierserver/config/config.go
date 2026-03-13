@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	util "github.com/aldelo/common"
 	data "github.com/aldelo/common/wrapper/viper"
@@ -30,7 +31,8 @@ type Config struct {
 	ConfigFileName   string `mapstructure:"-"`
 	CustomConfigPath string `mapstructure:"-"`
 
-	_v *data.ViperConf `mapstructure:"-"`
+	_v  *data.ViperConf `mapstructure:"-"`
+	_mu sync.RWMutex    `mapstructure:"-"`
 
 	// FIX #1: Exported types so other packages can declare variables of these types
 	NotifierServerData *NotifierServerData  `mapstructure:"notifier_server"`
@@ -66,10 +68,31 @@ func (c *Config) ensureServerData() {
 
 // FIX #3: GetSubscriptionArn — added nil receiver check and nil element check
 // to prevent panic on bare Config{} or if SubscriptionsData contains nil entries.
+// GetAllSubscriptionArns returns a snapshot of all subscription data under the lock.
+func (c *Config) GetAllSubscriptionArns() []SubscriptionsData {
+	if c == nil {
+		return nil
+	}
+
+	c._mu.RLock()
+	defer c._mu.RUnlock()
+
+	result := make([]SubscriptionsData, 0, len(c.SubscriptionsData))
+	for _, v := range c.SubscriptionsData {
+		if v != nil {
+			result = append(result, *v)
+		}
+	}
+	return result
+}
+
 func (c *Config) GetSubscriptionArn(topicArn string) string {
 	if c == nil {
 		return ""
 	}
+
+	c._mu.RLock()
+	defer c._mu.RUnlock()
 
 	for _, v := range c.SubscriptionsData {
 		if v != nil && strings.EqualFold(v.TopicArn, topicArn) {
@@ -90,6 +113,9 @@ func (c *Config) SetSubscriptionData(topicArn string, subscriptionArn string) {
 	if util.LenTrim(topicArn) == 0 {
 		return
 	}
+
+	c._mu.Lock()
+	defer c._mu.Unlock()
 
 	found := false
 
@@ -119,6 +145,9 @@ func (c *Config) RemoveSubscriptionData(topicArn string) {
 	if c == nil || c._v == nil {
 		return
 	}
+
+	c._mu.Lock()
+	defer c._mu.Unlock()
 
 	if util.LenTrim(topicArn) == 0 {
 		// remove all

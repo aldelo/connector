@@ -55,6 +55,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 	"time"
 
 	util "github.com/aldelo/common"
@@ -70,7 +71,10 @@ import (
 	"google.golang.org/grpc"
 )
 
-var notifierServer *impl.NotifierImpl
+var (
+	notifierServer   *impl.NotifierImpl
+	notifierServerMu sync.RWMutex
+)
 
 type snsNotification struct {
 	Type             string `json:"Type"`
@@ -90,33 +94,36 @@ type snsNotification struct {
 //
 //	if notifier server is discovered via public ip, then inbound security group must be setup to indicate inbound ec2 ip address rather than its security groups
 func NewNotifierServer(appName string, configFileNameGrpcServer string, configFileNameWebServer string, configFileNameNotifier string, customConfigPath string) (*service.Service, error) {
-	notifierServer = new(impl.NotifierImpl)
+	ns := new(impl.NotifierImpl)
+	notifierServerMu.Lock()
+	notifierServer = ns
+	notifierServerMu.Unlock()
 
-	if err := notifierServer.ReadConfig(appName, configFileNameNotifier, customConfigPath); err != nil {
+	if err := ns.ReadConfig(appName, configFileNameNotifier, customConfigPath); err != nil {
 		return nil, fmt.Errorf("WARNING: Notifier-Config.yaml Not Ready: %s", err)
 	} else {
-		if util.LenTrim(notifierServer.ConfigData.NotifierServerData.ServerKey) == 0 {
+		if util.LenTrim(ns.ConfigData.NotifierServerData.ServerKey) == 0 {
 			// FIX #1: SetServerKey now returns error — must check it
-			if err := notifierServer.ConfigData.SetServerKey(util.NewULID()); err != nil {
+			if err := ns.ConfigData.SetServerKey(util.NewULID()); err != nil {
 				return nil, fmt.Errorf("ERROR: Set Notifier Server Key Failed: %s", err)
 			}
 
-			if err := notifierServer.ConfigData.Save(); err != nil {
+			if err := ns.ConfigData.Save(); err != nil {
 				return nil, fmt.Errorf("ERROR: Persist Notifier Server Key Failed: %s", err)
 			}
 		}
 	}
 
-	if err := notifierServer.ConnectDataStore(); err != nil {
+	if err := ns.ConnectDataStore(); err != nil {
 		return nil, fmt.Errorf("WARNING: Notifier's DynamoDB Connection Failed: %s", err)
 	}
 
-	if err := notifierServer.ConnectSNS(awsregion.GetAwsRegion(notifierServer.ConfigData.NotifierServerData.SnsAwsRegion)); err != nil {
+	if err := ns.ConnectSNS(awsregion.GetAwsRegion(ns.ConfigData.NotifierServerData.SnsAwsRegion)); err != nil {
 		return nil, fmt.Errorf("WARNING: Notifier's SNS Connection Failed: %s", err)
 	}
 
 	svr := service.NewService(appName, configFileNameGrpcServer, customConfigPath, func(grpcServer *grpc.Server) {
-		pb.RegisterNotifierServiceServer(grpcServer, notifierServer)
+		pb.RegisterNotifierServiceServer(grpcServer, ns)
 	})
 
 	svr.WebServerConfig = &service.WebServerConfig{
@@ -147,10 +154,10 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 		},
 	}
 
-	notifierServer.WebServerLocalAddressFunc = svr.WebServerConfig.GetWebServerLocalAddress
+	ns.WebServerLocalAddressFunc = svr.WebServerConfig.GetWebServerLocalAddress
 
 	// clean up prior sns subscriptions logged in config, upon initial launch
-	notifierServer.UnsubscribeAllPriorSNSTopics()
+	ns.UnsubscribeAllPriorSNSTopics()
 
 	return svr, nil
 }
@@ -158,9 +165,13 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 // UnsubscribeAllTopics will clean up by unsubscribing all subscriptionArns from Topic list in config,
 // this is call during notifier service shutdown to clean up
 func UnsubscribeAllTopics() {
-	if notifierServer != nil {
+	notifierServerMu.RLock()
+	ns := notifierServer
+	notifierServerMu.RUnlock()
+
+	if ns != nil {
 		log.Println("UnsubscribeAllTopics Invoked")
-		notifierServer.UnsubscribeAllPriorSNSTopics()
+		ns.UnsubscribeAllPriorSNSTopics()
 	} else {
 		log.Println("UnsubscribeAllTopics Not Invoked Because notifierServer Object is Nil")
 	}
@@ -168,9 +179,13 @@ func UnsubscribeAllTopics() {
 
 // Shutdown gracefully shuts down the notifier server
 func Shutdown(ctx context.Context) error {
-	if notifierServer != nil {
+	notifierServerMu.RLock()
+	ns := notifierServer
+	notifierServerMu.RUnlock()
+
+	if ns != nil {
 		log.Println("Shutdown Invoked")
-		return notifierServer.Shutdown(ctx)
+		return ns.Shutdown(ctx)
 	} else {
 		log.Println("Shutdown Not Invoked Because notifierServer Object is Nil")
 		return nil
@@ -178,7 +193,11 @@ func Shutdown(ctx context.Context) error {
 }
 
 func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
-	if notifierServer == nil {
+	notifierServerMu.RLock()
+	ns := notifierServer
+	notifierServerMu.RUnlock()
+
+	if ns == nil {
 		c.String(412, "notifierServer Not Exist")
 		return
 	}
@@ -208,7 +227,7 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 
 			log.Println("~~~ Notifier Server Relaying SNS Message to TopicArn: " + n.TopicArn + " ~~~")
 
-			if _, err := notifierServer.Broadcast(ctx, &pb.NotificationData{
+			if _, err := ns.Broadcast(ctx, &pb.NotificationData{
 				Id:        n.MessageId,
 				Topic:     n.TopicArn,
 				Message:   n.Message,
@@ -230,7 +249,11 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 }
 
 func snsupdate(c *gin.Context, bindingInputPtr interface{}) {
-	if notifierServer == nil {
+	notifierServerMu.RLock()
+	ns := notifierServer
+	notifierServerMu.RUnlock()
+
+	if ns == nil {
 		c.String(412, "notifierServer Not Exist")
 		return
 	}
@@ -267,7 +290,7 @@ func snsupdate(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	if err := notifierServer.UpdateSubscriptionArnToTopic(topicArn, subscriptionArn); err != nil {
+	if err := ns.UpdateSubscriptionArnToTopic(topicArn, subscriptionArn); err != nil {
 		c.String(412, err.Error())
 	} else {
 		c.Status(200)

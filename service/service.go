@@ -274,7 +274,12 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 		if util.LenTrim(s._config.Grpc.ServerCertFile) > 0 && util.LenTrim(s._config.Grpc.ServerKeyFile) > 0 {
 			tls := new(tlsconfig.TlsConfig)
-			if tc, e := tls.GetServerTlsConfig(s._config.Grpc.ServerCertFile, s._config.Grpc.ServerKeyFile, strings.Split(s._config.Grpc.ClientCACertFiles, ",")); e != nil {
+			// FIX: strings.Split("", ",") produces [""] not [] — guard against empty input
+			var clientCACerts []string
+			if util.LenTrim(s._config.Grpc.ClientCACertFiles) > 0 {
+				clientCACerts = strings.Split(s._config.Grpc.ClientCACertFiles, ",")
+			}
+			if tc, e := tls.GetServerTlsConfig(s._config.Grpc.ServerCertFile, s._config.Grpc.ServerKeyFile, clientCACerts); e != nil {
 				// FIX #5: Was log.Fatal which calls os.Exit(1) and bypasses all deferred
 				// cleanup (listener close, SD deregister, etc.). Return error instead.
 				return nil, "", 0, fmt.Errorf("Setup gRPC Server TLS Failed: %s", e.Error())
@@ -608,11 +613,15 @@ func (s *Service) connectSd() error {
 
 // startHealthChecker will launch the grpc health v1 health service
 func (s *Service) startHealthChecker() error {
-	if s._grpcServer == nil {
+	s._mu.RLock()
+	gs := s._grpcServer
+	s._mu.RUnlock()
+
+	if gs == nil {
 		return fmt.Errorf("Health Check Server Can't Start: gRPC Server Not Started")
 	}
 
-	grpc_health_v1.RegisterHealthServer(s._grpcServer, health.NewHealthServer(s.DefaultHealthCheckHandler, s.ServiceHealthCheckHandlers))
+	grpc_health_v1.RegisterHealthServer(gs, health.NewHealthServer(s.DefaultHealthCheckHandler, s.ServiceHealthCheckHandlers))
 
 	return nil
 }
@@ -670,12 +679,23 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 				log.Println("... gRPC Health Server Started")
 			}
 
-			if serveErr := s._grpcServer.Serve(lis); serveErr != nil {
+			// Snapshot shared state under lock to prevent race with quit handler
+			s._mu.RLock()
+			grpcSrv := s._grpcServer
+			appName := s._config.AppName
+			s._mu.RUnlock()
+
+			if grpcSrv == nil {
+				log.Println("!!! gRPC Server is nil, cannot serve !!!")
+				return
+			}
+
+			if serveErr := grpcSrv.Serve(lis); serveErr != nil {
 				// FIX #13: Was log.Fatalf which calls os.Exit(1) and bypasses ALL deferred
 				// cleanup (SD deregister, SNS unsubscribe, health report removal, etc.).
 				// Send SIGTERM to self instead, which triggers awaitOsSigExit() and runs
 				// the full graceful shutdown path.
-				log.Printf("Serve gRPC Service %s on %s Failed: (Server Halt) %s", s._config.AppName, s._localAddress, serveErr.Error())
+				log.Printf("Serve gRPC Service %s on %s Failed: (Server Halt) %s", appName, s.LocalAddress(), serveErr.Error())
 				if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
 					_ = p.Signal(syscall.SIGTERM)
 				}
@@ -713,7 +733,10 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 
 		// trigger sd initial health update
 		go func() {
-			waitTime := int(s._config.SvcCreateData.HealthFailThreshold * 45)
+			s._mu.RLock()
+			healthFailThreshold := s._config.SvcCreateData.HealthFailThreshold
+			s._mu.RUnlock()
+			waitTime := int(healthFailThreshold * 45)
 
 			log.Println(">>> Instance Health Check Warm-Up: " + util.Itoa(waitTime) + " Seconds - Please Wait >>>")
 			time.Sleep(time.Duration(waitTime) * time.Second)
@@ -743,18 +766,30 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 			if continueProcessing {
 				log.Println("+++ Update Instance as Healthy with Service Discovery: OK +++")
 
-				if s._config.Service.DiscoveryUseSqsSns {
+				// Snapshot config fields + shared pointers under single RLock for thread safety
+				s._mu.RLock()
+				useSqsSns := s._config.Service.DiscoveryUseSqsSns
+				sqsLocal := s._sqs
+				snsLocal := s._sns
+				cfgQueueArn := s._config.Queues.SqsDiscoveryQueueArn
+				cfgQueueUrl := s._config.Queues.SqsDiscoveryQueueUrl
+				cfgTopicArn := s._config.Topics.SnsDiscoveryTopicArn
+				cfgTopicSubArn := s._config.Topics.SnsDiscoverySubscriptionArn
+				cfgSdTimeout := s._config.Instance.SdTimeout
+				s._mu.RUnlock()
+
+				if useSqsSns {
 					log.Println("~~~ Service Discovery Push Notification Begin ~~~")
 
-					if s._sqs == nil {
+					if sqsLocal == nil {
 						log.Println("!!! Service Discovery Push Notification Skipped - SQS Not Initialized, Check Config !!!")
-					} else if s._sns == nil {
+					} else if snsLocal == nil {
 						log.Println("!!! Service Discovery Push Notification Skipped - SNS Not Initialized, Check Config !!!")
 					} else {
-						qArn := s._config.Queues.SqsDiscoveryQueueArn
-						qUrl := s._config.Queues.SqsDiscoveryQueueUrl
-						tArn := s._config.Topics.SnsDiscoveryTopicArn
-						tSubId := s._config.Topics.SnsDiscoverySubscriptionArn
+						qArn := cfgQueueArn
+						qUrl := cfgQueueUrl
+						tArn := cfgTopicArn
+						tSubId := cfgTopicSubArn
 
 						if util.LenTrim(qArn) == 0 {
 							log.Println("!!! Service Discovery Push Notification Skipped - SQS Queue Not Auto Created (Missing QueueARN) !!!")
@@ -768,17 +803,19 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 							if util.LenTrim(tSubId) == 0 {
 								log.Println("+++ Instance Subscribing to SNS Topic '" + tArn + "' with SQS Queue '" + qArn + "' for Service Discovery Publishing +++")
 
-								if subId, subErr := notification.Subscribe(s._sns, tArn, snsprotocol.Sqs, qArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); subErr != nil {
+								if subId, subErr := notification.Subscribe(snsLocal, tArn, snsprotocol.Sqs, qArn, time.Duration(cfgSdTimeout)*time.Second); subErr != nil {
 									log.Println("!!! Service Discovery Push Notification Skipped - Instance Queue Topic Subscribe Failed: " + subErr.Error() + " !!!")
 								} else {
 									log.Println("+++ Instance Subscribing to SNS Topic '" + tArn + "' with SQS Queue '" + qArn + "' for Service Discovery Publishing: OK +++")
 
+									s._mu.Lock()
 									s._config.SetSnsDiscoverySubscriptionArn(subId)
+									s._mu.Unlock()
 
 									if cErr := s._config.Save(); cErr != nil {
 										log.Println("!!! Service Discovery Push Notification Skipped - Instance Queue Topic Subscription Persist To Config Failed: " + cErr.Error() + " !!!")
 
-										if uErr := notification.Unsubscribe(s._sns, subId, time.Duration(s._config.Instance.SdTimeout)*time.Second); uErr != nil {
+										if uErr := notification.Unsubscribe(snsLocal, subId, time.Duration(cfgSdTimeout)*time.Second); uErr != nil {
 											log.Println("!!! Service Discovery Push Notification Skipped - Instance Queue Save to Config Failed, Auto Unsubscribe Failed: " + uErr.Error() + " !!!")
 										} else {
 											log.Println("!!! Service Discovery Push Notification Skipped - Instance Queue Save to Config Failed, Auto Unsubscribe Successful !!!")
@@ -814,7 +851,9 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 				// FIX #9: Replaced busy-wait (default + time.Sleep) with time.NewTicker
 				// so the stop signal is honored immediately instead of after the sleep completes.
 				// -----------------------------------------------------------------------------------------
+				s._mu.RLock()
 				freq := s._config.Instance.HealthReportUpdateFrequencySeconds
+				s._mu.RUnlock()
 
 				if freq == 0 {
 					freq = 120
@@ -861,7 +900,9 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 
 		log.Println("gRPC Server Quit Invoked")
 
+		s._mu.RLock()
 		instanceId := s._config.Instance.Id
+		s._mu.RUnlock()
 
 		if util.LenTrim(instanceId) > 0 {
 			log.Println("Removing Health Report Service Record From Data Store for InstanceID '" + instanceId + "'...")
@@ -889,10 +930,13 @@ func (s *Service) startServer(lis net.Listener, quit chan bool) (err error) {
 		// on exit, stop serving
 		s.setServing(false)
 
-		// FIX: Guard against nil — GracefulStop/ImmediateStop may have already
-		// stopped the server and set _grpcServer to nil.
-		if s._grpcServer != nil {
-			s._grpcServer.Stop()
+		// Copy and nil under lock to prevent race with GracefulStop/ImmediateStop
+		s._mu.Lock()
+		gs := s._grpcServer
+		s._grpcServer = nil
+		s._mu.Unlock()
+		if gs != nil {
+			gs.Stop()
 		}
 		_ = lis.Close()
 	}()
@@ -919,7 +963,15 @@ func (s *Service) getHostDiscoveryMessage(online bool) string {
 
 // publishToSNS publishes message to an sns topic, if sns is setup
 func (s *Service) publishToSNS(topicArn string, actionName string, message string, attributes map[string]*sns2.MessageAttributeValue) {
-	if s._sns == nil {
+	s._mu.RLock()
+	snsClient := s._sns
+	sdTimeout := uint(0)
+	if s._config != nil {
+		sdTimeout = s._config.Instance.SdTimeout
+	}
+	s._mu.RUnlock()
+
+	if snsClient == nil {
 		return
 	}
 
@@ -931,7 +983,7 @@ func (s *Service) publishToSNS(topicArn string, actionName string, message strin
 		return
 	}
 
-	if id, err := notification.Publish(s._sns, topicArn, message, attributes, time.Duration(s._config.Instance.SdTimeout)*time.Second); err != nil {
+	if id, err := notification.Publish(snsClient, topicArn, message, attributes, time.Duration(sdTimeout)*time.Second); err != nil {
 		log.Println("!!! " + actionName + " - Publish Failed: " + err.Error() + " !!!")
 	} else {
 		log.Println("... " + actionName + " - Publish OK: " + id)
@@ -940,12 +992,17 @@ func (s *Service) publishToSNS(topicArn string, actionName string, message strin
 
 // registerSd registers instance to sd
 func (s *Service) registerSd(ip string, port uint) error {
-	if s._config == nil || s._sd == nil {
+	s._mu.RLock()
+	cfg := s._config
+	sd := s._sd
+	s._mu.RUnlock()
+
+	if cfg == nil || sd == nil {
 		return nil
 	}
 
-	if err := s.registerInstance(ip, port, !s._config.Instance.InitialUnhealthy, s._config.Instance.Version); err != nil {
-		if util.LenTrim(s._config.Instance.Id) > 0 {
+	if err := s.registerInstance(ip, port, !cfg.Instance.InitialUnhealthy, cfg.Instance.Version); err != nil {
+		if util.LenTrim(cfg.Instance.Id) > 0 {
 			log.Println("Instance Registered Has Error: (Will Auto De-Register) " + err.Error())
 			if err1 := s.deregisterInstance(); err1 != nil {
 				log.Println("... De-Register Instance Failed: " + err1.Error())
@@ -973,7 +1030,10 @@ func (s *Service) awaitOsSigExit() {
 	}()
 
 	log.Println("=== Press 'Ctrl + C' to Shutdown ===")
-	log.Printf("Please Wait for Instance Service Discovery To Complete... (This may take %v Seconds)", s._config.SvcCreateData.HealthFailThreshold*45)
+	s._mu.RLock()
+	hft := s._config.SvcCreateData.HealthFailThreshold
+	s._mu.RUnlock()
+	log.Printf("Please Wait for Instance Service Discovery To Complete... (This may take %v Seconds)", hft*45)
 
 	<-done
 
@@ -1000,22 +1060,26 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 		return err
 	}
 
-	if s._config == nil {
+	s._mu.RLock()
+	cfg := s._config
+	s._mu.RUnlock()
+
+	if cfg == nil {
 		err = fmt.Errorf("Delete Health Report Service Record Requires Config Object")
 		return err
 	}
 
-	if util.LenTrim(s._config.Instance.HealthReportServiceUrl) == 0 {
+	if util.LenTrim(cfg.Instance.HealthReportServiceUrl) == 0 {
 		err = fmt.Errorf("Delete Health Report Service Record Requires HealthReportServiceUrl")
 		return err
 	}
 
-	if util.LenTrim(s._config.Instance.HashKeyName) == 0 {
+	if util.LenTrim(cfg.Instance.HashKeyName) == 0 {
 		err = fmt.Errorf("Delete Health Report Service Record Requires HashKeyName")
 		return err
 	}
 
-	if util.LenTrim(s._config.Instance.HashKeySecret) == 0 {
+	if util.LenTrim(cfg.Instance.HashKeySecret) == 0 {
 		err = fmt.Errorf("Delete Health Report Service Record Requires HashKeySecret")
 		return err
 	}
@@ -1023,23 +1087,22 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 	var subSeg *xray.XSegment
 
 	if seg != nil {
-		subSeg = seg.NewSubSegment("REST DEL: " + s._config.Instance.HealthReportServiceUrl)
-		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-name", s._config.Instance.HashKeyName)
-		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-signature", crypto.Sha256(instanceId+util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret))
+		subSeg = seg.NewSubSegment("REST DEL: " + cfg.Instance.HealthReportServiceUrl)
+		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-name", cfg.Instance.HashKeyName)
 	}
 
-	statusCode, _, e := rest.DELETE(s._config.Instance.HealthReportServiceUrl+"/"+instanceId, []*rest.HeaderKeyValue{
+	statusCode, _, e := rest.DELETE(cfg.Instance.HealthReportServiceUrl+"/"+instanceId, []*rest.HeaderKeyValue{
 		{
 			Key:   "Content-Type",
 			Value: "application/json",
 		},
 		{
 			Key:   "x-nts-gateway-hash-name",
-			Value: s._config.Instance.HashKeyName,
+			Value: cfg.Instance.HashKeyName,
 		},
 		{
 			Key:   "x-nts-gateway-hash-signature",
-			Value: crypto.Sha256(instanceId+util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret),
+			Value: crypto.Sha256(instanceId+util.FormatDate(time.Now().UTC()), cfg.Instance.HashKeySecret),
 		},
 	})
 
@@ -1074,53 +1137,58 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		}()
 	}
 
-	if s._config == nil {
+	// Snapshot config pointer under lock to prevent race with concurrent access
+	s._mu.RLock()
+	cfg := s._config
+	s._mu.RUnlock()
+
+	if cfg == nil {
 		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "Service Config Nil")
 		log.Println(err.Error())
 		return false
 	}
 
-	if util.LenTrim(s._config.Instance.HealthReportServiceUrl) == 0 {
+	if util.LenTrim(cfg.Instance.HealthReportServiceUrl) == 0 {
 		return false
 	}
 
-	if util.LenTrim(s._config.Instance.HashKeyName) == 0 {
+	if util.LenTrim(cfg.Instance.HashKeyName) == 0 {
 		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "Hash Key Name Not Defined in Config")
 		log.Println(err.Error())
 		return false
 	}
 
-	if util.LenTrim(s._config.Instance.HashKeySecret) == 0 {
+	if util.LenTrim(cfg.Instance.HashKeySecret) == 0 {
 		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "Hash Key Secret Not Defined in Config")
 		log.Println(err.Error())
 		return false
 	}
 
-	if util.LenTrim(s._config.Target.Region) == 0 {
+	if util.LenTrim(cfg.Target.Region) == 0 {
 		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "AWS Region Not Defined in Config")
 		log.Println(err.Error())
 		return false
 	}
 
-	if util.LenTrim(s._config.Namespace.Id) == 0 {
+	if util.LenTrim(cfg.Namespace.Id) == 0 {
 		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "NamespaceID Not Defined in Config")
 		log.Println(err.Error())
 		return false
 	}
 
-	if util.LenTrim(s._config.Namespace.Name) == 0 {
+	if util.LenTrim(cfg.Namespace.Name) == 0 {
 		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "NamespaceName Not Defined in Config")
 		log.Println(err.Error())
 		return false
 	}
 
-	if util.LenTrim(s._config.Service.Name) == 0 {
+	if util.LenTrim(cfg.Service.Name) == 0 {
 		err = fmt.Errorf("Set Service Health Report Update To Data Store Stopped: %s", "ServiceName Not Defined in Config")
 		log.Println(err.Error())
 		return false
 	}
 
-	if util.LenTrim(s._config.Service.Id) == 0 {
+	if util.LenTrim(cfg.Service.Id) == 0 {
 		msg := "Set Service Health Report Update To Data Store Skipped: " + "ServiceID Not Defined in Config"
 
 		if seg != nil {
@@ -1131,7 +1199,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		return true
 	}
 
-	if util.LenTrim(s._config.Instance.Id) == 0 {
+	if util.LenTrim(cfg.Instance.Id) == 0 {
 		msg := "Set Service Health Report Update To Data Store Skipped: " + "InstanceID Not Defined in Config"
 
 		if seg != nil {
@@ -1142,7 +1210,8 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		return true
 	}
 
-	if util.LenTrim(s._localAddress) == 0 {
+	localAddr := s.LocalAddress()
+	if util.LenTrim(localAddr) == 0 {
 		msg := "Set Service Health Report Update To Data Store Skipped: " + "Service Host Info Not Ready"
 
 		if seg != nil {
@@ -1153,16 +1222,16 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		return true
 	}
 
-	hashSignature := crypto.Sha256(s._config.Namespace.Id+s._config.Service.Id+s._config.Instance.Id+util.FormatDate(time.Now().UTC()), s._config.Instance.HashKeySecret)
+	hashSignature := crypto.Sha256(cfg.Namespace.Id+cfg.Service.Id+cfg.Instance.Id+util.FormatDate(time.Now().UTC()), cfg.Instance.HashKeySecret)
 
 	data := &healthreport{
-		NamespaceId:   s._config.Namespace.Id,
-		ServiceId:     s._config.Service.Id,
-		InstanceId:    s._config.Instance.Id,
-		AwsRegion:     s._config.Target.Region,
-		ServiceInfo:   strings.ToLower(s._config.Service.Name + "." + s._config.Namespace.Name),
-		HostInfo:      s._localAddress,
-		HashKeyName:   s._config.Instance.HashKeyName,
+		NamespaceId:   cfg.Namespace.Id,
+		ServiceId:     cfg.Service.Id,
+		InstanceId:    cfg.Instance.Id,
+		AwsRegion:     cfg.Target.Region,
+		ServiceInfo:   strings.ToLower(cfg.Service.Name + "." + cfg.Namespace.Name),
+		HostInfo:      localAddr,
+		HashKeyName:   cfg.Instance.HashKeyName,
 		HashSignature: hashSignature,
 	}
 
@@ -1171,27 +1240,27 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 	if e != nil {
 		err = fmt.Errorf("Set Service Health Report Update To Data Store Failed: %s", e.Error())
 		log.Println(err.Error())
-		return true
+		return false // stop the ticker loop — marshal failure is deterministic and will repeat
 	}
 
 	var subSeg *xray.XSegment
 
 	if seg != nil {
-		subSeg = seg.NewSubSegment("REST POST: " + s._config.Instance.HealthReportServiceUrl)
+		subSeg = seg.NewSubSegment("REST POST: " + cfg.Instance.HealthReportServiceUrl)
 		_ = subSeg.Seg.AddMetadata("Post-Data", jsonData)
 	}
 
-	if statusCode, RespBody, e := rest.POST(s._config.Instance.HealthReportServiceUrl, []*rest.HeaderKeyValue{
+	if statusCode, RespBody, e := rest.POST(cfg.Instance.HealthReportServiceUrl, []*rest.HeaderKeyValue{
 		{
 			Key:   "Content-Type",
 			Value: "application/json",
 		},
 	}, jsonData); e != nil {
-		err = fmt.Errorf("set service health report update to data store failed: (invoke REST POST '%s' error) %w", s._config.Instance.HealthReportServiceUrl, e)
+		err = fmt.Errorf("set service health report update to data store failed: (invoke REST POST '%s' error) %w", cfg.Instance.HealthReportServiceUrl, e)
 		log.Println(err.Error())
 
 	} else if statusCode != 200 {
-		err = fmt.Errorf("set service health report update to data store failed: (invoke REST POST '%s' result status %d) %s", s._config.Instance.HealthReportServiceUrl, statusCode, RespBody)
+		err = fmt.Errorf("set service health report update to data store failed: (invoke REST POST '%s' result status %d) %s", cfg.Instance.HealthReportServiceUrl, statusCode, RespBody)
 		log.Println(err.Error())
 
 	} else {
@@ -1219,7 +1288,7 @@ func (s *Service) Serve() error {
 		return err
 	}
 
-	log.Println("Service " + s._config.AppName + " Starting On " + s._localAddress + "...")
+	log.Println("Service " + s._config.AppName + " Starting On " + s.LocalAddress() + "...")
 
 	if err = s.connectSd(); err != nil {
 		_ = lis.Close()
@@ -1231,7 +1300,7 @@ func (s *Service) Serve() error {
 		return err
 	}
 
-	quit := make(chan bool)
+	quit := make(chan bool, 1) // buffered to prevent deadlock if handler goroutine exits early
 
 	if err = s.startServer(lis, quit); err != nil {
 		_ = lis.Close()
@@ -1410,95 +1479,110 @@ func (s *Service) autoCreateService() error {
 // FIX #10: Added sdoperationstatus.Fail check to return immediately on permanent failure.
 // FIX #11: Fixed log message from "(100ms)" to "(250ms)" to match actual sleep duration.
 func (s *Service) registerInstance(ip string, port uint, healthy bool, version string) error {
-	if s._sd != nil && s._config != nil && len(s._config.Service.Id) > 0 {
-		var timeoutDuration []time.Duration
+	s._mu.RLock()
+	sd := s._sd
+	cfg := s._config
+	s._mu.RUnlock()
 
-		if s._config.Instance.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout)*time.Second)
-		}
+	if sd == nil || cfg == nil || len(cfg.Service.Id) == 0 {
+		return nil
+	}
 
-		if s._config.Instance.AutoDeregisterPrior {
-			_ = s.deregisterInstance()
-		}
+	var timeoutDuration []time.Duration
+	if cfg.Instance.SdTimeout > 0 {
+		timeoutDuration = append(timeoutDuration, time.Duration(cfg.Instance.SdTimeout)*time.Second)
+	}
 
-		if instanceId, operationId, err := registry.RegisterInstance(s._sd, s._config.Service.Id, s._config.Instance.Prefix, ip, port, healthy, version, timeoutDuration...); err != nil {
-			log.Println("Auto Register Instance Failed: " + err.Error())
-			return err
-		} else {
-			tryCount := 0
+	if cfg.Instance.AutoDeregisterPrior {
+		_ = s.deregisterInstance()
+	}
 
-			log.Println("Auto Register Instance Initiated... " + instanceId)
+	if instanceId, operationId, err := registry.RegisterInstance(sd, cfg.Service.Id, cfg.Instance.Prefix, ip, port, healthy, version, timeoutDuration...); err != nil {
+		log.Println("Auto Register Instance Failed: " + err.Error())
+		return err
+	} else {
+		tryCount := 0
 
-			time.Sleep(250 * time.Millisecond)
+		log.Println("Auto Register Instance Initiated... " + instanceId)
 
-			for {
-				if status, e := registry.GetOperationStatus(s._sd, operationId, timeoutDuration...); e != nil {
-					log.Println("... Auto Register Instance Failed: " + e.Error())
-					return e
-				} else {
-					if status == sdoperationstatus.Success {
-						log.Println("... Auto Register Instance OK: " + instanceId)
+		time.Sleep(250 * time.Millisecond)
 
-						s._config.SetInstanceId(instanceId)
+		for {
+			if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration...); e != nil {
+				log.Println("... Auto Register Instance Failed: " + e.Error())
+				return e
+			} else {
+				if status == sdoperationstatus.Success {
+					log.Println("... Auto Register Instance OK: " + instanceId)
 
-						if e2 := s._config.Save(); e2 != nil {
-							log.Println("... Update Config with Registered Instance Failed: " + e2.Error())
-							return fmt.Errorf("Register Instance Fail When Save Config Errored: %s", e2.Error())
-						} else {
-							log.Println("... Update Config with Registered Instance OK")
-							return nil
-						}
-					} else if status == sdoperationstatus.Fail {
-						// FIX #10: Permanent failure — do not retry
-						log.Println("... Auto Register Instance Failed: Operation returned Fail status")
-						return fmt.Errorf("Register Instance Failed: Operation returned permanent Fail status")
+					cfg.SetInstanceId(instanceId)
+
+					if e2 := cfg.Save(); e2 != nil {
+						log.Println("... Update Config with Registered Instance Failed: " + e2.Error())
+						return fmt.Errorf("Register Instance Fail When Save Config Errored: %s", e2.Error())
 					} else {
-						if tryCount < 20 {
-							tryCount++
-							// FIX #11: Log message said "(100ms)" but actual sleep is 250ms
-							log.Println("... Checking Register Instance Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
-							time.Sleep(250 * time.Millisecond)
-						} else {
-							log.Println("... Auto Register Instance Failed: Operation Timeout After 5 Seconds")
-							return fmt.Errorf("Register Instance Fail When Operation Timed Out After 5 Seconds")
-						}
+						log.Println("... Update Config with Registered Instance OK")
+						return nil
+					}
+				} else if status == sdoperationstatus.Fail {
+					// FIX #10: Permanent failure — do not retry
+					log.Println("... Auto Register Instance Failed: Operation returned Fail status")
+					return fmt.Errorf("Register Instance Failed: Operation returned permanent Fail status")
+				} else {
+					if tryCount < 20 {
+						tryCount++
+						// FIX #11: Log message said "(100ms)" but actual sleep is 250ms
+						log.Println("... Checking Register Instance Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
+						time.Sleep(250 * time.Millisecond)
+					} else {
+						log.Println("... Auto Register Instance Failed: Operation Timeout After 5 Seconds")
+						return fmt.Errorf("Register Instance Fail When Operation Timed Out After 5 Seconds")
 					}
 				}
 			}
 		}
-	} else {
-		return nil
 	}
 }
 
 // updateHealth will update instance health
 func (s *Service) updateHealth(healthy bool) error {
-	if s._sd != nil && s._config != nil && util.LenTrim(s._config.Service.Id) > 0 && util.LenTrim(s._config.Instance.Id) > 0 {
-		var timeoutDuration []time.Duration
+	s._mu.RLock()
+	sd := s._sd
+	cfg := s._config
+	s._mu.RUnlock()
 
-		if s._config.Instance.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout)*time.Second)
-		}
-
-		return registry.UpdateHealthStatus(s._sd, s._config.Instance.Id, s._config.Service.Id, healthy, timeoutDuration...)
-	} else {
+	if sd == nil || cfg == nil || util.LenTrim(cfg.Service.Id) == 0 || util.LenTrim(cfg.Instance.Id) == 0 {
 		return nil
 	}
+
+	var timeoutDuration []time.Duration
+	if cfg.Instance.SdTimeout > 0 {
+		timeoutDuration = append(timeoutDuration, time.Duration(cfg.Instance.SdTimeout)*time.Second)
+	}
+
+	return registry.UpdateHealthStatus(sd, cfg.Instance.Id, cfg.Service.Id, healthy, timeoutDuration...)
 }
 
 // deregisterInstance will remove instance from cloudmap and route 53.
 // FIX #12: Added sdoperationstatus.Fail check to return immediately on permanent failure.
 func (s *Service) deregisterInstance() error {
-	if s._sd != nil && s._config != nil && util.LenTrim(s._config.Service.Id) > 0 && util.LenTrim(s._config.Instance.Id) > 0 {
-		log.Println("De-Register Instance Begin...")
+	s._mu.RLock()
+	sd := s._sd
+	cfg := s._config
+	s._mu.RUnlock()
 
-		var timeoutDuration []time.Duration
+	if sd == nil || cfg == nil || util.LenTrim(cfg.Service.Id) == 0 || util.LenTrim(cfg.Instance.Id) == 0 {
+		return nil
+	}
 
-		if s._config.Instance.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(s._config.Instance.SdTimeout)*time.Second)
-		}
+	log.Println("De-Register Instance Begin...")
 
-		if operationId, err := registry.DeregisterInstance(s._sd, s._config.Instance.Id, s._config.Service.Id, timeoutDuration...); err != nil {
+	var timeoutDuration []time.Duration
+	if cfg.Instance.SdTimeout > 0 {
+		timeoutDuration = append(timeoutDuration, time.Duration(cfg.Instance.SdTimeout)*time.Second)
+	}
+
+	if operationId, err := registry.DeregisterInstance(sd, cfg.Instance.Id, cfg.Service.Id, timeoutDuration...); err != nil {
 			log.Println("... De-Register Instance Failed: " + err.Error())
 			return fmt.Errorf("De-Register Instance Fail: %s", err.Error())
 		} else {
@@ -1507,16 +1591,16 @@ func (s *Service) deregisterInstance() error {
 			time.Sleep(250 * time.Millisecond)
 
 			for {
-				if status, e := registry.GetOperationStatus(s._sd, operationId, timeoutDuration...); e != nil {
+				if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration...); e != nil {
 					log.Println("... De-Register Instance Failed: " + e.Error())
 					return fmt.Errorf("De-Register Instance Fail: %s", e.Error())
 				} else {
 					if status == sdoperationstatus.Success {
 						log.Println("... De-Register Instance OK")
 
-						s._config.SetInstanceId("")
+						cfg.SetInstanceId("")
 
-						if e2 := s._config.Save(); e2 != nil {
+						if e2 := cfg.Save(); e2 != nil {
 							log.Println("... Update Config with De-Registered Instance Failed: " + e2.Error())
 							return fmt.Errorf("De-Register Instance Fail When Save Config Errored: %s", e2.Error())
 						} else {
@@ -1540,14 +1624,16 @@ func (s *Service) deregisterInstance() error {
 				}
 			}
 		}
-	} else {
-		return nil
-	}
 }
 
 // unsubscribe all existing sns subscriptions if any
 func (s *Service) unsubscribeSNS() {
-	if s._sns == nil {
+	s._mu.RLock()
+	snsClient := s._sns
+	cfg := s._config
+	s._mu.RUnlock()
+
+	if snsClient == nil || cfg == nil {
 		return
 	}
 
@@ -1555,13 +1641,13 @@ func (s *Service) unsubscribeSNS() {
 
 	doSave := false
 
-	if s._config.Service.DiscoveryUseSqsSns {
-		if util.LenTrim(s._config.Topics.SnsDiscoverySubscriptionArn) > 0 {
-			if err := notification.Unsubscribe(s._sns, s._config.Topics.SnsDiscoverySubscriptionArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); err != nil {
+	if cfg.Service.DiscoveryUseSqsSns {
+		if util.LenTrim(cfg.Topics.SnsDiscoverySubscriptionArn) > 0 {
+			if err := notification.Unsubscribe(snsClient, cfg.Topics.SnsDiscoverySubscriptionArn, time.Duration(cfg.Instance.SdTimeout)*time.Second); err != nil {
 				log.Println("!!! Unsubscribe Discovery Subscription Failed: " + err.Error() + " !!!")
 			} else {
 				log.Println("... Unsubscribe Discovery Subscription OK")
-				s._config.SetSnsDiscoverySubscriptionArn("")
+				cfg.SetSnsDiscoverySubscriptionArn("")
 				doSave = true
 			}
 		} else {
@@ -1574,7 +1660,7 @@ func (s *Service) unsubscribeSNS() {
 	log.Println("... Notification/Queue Services Unsubscribe End")
 
 	if doSave {
-		if err := s._config.Save(); err != nil {
+		if err := cfg.Save(); err != nil {
 			log.Println("!!! Persist Unsubscribed Info To Config Failed: " + err.Error() + " !!!")
 		}
 	}
@@ -1582,14 +1668,18 @@ func (s *Service) unsubscribeSNS() {
 
 // GracefulStop allows existing actions be completed before shutting down gRPC server
 func (s *Service) GracefulStop() {
-	if s._config != nil {
-		s.publishToSNS(s._config.Topics.SnsDiscoveryTopicArn, "Discovery Push Notification", s.getHostDiscoveryMessage(false), nil)
+	s._mu.RLock()
+	cfg := s._config
+	s._mu.RUnlock()
+
+	if cfg != nil {
+		s.publishToSNS(cfg.Topics.SnsDiscoveryTopicArn, "Discovery Push Notification", s.getHostDiscoveryMessage(false), nil)
 	}
 
 	s.unsubscribeSNS()
 
-	if s._config != nil {
-		_ = s.deleteServiceHealthReportFromDataStore(s._config.Instance.Id)
+	if cfg != nil {
+		_ = s.deleteServiceHealthReportFromDataStore(cfg.Instance.Id)
 	}
 
 	if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
@@ -1600,7 +1690,10 @@ func (s *Service) GracefulStop() {
 
 	log.Println("Stopping gRPC Server (Graceful)")
 
-	if s._sd != nil {
+	s._mu.RLock()
+	hasSd := s._sd != nil
+	s._mu.RUnlock()
+	if hasSd {
 		if err := s.deregisterInstance(); err != nil {
 			log.Println("De-Register Instance Failed From GracefulStop: " + err.Error())
 		} else {
@@ -1608,37 +1701,46 @@ func (s *Service) GracefulStop() {
 		}
 	}
 
-	if s._sd != nil {
-		s._sd.Disconnect()
-		s._sd = nil
-	}
+	// Copy and nil out shared fields under lock to prevent races with quit handler goroutine
+	s._mu.Lock()
+	sd := s._sd
+	s._sd = nil
+	sqsC := s._sqs
+	s._sqs = nil
+	snsC := s._sns
+	s._sns = nil
+	gs := s._grpcServer
+	s._grpcServer = nil
+	s._mu.Unlock()
 
-	if s._sqs != nil {
-		s._sqs.Disconnect()
-		s._sqs = nil
+	if sd != nil {
+		sd.Disconnect()
 	}
-
-	if s._sns != nil {
-		s._sns.Disconnect()
-		s._sns = nil
+	if sqsC != nil {
+		sqsC.Disconnect()
 	}
-
-	if s._grpcServer != nil {
-		s._grpcServer.GracefulStop()
-		s._grpcServer = nil
+	if snsC != nil {
+		snsC.Disconnect()
+	}
+	if gs != nil {
+		gs.GracefulStop()
 	}
 }
 
 // ImmediateStop will forcefully shutdown gRPC server regardless of pending actions being processed
 func (s *Service) ImmediateStop() {
-	if s._config != nil {
-		s.publishToSNS(s._config.Topics.SnsDiscoveryTopicArn, "Discovery Push Notification", s.getHostDiscoveryMessage(false), nil)
+	s._mu.RLock()
+	cfg := s._config
+	s._mu.RUnlock()
+
+	if cfg != nil {
+		s.publishToSNS(cfg.Topics.SnsDiscoveryTopicArn, "Discovery Push Notification", s.getHostDiscoveryMessage(false), nil)
 	}
 
 	s.unsubscribeSNS()
 
-	if s._config != nil {
-		_ = s.deleteServiceHealthReportFromDataStore(s._config.Instance.Id)
+	if cfg != nil {
+		_ = s.deleteServiceHealthReportFromDataStore(cfg.Instance.Id)
 	}
 
 	if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
@@ -1649,7 +1751,10 @@ func (s *Service) ImmediateStop() {
 
 	log.Println("Stopping gRPC Server (Immediate)")
 
-	if s._sd != nil {
+	s._mu.RLock()
+	hasSd := s._sd != nil
+	s._mu.RUnlock()
+	if hasSd {
 		if err := s.deregisterInstance(); err != nil {
 			log.Println("De-Register Instance Failed From ImmediateStop: " + err.Error())
 		} else {
@@ -1657,24 +1762,29 @@ func (s *Service) ImmediateStop() {
 		}
 	}
 
-	if s._sd != nil {
-		s._sd.Disconnect()
-		s._sd = nil
-	}
+	// Copy and nil out shared fields under lock to prevent races with quit handler goroutine
+	s._mu.Lock()
+	sd := s._sd
+	s._sd = nil
+	sqsC := s._sqs
+	s._sqs = nil
+	snsC := s._sns
+	s._sns = nil
+	gs := s._grpcServer
+	s._grpcServer = nil
+	s._mu.Unlock()
 
-	if s._sqs != nil {
-		s._sqs.Disconnect()
-		s._sqs = nil
+	if sd != nil {
+		sd.Disconnect()
 	}
-
-	if s._sns != nil {
-		s._sns.Disconnect()
-		s._sns = nil
+	if sqsC != nil {
+		sqsC.Disconnect()
 	}
-
-	if s._grpcServer != nil {
-		s._grpcServer.Stop()
-		s._grpcServer = nil
+	if snsC != nil {
+		snsC.Disconnect()
+	}
+	if gs != nil {
+		gs.Stop()
 	}
 }
 

@@ -33,7 +33,7 @@ import (
 var (
 	schemeMap         map[string]*manual.Resolver
 	registeredSchemes map[string]string // track which service owns a registered scheme
-	_mux              sync.Mutex        // thread-safety for accessing and modifying schemeMap
+	_mux              sync.RWMutex      // thread-safety for accessing and modifying schemeMap
 	mapsInitialized   sync.Once
 	schemePattern     = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
 )
@@ -262,6 +262,10 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		return err
 	}
 
+	if r == nil {
+		return fmt.Errorf("resolver for scheme '%s' service '%s' is nil", schemeName, svc)
+	}
+
 	r.UpdateState(resolver.State{
 		Addresses: addrs,
 	})
@@ -326,8 +330,8 @@ func getResolver(schemeName string, serviceName string) (*manual.Resolver, error
 		return nil, err
 	}
 
-	_mux.Lock()
-	defer _mux.Unlock()
+	_mux.RLock()
+	defer _mux.RUnlock()
 
 	ensureMapsInitialized()
 

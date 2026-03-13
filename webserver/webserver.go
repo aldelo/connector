@@ -35,7 +35,7 @@ import (
 	util "github.com/aldelo/common"
 	"log"
 	"strings"
-	// "sync"
+	"sync"
 	"time"
 )
 
@@ -79,6 +79,7 @@ type WebServer struct {
 	_ginwebserver *ginw.Gin
 
 	// dns info used
+	_dnsMu         sync.RWMutex
 	_dnsHostZoneId string
 	_dnsIp         string
 	_dnsUrl        string
@@ -101,8 +102,9 @@ func NewWebServer(appName string, configFileName string, customConfigPath string
 	var ge func(status int, trace string, c *gin.Context)
 	if c.Recovery.CustomRecovery {
 		ge = func(status int, trace string, c *gin.Context) {
-			// custom recovery output
-			c.String(status, trace)
+			// custom recovery output — never send stack trace to client
+			log.Printf("Recovery: status=%d trace=%s", status, trace)
+			c.String(status, "Internal Server Error")
 		}
 	}
 
@@ -228,6 +230,8 @@ func (w *WebServer) GetHostAddress() string {
 					log.Println("!!! Web Server Get Host Address Fallback to Local IP: " + e.Error() + " !!!")
 					return ip
 				} else {
+					w._dnsMu.Lock()
+					defer w._dnsMu.Unlock()
 					w._dnsHostZoneId = w._config.WebServer.Route53HostedZoneID
 					w._dnsUrl = url
 					w._dnsIp = ip
@@ -253,11 +257,20 @@ func (w *WebServer) RemoveDNSRecordset() {
 		return
 	}
 	
-	if util.LenTrim(w._dnsHostZoneId) > 0 && util.LenTrim(w._dnsIp) > 0 && util.LenTrim(w._dnsUrl) > 0 && w._dnsTtl > 0 {
+	w._dnsMu.RLock()
+	hzId := w._dnsHostZoneId
+	dnsIp := w._dnsIp
+	dnsUrl := w._dnsUrl
+	dnsTtl := w._dnsTtl
+	w._dnsMu.RUnlock()
+
+	if util.LenTrim(hzId) > 0 && util.LenTrim(dnsIp) > 0 && util.LenTrim(dnsUrl) > 0 && dnsTtl > 0 {
 		r := &route53.Route53{}
 		if e := r.Connect(); e == nil {
 			defer r.Disconnect()
-			_ = r.DeleteResourceRecordset(w._dnsHostZoneId, w._dnsUrl, w._dnsIp, w._dnsTtl, "A")
+			if err := r.DeleteResourceRecordset(hzId, dnsUrl, dnsIp, dnsTtl, "A"); err != nil {
+				log.Println("WARNING: Failed to delete Route53 DNS record: " + err.Error())
+			}
 		}
 	}
 }
@@ -324,8 +337,8 @@ func (w *WebServer) setupWebServer() error {
 		return fmt.Errorf("Setup Web Server Failed: %s", "Web Server Name is Required")
 	}
 
-	if w._ginwebserver.Port > 65535 {
-		return fmt.Errorf("Setup Web Server Failed: %s", "Web Server Port is Required")
+	if w._ginwebserver.Port == 0 || w._ginwebserver.Port > 65535 {
+		return fmt.Errorf("Setup Web Server Failed: Web Server Port is Invalid (must be 1-65535)")
 	}
 
 	// setup xray if configured
@@ -431,8 +444,10 @@ func (w *WebServer) setupWebServer() error {
 
 				if w._config.JwtAuth.SendCookie {
 					j.SendCookie = w._config.JwtAuth.SendCookie
-					j.SecureCookie = &w._config.JwtAuth.SecureCookie
-					j.CookieHTTPOnly = &w._config.JwtAuth.CookieHttpOnly
+					secureCookie := w._config.JwtAuth.SecureCookie
+					cookieHTTPOnly := w._config.JwtAuth.CookieHttpOnly
+					j.SecureCookie = &secureCookie
+					j.CookieHTTPOnly = &cookieHTTPOnly
 					j.CookieSameSite = &sameSite
 					j.CookieDomain = w._config.JwtAuth.CookieDomain
 					j.CookieName = w._config.JwtAuth.CookieName
@@ -476,7 +491,7 @@ func (w *WebServer) setupWebServer() error {
 				if w.CsrfErrorHandler != nil {
 					w.CsrfErrorHandler(c)
 				} else {
-					c.String(500, "Csrf Error")
+					c.String(403, "Csrf Error")
 				}
 			},
 		}
@@ -521,7 +536,7 @@ func (w *WebServer) setupWebServer() error {
 				if rd, ok := w.Routes[key]; ok {
 					rd.UseAuthMiddleware = d.JwtAuthSecured
 
-					if !d.CorsAllowAllOrigins {
+					if d.CorsAllowAllOrigins || len(d.CorsAllowOrigins) > 0 || len(d.CorsAllowMethods) > 0 || len(d.CorsAllowHeaders) > 0 {
 						rd.CorsMiddleware = &cors.Config{
 							AllowAllOrigins:        d.CorsAllowAllOrigins,
 							AllowOrigins:           d.CorsAllowOrigins,

@@ -91,7 +91,12 @@ func authenticate(ctx context.Context) error {
 		return status.Errorf(codes.Unauthenticated, "Auth Token Not Valid")
 	}
 
-	token := strings.TrimPrefix(a[0], "Bearer ")
+	// RFC 7235: auth scheme is case-insensitive
+	val := a[0]
+	token := val
+	if len(val) >= 7 && strings.EqualFold(val[:7], "Bearer ") {
+		token = val[7:]
+	}
 
 	validator := getTokenValidator()
 	if validator == nil {

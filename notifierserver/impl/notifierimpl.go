@@ -138,10 +138,14 @@ func (m *clientEndpointMap) Add(ep *clientEndpoint) bool {
 
 	ep.DataToSend = make(chan *pb.NotificationData, dataChannelBufferSize)
 
-	epList := m.Clients[ep.TopicArn]
+	// Normalize topic ARN to lowercase for consistent map key storage,
+	// matching the case-insensitive lookups in GetByTopicArn/RemoveByTopicArn
+	normalizedTopic := strings.ToLower(ep.TopicArn)
+	ep.TopicArn = normalizedTopic
+	epList := m.Clients[normalizedTopic]
 	epList = append(epList, ep)
 
-	m.Clients[ep.TopicArn] = epList
+	m.Clients[normalizedTopic] = epList
 
 	return true
 }
@@ -518,7 +522,8 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 		}
 	}()
 
-	if len(n.ConfigData.SubscriptionsData) == 0 {
+	subs := n.ConfigData.GetAllSubscriptionArns()
+	if len(subs) == 0 {
 		return
 	}
 
@@ -536,8 +541,8 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 
 	if util.LenTrim(topicArnToUnsubscribe) == 0 {
 		// unsubscribe all sns topics tracked in config
-		for _, v := range n.ConfigData.SubscriptionsData {
-			if v != nil && util.LenTrim(v.SubscriptionArn) > 0 {
+		for _, v := range subs {
+			if util.LenTrim(v.SubscriptionArn) > 0 {
 				_ = notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout)
 			}
 		}
@@ -545,8 +550,8 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 		n.ConfigData.RemoveSubscriptionData("")
 	} else {
 		// unsubscribe specific sns topic
-		for _, v := range n.ConfigData.SubscriptionsData {
-			if v != nil && util.LenTrim(v.SubscriptionArn) > 0 && strings.EqualFold(v.TopicArn, topicArnToUnsubscribe) {
+		for _, v := range subs {
+			if util.LenTrim(v.SubscriptionArn) > 0 && strings.EqualFold(v.TopicArn, topicArnToUnsubscribe) {
 				_ = notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout)
 			}
 		}
@@ -554,7 +559,9 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 		n.ConfigData.RemoveSubscriptionData(topicArnToUnsubscribe)
 	}
 
-	_ = n.ConfigData.Save()
+	if err := n.ConfigData.Save(); err != nil {
+		log.Printf("WARNING: Failed to save config during UnsubscribeAllPriorSNSTopics: %v", err)
+	}
 
 	log.Println("=== Notifier Server Unsubscribe All Prior SNS Topics: OK ===")
 }
@@ -697,10 +704,20 @@ func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.N
 	// FIX #1: Removed busy-wait `default` case. The select now blocks efficiently
 	//         on the two channels instead of spinning with Sleep(100ms).
 	// FIX #9: Use two-value receive to detect closed channel and break the loop.
+	// Safety-net idle timer: if no data flows for 30 minutes and gRPC keepalive
+	// hasn't cancelled the context, clean up the goroutine to prevent leaks.
+	const subscribeIdleTimeout = 30 * time.Minute
+	idleTimer := time.NewTimer(subscribeIdleTimeout)
+	defer idleTimer.Stop()
+
 	for {
 		select {
 		case <-ep.ClientContext.Done():
 			log.Println("--- RPC Subscribe Stream Send Loop for TopicArn '" + ep.TopicArn + "' with Client ID '" + ep.ClientId + "' Ended: Server Stream Context Done ---")
+			goto cleanup
+
+		case <-idleTimer.C:
+			log.Println("--- RPC Subscribe Stream Send Loop for TopicArn '" + ep.TopicArn + "' with Client ID '" + ep.ClientId + "' Ended: Idle Timeout ---")
 			goto cleanup
 
 		case data, ok := <-ep.DataToSend:
@@ -711,6 +728,15 @@ func (n *NotifierImpl) Subscribe(s *pb.NotificationSubscriber, serverStream pb.N
 			}
 
 			log.Println("$$$ RPC Subscribe Stream Send Loop for TopicArn '" + ep.TopicArn + "' to Client ID '" + ep.ClientId + "' Received Data to Send $$$")
+
+			// Reset idle timer on any channel activity
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(subscribeIdleTimeout)
 
 			if data != nil {
 				if err := serverStream.Send(data); err != nil {
@@ -756,12 +782,7 @@ func (n *NotifierImpl) Unsubscribe(c context.Context, s *pb.NotificationSubscrib
 
 	// find client endpoint for the given subscriber to unsubscribe
 	if ep := n._clients.GetByClientId(s.Id); ep != nil {
-		// FIX #7: Cancel the stored context to stop the Subscribe loop
-		if ep.cancelFunc != nil {
-			ep.cancelFunc()
-		}
-
-		// remove client endpoint from clients map
+		// remove client endpoint from clients map (RemoveByClientId calls cancelFunc internally)
 		if n._clients.RemoveByClientId(s.Id) {
 			log.Println("--- Notifier Server RPC Unsubscribe Remove Client ID '" + s.Id + "' From Client Endpoints Map: OK ---")
 		} else {
@@ -776,15 +797,13 @@ func (n *NotifierImpl) Unsubscribe(c context.Context, s *pb.NotificationSubscrib
 			// no more active clients in topic
 			removeTopic := false
 
-			for _, v := range n.ConfigData.SubscriptionsData {
-				if v != nil && strings.EqualFold(v.TopicArn, s.Topic) && util.LenTrim(v.SubscriptionArn) > 0 {
-					if err := notification.Unsubscribe(n._sns, v.SubscriptionArn, 5*time.Second); err != nil {
-						log.Printf("!!! RPC Unsubscribe SNS Topic '%s' Failed: %s !!!\n", s.Topic, err)
-					} else {
-						log.Printf("$$$ RPC Unsubscribe SNS Topic '%s' OK: (Zero Clients) $$$\n", s.Topic)
-						removeTopic = true
-					}
-					break
+			subsArn := n.ConfigData.GetSubscriptionArn(s.Topic)
+			if util.LenTrim(subsArn) > 0 {
+				if err := notification.Unsubscribe(n._sns, subsArn, 5*time.Second); err != nil {
+					log.Printf("!!! RPC Unsubscribe SNS Topic '%s' Failed: %s !!!\n", s.Topic, err)
+				} else {
+					log.Printf("$$$ RPC Unsubscribe SNS Topic '%s' OK: (Zero Clients) $$$\n", s.Topic)
+					removeTopic = true
 				}
 			}
 

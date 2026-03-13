@@ -102,7 +102,11 @@ func Subscribe(n *sns.SNS, topicArn string, protocol snsprotocol.SNSProtocol, en
 		return "", fmt.Errorf("subscribe failed: endpoint is required")
 	}
 
-	return n.Subscribe(topicArn, protocol, endPoint, nil, timeoutDuration...)
+	subArn, err := n.Subscribe(topicArn, protocol, endPoint, nil, timeoutDuration...)
+	if err != nil {
+		return "", fmt.Errorf("subscribe to topic %s: %w", topicArn, err)
+	}
+	return subArn, nil
 }
 
 // Unsubscribe will unsubscribe a subscription from sns notification system
@@ -115,7 +119,10 @@ func Unsubscribe(n *sns.SNS, subscriptionArn string, timeoutDuration ...time.Dur
 		return fmt.Errorf("unsubscribe failed: subscription ARN is required")
 	}
 
-	return n.Unsubscribe(subscriptionArn, timeoutDuration...)
+	if err := n.Unsubscribe(subscriptionArn, timeoutDuration...); err != nil {
+		return fmt.Errorf("unsubscribe %s: %w", subscriptionArn, err)
+	}
+	return nil
 }
 
 // Publish will publish a message to sns notification system for subscribers to consume

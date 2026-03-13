@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -190,9 +191,12 @@ func escapeUserInput(data string) string {
 // isValidSNSUrl validates that a URL matches the expected AWS SNS domain pattern
 // to prevent SSRF attacks via attacker-controlled SubscribeURL/UnsubscribeURL.
 // Legitimate AWS SNS URLs follow: https://sns.<region>.amazonaws.com/...
+// The regex ensures the domain ends with .amazonaws.com (no attacker subdomains).
+var snsUrlPattern = regexp.MustCompile(`^https://sns\.[a-z0-9-]+\.amazonaws\.com/`)
+var snsTopicArnPattern = regexp.MustCompile(`^arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}$`)
+
 func isValidSNSUrl(rawUrl string) bool {
-	lower := strings.ToLower(rawUrl)
-	return strings.HasPrefix(lower, "https://sns.") && strings.Contains(lower, ".amazonaws.com/")
+	return snsUrlPattern.MatchString(strings.ToLower(rawUrl))
 }
 
 // healthreporter handles client reporting to host health status of the client,
@@ -261,7 +265,7 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 	// FIX #8: Escape user-controlled HashKeyName before logging
 	escapedHashKeyName := escapeUserInput(data.HashKeyName)
 
-	hashSecret, hsFound := model.GetHashKey(data.HashKeyName)
+	hashSecret, hsFound := model.GetHashKey(strings.TrimSpace(data.HashKeyName))
 	if !hsFound || util.LenTrim(hashSecret) == 0 {
 		log.Println("!!! Inbound Health Report Hash Key Name '" + escapedHashKeyName + "' From " + escapeUserInput(c.ClientIP()) + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
 		c.String(401, "Inbound Health Report Hash Key Name Not Valid")
@@ -274,8 +278,8 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 		if !secureCompare(bufHash, data.HashSignature) {
 			log.Println("!!! Inbound Health Report Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: Hash Signature Mismatch !!!")
 			// FIX #6: Do not log hash secret in plaintext
-			log.Println("... Host = Sha256 Source: " + escapeUserInput(buf) + ", Signature: " + bufHash)
-			log.Println("... Client = Sha256 Signature: " + escapeUserInput(data.HashSignature))
+			log.Println("... Host = Sha256 Source: " + escapeUserInput(buf))
+			log.Println("... Client Sha256 Signature Mismatch")
 			c.String(401, "Inbound Health Report Hash Signature Not Valid")
 			return
 		}
@@ -334,7 +338,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	instanceId := escapeUserInput(c.Param("instanceid"))
+	instanceId := c.Param("instanceid")
 
 	if util.LenTrim(instanceId) == 0 {
 		log.Println("!!! Delete Health Report Service Record Failed: InstanceID Missing From Path !!!")
@@ -342,7 +346,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	hashKeyName := escapeUserInput(c.GetHeader("x-nts-gateway-hash-name"))
+	hashKeyName := strings.TrimSpace(escapeUserInput(c.GetHeader("x-nts-gateway-hash-name")))
 
 	if util.LenTrim(hashKeyName) == 0 {
 		log.Println("!!! Delete Health Report Service Record Failed: Hash Key Name is Missing From Header 'x-nts-gateway-hash-name' !!!")
@@ -377,8 +381,8 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		if !secureCompare(bufHash, hashKeySignature) {
 			log.Println("!!! Delete Health Report Service Record Request's Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: Hash Signature Mismatch !!!")
 			// FIX #6: Do not log hash secret in plaintext
-			log.Println("... Host = Sha256 Source: " + buf + ", Signature: " + bufHash)
-			log.Println("... Client = Sha256 Signature: " + hashKeySignature)
+			log.Println("... Host = Sha256 Source: " + escapeUserInput(buf))
+			log.Println("... Client Sha256 Signature Mismatch")
 			c.String(401, "Delete Health Report Service Record Request's Hash Signature Not Valid")
 			return
 		}
@@ -558,7 +562,12 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 			log.Println("/snsrouter 'subscriptionconfirmation' serverKey From Invoker = " + escapeUserInput(serverKey))
 
 			// wait 250ms for notifier server to update ddb with server endpoint info
-			time.Sleep(250 * time.Millisecond)
+			select {
+			case <-time.After(250 * time.Millisecond):
+			case <-c.Request.Context().Done():
+				c.String(499, "Client Disconnected")
+				return
+			}
 
 			serverEndpointUrl := ""
 
@@ -585,7 +594,12 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 					serverEndpointUrl = serverUrl
 					break
 				} else {
-					time.Sleep(250 * time.Millisecond)
+					select {
+					case <-time.After(250 * time.Millisecond):
+					case <-c.Request.Context().Done():
+						c.String(499, "Client Disconnected")
+						return
+					}
 				}
 			}
 
@@ -594,7 +608,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 			// perform confirmation action
 			if status, body, err := rest.GET(url, nil); err != nil {
 				log.Println("/snsrouter 'subscriptionconfirmation' GET Failed: " + err.Error())
-				c.String(412, "Subscription Confirm Callback Failed: %s", err.Error())
+				c.String(412, "Subscription Confirm Callback Failed")
 
 				if seg != nil && seg.Ready() {
 					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Failed: %s", err.Error()))
@@ -614,6 +628,17 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				if util.Left(buf, 12) == "arn:aws:sns:" {
 					// subscription arn received
 					log.Println("/snsrouter 'subscriptionconfirmation' GET Status 200 with SubscriptionArn '" + buf + "': " + body)
+
+					// validate TopicArn format before using in URL to prevent path traversal
+					if !snsTopicArnPattern.MatchString(confirm.TopicArn) {
+						log.Printf("/snsrouter 'subscriptionconfirmation' TopicArn has invalid format: %s", escapeUserInput(confirm.TopicArn))
+						c.String(412, "Invalid TopicArn Format")
+
+						if seg != nil && seg.Ready() {
+							_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' TopicArn has invalid format"))
+						}
+						return
+					}
 
 					serverEndpointUrl += "/snsupdate"
 					serverEndpointUrl += "/" + confirm.TopicArn
@@ -708,7 +733,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 
 	if err := c.BindJSON(notify); err != nil {
 		log.Println("/snsrouter 'notification' BindJSON Error: " + err.Error())
-		c.String(412, "Expected Notification Payload: %s", err.Error())
+		c.String(412, "Expected Notification Payload")
 
 		if seg != nil && seg.Ready() {
 			_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' BindJSON Error: %s", err.Error()))
@@ -908,6 +933,11 @@ var (
 // FIX #3: Uses time.NewTicker inside select so the stop signal is immediately honored,
 // instead of the original busy-wait select/default + time.Sleep which missed the stop signal during sleep.
 func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
+	if stopService == nil {
+		log.Println("### RunStaleHealthReportRecordsRemoverService: stopService channel is nil, service not started ###")
+		return
+	}
+
 	freq := model.GetHealthReportCleanUpFrequencySeconds()
 
 	if freq == 0 {

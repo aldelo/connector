@@ -583,13 +583,14 @@ func DiscoverApiIps(sd *cloudmap.CloudMap, serviceName string, namespaceName str
 		attributes["INSTANCE_VERSION"] = version
 	}
 
+	// ensure non-nil slice for consistent caller experience
+	ipList = []string{}
+
 	if lst, e := DiscoverInstances(sd, serviceName, namespaceName, true, attributes, limit); e != nil {
-		return []string{}, e
+		return ipList, e
 	} else {
-		if len(lst) > 0 {
-			for _, v := range lst {
-				ipList = append(ipList, fmt.Sprintf("%s:%d", v.InstanceIP, v.InstancePort))
-			}
+		for _, v := range lst {
+			ipList = append(ipList, fmt.Sprintf("%s:%d", v.InstanceIP, v.InstancePort))
 		}
 
 		return ipList, nil

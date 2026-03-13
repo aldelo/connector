@@ -96,12 +96,6 @@ func (h *HealthServer) handlerFor(service string) func(context.Context) grpc_hea
 		return fn
 	}
 
-	if service == "" {
-		if fn := h.handlers[""]; fn != nil {
-			return fn
-		}
-	}
-
 	if fn := h.handlers["*"]; fn != nil {
 		return fn
 	}
@@ -200,7 +194,11 @@ func (h *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, stream grpc
 			// instead of raw Go error which maps to codes.Unknown.
 			return status.FromContextError(ctx.Err()).Err()
 		case <-ticker.C:
-			// Send periodic heartbeat
+			// Re-check context before doing work — it may have been cancelled
+			// while we were waiting on the ticker
+			if ctx.Err() != nil {
+				return status.FromContextError(ctx.Err()).Err()
+			}
 			statusResp, err := h.Check(ctx, req)
 			if err != nil {
 				return err

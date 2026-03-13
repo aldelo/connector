@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -275,13 +276,13 @@ func (n *NotifierClient) PurgeEndpointCache() {
 
 	// FIX #1: Use the thread-safe RemoteAddress() getter instead of direct field access
 	remoteAddr := n._grpcClient.RemoteAddress()
-	buf := strings.Split(remoteAddr, ":")
 
+	// FIX: Use net.SplitHostPort instead of strings.Split to handle IPv6 addresses
 	ip := ""
 	port := uint(0)
-	if len(buf) == 2 {
-		ip = buf[0]
-		port = util.StrToUint(buf[1])
+	if host, portStr, splitErr := net.SplitHostPort(remoteAddr); splitErr == nil {
+		ip = host
+		port = util.StrToUint(portStr)
 	}
 
 	if util.LenTrim(serviceName) == 0 || len(ip) == 0 || port == 0 {
@@ -328,8 +329,10 @@ func (n *NotifierClient) Dial() error {
 	}
 
 	atomic.StoreInt32(&n._notificationServicesStarted, 0)
+	n._subMu.Lock()
 	n._subscriberID = ""
 	n._subscriberTopicArn = ""
+	n._subMu.Unlock()
 
 	if err := n._grpcClient.Dial(context.Background()); err != nil {
 		if n._grpcClient.ZLog() != nil {
@@ -436,6 +439,12 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 		Topic: topicArn,
 	})
 	if err != nil {
+		// Cancel the context and clear the stored cancel to prevent context leak
+		subCancel()
+		n._subMu.Lock()
+		n._subscribeCancel = nil
+		n._subMu.Unlock()
+
 		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 		n._grpcClient.ZLog().Errorf("!!! Notifier Client Subscribe to TopicArn Failed: " + err.Error() + " !!!")
 		err = fmt.Errorf("Notifier Client Subscribe to TopicArn Failed: %s", err.Error())
@@ -470,6 +479,14 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 			}
 
 			atomic.StoreInt32(&n._notificationServicesStarted, 0)
+			n._subMu.Lock()
+			if n._subscribeCancel != nil {
+				n._subscribeCancel()
+				n._subscribeCancel = nil
+			}
+			n._subscriberID = ""
+			n._subscriberTopicArn = ""
+			n._subMu.Unlock()
 
 			n._grpcClient.ZLog().Printf("### Notifier Client Received Context Done Signal ###")
 
@@ -553,7 +570,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 					// received host discovery notification, push out for event alert
 					if strings.ToUpper(hostDiscNotification.MsgType) == "HOST-DISCOVERY" {
-						if ipPort := strings.Split(hostDiscNotification.Host, ":"); len(ipPort) != 2 {
+						host, portStr, splitErr := net.SplitHostPort(hostDiscNotification.Host)
+						if splitErr != nil {
 							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "', Recv Loop Skips to Next Cycle !!!")
 
 							if n.ServiceAlertSkippedHandler != nil {
@@ -561,11 +579,13 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 							}
 
 							continue
-						} else {
-							ip := ipPort[0]
-							port := util.StrToUint(ipPort[1])
+						}
 
-							if ipParts := strings.Split(ip, "."); len(ipParts) != 4 || !util.IsNumericIntOnly(strings.ReplaceAll(ip, ".", "")) {
+						{
+							ip := host
+							port := util.StrToUint(portStr)
+
+							if net.ParseIP(ip) == nil {
 								n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host IP Not Valid: Received '" + ip + "', Recv Loop Skips to Next Cycle !!!")
 
 								if n.ServiceAlertSkippedHandler != nil {
@@ -656,6 +676,14 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					}
 
 					atomic.StoreInt32(&n._notificationServicesStarted, 0)
+					n._subMu.Lock()
+					if n._subscribeCancel != nil {
+						n._subscribeCancel()
+						n._subscribeCancel = nil
+					}
+					n._subscriberID = ""
+					n._subscriberTopicArn = ""
+					n._subMu.Unlock()
 					err = fmt.Errorf("Notifier Client Received EOF, Recv Loop Ending")
 					return err
 
@@ -668,6 +696,14 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					}
 
 					atomic.StoreInt32(&n._notificationServicesStarted, 0)
+					n._subMu.Lock()
+					if n._subscribeCancel != nil {
+						n._subscribeCancel()
+						n._subscribeCancel = nil
+					}
+					n._subscriberID = ""
+					n._subscriberTopicArn = ""
+					n._subMu.Unlock()
 					err = fmt.Errorf("notifier client received error: %w, recv loop ending", err)
 					return err
 
@@ -700,6 +736,7 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 	n._subMu.Lock()
 	subID := n._subscriberID
 	subTopic := n._subscriberTopicArn
+	subCancel := n._subscribeCancel
 	if util.LenTrim(subID) == 0 || util.LenTrim(subTopic) == 0 {
 		n._subscriberID = ""
 		n._subscriberTopicArn = ""
@@ -734,14 +771,28 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 		Topic: subTopic,
 	}); err != nil {
 		n._grpcClient.ZLog().Errorf("!!! Notifier Client Unsubscribe Client ID '" + subID + "' From TopicArn '" + subTopic + "' Failed: " + err.Error() + " !!!")
+		// Cancel context and clear state even on failure to prevent resource leak
+		if subCancel != nil {
+			subCancel()
+		}
+		n._subMu.Lock()
+		n._subscriberID = ""
+		n._subscriberTopicArn = ""
+		n._subscribeCancel = nil
+		n._subMu.Unlock()
 		err = fmt.Errorf("Notifier Client ID %s Unsubscribe From TopicARN %s Failed: %s", subID, subTopic, err.Error())
 		return err
 	} else {
 		// unsubscribe ok
 		n._grpcClient.ZLog().Printf("### Notifier Client Unsubscribe Client ID '" + subID + "' From TopicArn '" + subTopic + "' Success ###")
+		// FIX: Cancel the subscribe stream context to stop the Recv loop goroutine
+		if subCancel != nil {
+			subCancel()
+		}
 		n._subMu.Lock()
 		n._subscriberID = ""
 		n._subscriberTopicArn = ""
+		n._subscribeCancel = nil
 		n._subMu.Unlock()
 		return nil
 	}
