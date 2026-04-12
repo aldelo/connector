@@ -1453,7 +1453,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 	if e := c.discoverEndpoints(forceRefresh); e != nil {
 		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
-		errorf(s)
+		errorf("%s", s)
 		return 0, errors.New(s)
 	}
 
@@ -1461,7 +1461,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 	if len(eps) == 0 {
 		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) No Live Endpoints",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
-		errorf(s)
+		errorf("%s", s)
 		return 0, errors.New(s)
 	}
 
@@ -1477,13 +1477,13 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 			info += "Version=" + ep.Version + ", "
 			info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
 
-			printf("       - " + info)
+			printf("%s", "       - "+info)
 		}
 
 		if len(endpointAddrs) == 0 {
 			s := fmt.Sprintf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required",
 				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
-			errorf(s)
+			errorf("%s", s)
 			return 0, errors.New(s)
 		}
 
@@ -1564,7 +1564,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		if e := c.discoverEndpoints(false); e != nil {
 			s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s",
 				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
-			errorf(s)
+			errorf("%s", s)
 			return errors.New(s)
 		}
 		// refresh snapshot after discovery to use newly populated endpoints
@@ -1574,7 +1574,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	if len(eps) == 0 {
 		s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required",
 			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
-		errorf(s)
+		errorf("%s", s)
 		return errors.New(s)
 	}
 
@@ -1588,7 +1588,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		info += "Version=" + ep.Version + ", "
 		info += "CacheExpires=" + util.FormatDateTime(ep.CacheExpire)
 
-		printf("       - " + info)
+		printf("%s", "       - "+info)
 	}
 
 	// update load balance resolver with new endpoint addresses
@@ -2150,7 +2150,7 @@ func (c *Client) Close() {
 	if nc := c.getNotifierClient(); nc != nil { // use guarded getter to avoid races
 		if nc.NotifierClientAlertServicesStarted() {
 			if err := nc.Unsubscribe(); err != nil {
-				errorf("!!! Notifier Client Alert Services Unsubscribe Failed: " + err.Error() + " !!!")
+				errorf("%s", "!!! Notifier Client Alert Services Unsubscribe Failed: "+err.Error()+" !!!")
 			}
 		}
 
@@ -2373,7 +2373,7 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 			log.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
 		}
 		for _, v := range c.endpointsSnapshot() {
-			printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
+			printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
 		}
 		return nil
 	}
@@ -2506,9 +2506,9 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, version, forceRefresh))
 	if len(found) > 0 {
 		c.setEndpoints(found)
-		printf("Using API Discovered Cache Hosts: (Service) " + serviceName + "." + namespaceName)
+		printf("%s", "Using API Discovered Cache Hosts: (Service) "+serviceName+"."+namespaceName)
 		for _, v := range c.endpointsSnapshot() {
-			printf("   - " + v.Host + ":" + util.UintToStr(v.Port) + ", Cache Expires: " + util.FormatDateTime(v.CacheExpire))
+			printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
 		}
 		return nil
 	}

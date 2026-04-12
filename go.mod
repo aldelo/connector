@@ -2,6 +2,8 @@ module github.com/aldelo/connector
 
 go 1.24.1
 
+toolchain go1.26.2
+
 require (
 	github.com/aldelo/common v1.7.8
 	github.com/aws/aws-sdk-go v1.55.8
