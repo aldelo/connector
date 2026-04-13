@@ -288,3 +288,175 @@ func TestCloseOnClosed_ClosedChWinsRace(t *testing.T) {
 		t.Errorf("cancelFn called %d times, want 1", got)
 	}
 }
+
+// -------- CL-F4 atomic.Pointer[config] TOCTOU tests --------
+// CL-F4 replaces the plain *config field with atomic.Pointer[config] so
+// writers (readConfig success/failure paths, Dial error path) and readers
+// (RPC interceptors, SD refresh, health check) can never observe a
+// torn or mid-store value. The pre-fix bug: reader does
+//   if c._config == nil { ... } else { x := c._config.Grpc.X }
+// which is a two-load TOCTOU — a concurrent `c._config = nil` between
+// the check and the field deref nil-panics the RPC goroutine.
+//
+// These tests pin two invariants:
+//   1. getConfig() returns either a fully-initialized *config or nil
+//      — never a mid-store / torn state.
+//   2. The circuit breaker handler snapshots the result of getConfig()
+//      into a local, so a concurrent Store(nil) cannot cause a deref.
+
+// TestCL_F4_GetConfigIsRaceFree hammers Store and Load under -race and
+// asserts the detector finds no conflicts. Pre-fix, the plain-pointer
+// field would race on every parallel reader.
+func TestCL_F4_GetConfigIsRaceFree(t *testing.T) {
+	c := &Client{}
+	valid := &config{}
+	valid.Grpc.CircuitBreakerEnabled = true
+	valid.Grpc.CircuitBreakerTimeout = 1000
+
+	// Writer: alternate between valid and nil. This is the exact
+	// pattern Dial → Dial-error → retry produces under a flap.
+	stop := make(chan struct{})
+	done := make(chan struct{}, 3)
+
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				c._config.Store(valid)
+				c._config.Store(nil)
+			}
+		}
+	}()
+
+	// Two parallel readers — each must always see either nil or a
+	// fully-formed *config, never a partial/torn pointer.
+	reader := func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				cfg := c.getConfig()
+				if cfg != nil {
+					// Deref must not panic — if getConfig returned a
+					// non-nil snapshot, the pointee is immutable for
+					// the lifetime of cfg.
+					_ = cfg.Grpc.CircuitBreakerEnabled
+					_ = cfg.Grpc.CircuitBreakerTimeout
+				}
+			}
+		}
+	}
+	go reader()
+	go reader()
+
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	for i := 0; i < 3; i++ {
+		<-done
+	}
+	// If the race detector is enabled (go test -race), the mere
+	// completion of this test without a detector report proves the
+	// atomic.Pointer path is race-free.
+}
+
+// TestCL_F4_CircuitBreakerHandlerSurvivesConcurrentNilStore is the
+// closest-to-production reproducer: goroutine A flaps _config between
+// valid and nil while goroutine B drives unaryCircuitBreakerHandler.
+// Pre-fix, B's `if c._config == nil` check could pass and then
+// `c._config.Grpc.X` deref nil-panic in the same function body.
+// Post-fix, B snapshots via getConfig() and the snapshot is stable
+// for the remainder of the call.
+func TestCL_F4_CircuitBreakerHandlerSurvivesConcurrentNilStore(t *testing.T) {
+	c := &Client{}
+	// Circuit breaker DISABLED in the stored config so the handler
+	// takes the fast-path invoker call without needing a real Hystrix
+	// plugin. The important path under test is the
+	//   if cfg == nil || !cfg.Grpc.CircuitBreakerEnabled
+	// branch — that's the exact TOCTOU site.
+	valid := &config{}
+	valid.Grpc.CircuitBreakerEnabled = false
+
+	stop := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				c._config.Store(valid)
+				c._config.Store(nil)
+			}
+		}
+	}()
+
+	// Fake invoker: does nothing, returns nil. This lets us drive the
+	// interceptor body without a real grpc.ClientConn.
+	var invocations atomic.Int64
+	invoker := func(ctx context.Context, method string, req, reply interface{},
+		cc *grpc.ClientConn, opts ...grpc.CallOption) error {
+		invocations.Add(1)
+		return nil
+	}
+
+	// Run the interceptor in a tight loop. Any nil-deref panic here
+	// is a CL-F4 regression and fails the test via the deferred recover.
+	readerDone := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				readerDone <- &panicError{r: r}
+				return
+			}
+			readerDone <- nil
+		}()
+		ctx := context.Background()
+		for i := 0; i < 20000; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				// cc is unused on the fast-path branch (cfg==nil)
+				// so we can pass nil safely.
+				_ = c.unaryCircuitBreakerHandler(ctx, "/test/Method",
+					nil, nil, nil, invoker)
+			}
+		}
+	}()
+
+	// Let the race run for a slice of real time.
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	<-writerDone
+	if err := <-readerDone; err != nil {
+		t.Fatalf("CL-F4 regression: unaryCircuitBreakerHandler panicked under concurrent nil-store: %v", err)
+	}
+	if invocations.Load() == 0 {
+		t.Error("invoker never ran — test did not actually exercise the handler body")
+	}
+}
+
+// panicError wraps a recovered panic value so it can flow through a
+// channel typed as error.
+type panicError struct{ r interface{} }
+
+func (p *panicError) Error() string { return fmtPanic(p.r) }
+
+func fmtPanic(r interface{}) string {
+	if r == nil {
+		return "<nil>"
+	}
+	if s, ok := r.(string); ok {
+		return s
+	}
+	if e, ok := r.(error); ok {
+		return e.Error()
+	}
+	return "panic"
+}

@@ -267,12 +267,15 @@ func (n *NotifierClient) PurgeEndpointCache() {
 		return
 	}
 
-	if n._grpcClient == nil || n._grpcClient._config == nil {
+	// CL-F4: snapshot _config via atomic.Pointer so the nil check and
+	// field deref cannot race against a Dial error path storing nil.
+	cfg := n._grpcClient.getConfig()
+	if n._grpcClient == nil || cfg == nil {
 		ClearEndpointCache()
 		return
 	}
 
-	serviceName := strings.ToLower(n._grpcClient._config.Target.ServiceName + "." + n._grpcClient._config.Target.NamespaceName)
+	serviceName := strings.ToLower(cfg.Target.ServiceName + "." + cfg.Target.NamespaceName)
 
 	// FIX #1: Use the thread-safe RemoteAddress() getter instead of direct field access
 	remoteAddr := n._grpcClient.RemoteAddress()

@@ -391,8 +391,15 @@ type Client struct {
 	// handler to invoke after gRPC client connection has closed
 	AfterClientClose func(cli *Client)
 
-	// read or persist client config settings
-	_config *config
+	// CL-F4: read or persist client config settings via atomic.Pointer so
+	// Dial-side writes (initial readConfig on NewClient, nil on Dial error
+	// paths) are race-free against concurrent RPC-side reads
+	// (unaryCircuitBreakerHandler, health check interceptors, SD refresh,
+	// etc.). Every reader MUST snapshot via getConfig() into a local before
+	// dereferencing — a direct field read followed by a field deref is a
+	// two-load TOCTOU under the Go memory model and would nil-deref panic
+	// if a Dial error path fires between check and deref.
+	_config atomic.Pointer[config]
 
 	// service discovery object
 	_sd *cloudmap.CloudMap
@@ -596,42 +603,46 @@ func (c *Client) setCircuitBreaker(name string, cb circuitbreaker.CircuitBreaker
 
 // helper to (re)wire notifier handlers every time before dial
 func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
-	if c == nil || nc == nil || c._config == nil {
+	if c == nil || nc == nil || c.getConfig() == nil {
 		return
 	}
 
 	nc.ServiceHostOnlineHandler = func(host string, port uint) {
-		if c == nil || c.closed.Load() || c._config == nil {
+		// CL-F4: snapshot config once per handler invocation.
+		cfg := c.getConfig()
+		if c == nil || c.closed.Load() || cfg == nil {
 			return
 		}
-		cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
+		cacheExpSeconds := cfg.Target.SdEndpointCacheExpires
 		if cacheExpSeconds == 0 {
 			cacheExpSeconds = defaultCacheExpireSeconds
 		}
 
-		svcKey := strings.ToLower(c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
+		svcKey := strings.ToLower(cfg.Target.ServiceName + "." + cfg.Target.NamespaceName)
 		cacheAddServiceEndpoints(svcKey, []*serviceEndpoint{
 			{
-				SdType:      c._config.Target.ServiceDiscoveryType,
+				SdType:      cfg.Target.ServiceDiscoveryType,
 				Host:        host,
 				Port:        port,
 				InstanceId:  "",
 				ServiceId:   "",
-				Version:     c._config.Target.InstanceVersion,
+				Version:     cfg.Target.InstanceVersion,
 				CacheExpire: time.Now().Add(time.Duration(cacheExpSeconds) * time.Second),
 			},
 		})
-		c.setEndpoints(cacheGetLiveServiceEndpoints(svcKey, c._config.Target.InstanceVersion, true))
+		c.setEndpoints(cacheGetLiveServiceEndpoints(svcKey, cfg.Target.InstanceVersion, true))
 		_ = c.UpdateLoadBalanceResolver()
 	}
 
 	nc.ServiceHostOfflineHandler = func(host string, port uint) {
-		if c == nil || c.closed.Load() || c._config == nil {
+		// CL-F4: snapshot config once per handler invocation.
+		cfg := c.getConfig()
+		if c == nil || c.closed.Load() || cfg == nil {
 			return
 		}
-		svcKey := strings.ToLower(c._config.Target.ServiceName + "." + c._config.Target.NamespaceName)
+		svcKey := strings.ToLower(cfg.Target.ServiceName + "." + cfg.Target.NamespaceName)
 		cachePurgeServiceEndpointByHostAndPort(svcKey, host, port)
-		c.setEndpoints(cacheGetLiveServiceEndpoints(svcKey, c._config.Target.InstanceVersion, true))
+		c.setEndpoints(cacheGetLiveServiceEndpoints(svcKey, cfg.Target.InstanceVersion, true))
 		_ = c.UpdateLoadBalanceResolver()
 	}
 
@@ -751,34 +762,53 @@ func NewClient(appName string, configFileName string, customConfigPath string) *
 	}
 }
 
+// getConfig returns an atomic snapshot of the client's config. Every
+// reader MUST route through this helper (not direct c._config access)
+// because concurrent Dial error paths may store nil at any moment.
+// Capture the returned pointer into a local variable and dereference
+// the local — never re-read c._config inside the same logical operation
+// (CL-F4 invariant).
+func (c *Client) getConfig() *config {
+	if c == nil {
+		return nil
+	}
+	return c._config.Load()
+}
+
 // readConfig will read in config data
 func (c *Client) readConfig() error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
 
-	c._config = &config{
+	// CL-F4: build the *config locally and publish atomically. Error paths
+	// nil-store so readers see a consistent transition.
+	newCfg := &config{
 		AppName:          c.AppName,
 		ConfigFileName:   c.ConfigFileName,
 		CustomConfigPath: c.CustomConfigPath,
 	}
 
-	if err := c._config.Read(); err != nil {
-		c._config = nil
+	if err := newCfg.Read(); err != nil {
+		c._config.Store(nil)
 		return fmt.Errorf("Read Config Failed: %w", err)
 	}
 
-	if c._config.Target.InstancePort > 65535 {
-		c._config = nil
+	if newCfg.Target.InstancePort > 65535 {
+		c._config.Store(nil)
 		return fmt.Errorf("Configured Instance Port Not Valid: %s", "Tcp Port Max is 65535")
 	}
+
+	// publish the fully-initialized config BEFORE wiring the logger so
+	// that any reader racing on getConfig() sees a usable value.
+	c._config.Store(newCfg)
 
 	// setup logger
 	c.zMu.Lock()
 	c._z = &data.ZapLog{
-		DisableLogger:   !c._config.Target.ZapLogEnabled,
-		OutputToConsole: c._config.Target.ZapLogOutputConsole,
-		AppName:         c._config.AppName,
+		DisableLogger:   !newCfg.Target.ZapLogEnabled,
+		OutputToConsole: newCfg.Target.ZapLogOutputConsole,
+		AppName:         newCfg.AppName,
 	}
 	if e := c._z.Init(); e != nil {
 		c.zMu.Unlock()
@@ -786,7 +816,7 @@ func (c *Client) readConfig() error {
 	}
 	c.zMu.Unlock()
 
-	cacheDisableLogging(!c._config.Target.ZapLogEnabled)
+	cacheDisableLogging(!newCfg.Target.ZapLogEnabled)
 
 	return nil
 }
@@ -797,8 +827,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		return []grpc.DialOption{}, fmt.Errorf("Client Object Nil")
 	}
 
-	// Issue #8: Capture config reference atomically at the start to avoid nil dereference
-	cfg := c._config
+	// Issue #8 / CL-F4: snapshot config once at function entry to avoid
+	// TOCTOU between nil-check and subsequent field dereferences.
+	cfg := c.getConfig()
 	if cfg == nil {
 		return []grpc.DialOption{}, fmt.Errorf("Config Data Not Loaded")
 	}
@@ -1053,10 +1084,11 @@ func (c *Client) ZLog() *data.ZapLog {
 		disableLogger := true
 		outputConsole := true
 
-		if c._config != nil {
-			appName = c._config.AppName
-			disableLogger = !c._config.Target.ZapLogEnabled
-			outputConsole = c._config.Target.ZapLogOutputConsole
+		// CL-F4: snapshot to avoid two-load TOCTOU.
+		if cfg := c.getConfig(); cfg != nil {
+			appName = cfg.AppName
+			disableLogger = !cfg.Target.ZapLogEnabled
+			outputConsole = cfg.Target.ZapLogOutputConsole
 		}
 
 		z := &data.ZapLog{
@@ -1122,9 +1154,10 @@ func (c *Client) ConfiguredDialMinConnectTimeoutSeconds() uint {
 		return 5
 	}
 
-	if c._config != nil {
-		if c._config.Grpc.DialMinConnectTimeout > 0 {
-			return c._config.Grpc.DialMinConnectTimeout
+	// CL-F4: snapshot to avoid two-load TOCTOU.
+	if cfg := c.getConfig(); cfg != nil {
+		if cfg.Grpc.DialMinConnectTimeout > 0 {
+			return cfg.Grpc.DialMinConnectTimeout
 		}
 	}
 
@@ -1138,27 +1171,29 @@ func (c *Client) ConfiguredForClientDial() bool {
 		return false
 	}
 
-	if c._config == nil {
+	// CL-F4: snapshot to avoid two-load TOCTOU.
+	cfg := c.getConfig()
+	if cfg == nil {
 		return false
 	}
 
-	if util.LenTrim(c._config.Target.AppName) == 0 {
+	if util.LenTrim(cfg.Target.AppName) == 0 {
 		return false
 	}
 
-	if util.LenTrim(c._config.Target.ServiceDiscoveryType) == 0 {
+	if util.LenTrim(cfg.Target.ServiceDiscoveryType) == 0 {
 		return false
 	}
 
-	if util.LenTrim(c._config.Target.ServiceName) == 0 {
+	if util.LenTrim(cfg.Target.ServiceName) == 0 {
 		return false
 	}
 
-	if util.LenTrim(c._config.Target.NamespaceName) == 0 {
+	if util.LenTrim(cfg.Target.NamespaceName) == 0 {
 		return false
 	}
 
-	if util.LenTrim(c._config.Target.Region) == 0 {
+	if util.LenTrim(cfg.Target.Region) == 0 {
 		return false
 	}
 
@@ -1172,11 +1207,13 @@ func (c *Client) ConfiguredForSNSDiscoveryTopicArn() bool {
 		return false
 	}
 
-	if c._config == nil {
+	// CL-F4: snapshot to avoid two-load TOCTOU.
+	cfg := c.getConfig()
+	if cfg == nil {
 		return false
 	}
 
-	if util.LenTrim(c._config.Topics.SnsDiscoveryTopicArn) == 0 {
+	if util.LenTrim(cfg.Topics.SnsDiscoveryTopicArn) == 0 {
 		return false
 	}
 
@@ -1190,11 +1227,13 @@ func (c *Client) ConfiguredSNSDiscoveryTopicArn() string {
 		return ""
 	}
 
-	if c._config == nil {
+	// CL-F4: snapshot to avoid two-load TOCTOU.
+	cfg := c.getConfig()
+	if cfg == nil {
 		return ""
 	}
 
-	return c._config.Topics.SnsDiscoveryTopicArn
+	return cfg.Topics.SnsDiscoveryTopicArn
 }
 
 // Ready indicates client connection is ready to invoke grpc methods
@@ -1335,33 +1374,41 @@ func (c *Client) Dial(ctx context.Context) error {
 	c.setConnection(nil, "")
 
 	// read client config data in
-	if c._config == nil {
+	if c.getConfig() == nil {
 		if err := c.readConfig(); err != nil {
 			return err
 		}
 	}
 
 	if !c.ConfiguredForClientDial() {
-		c._config = nil
+		c._config.Store(nil)
 		return fmt.Errorf("%s not yet configured for gRPC client dial, please check config file", c.ConfigFileName)
 	}
 
+	// CL-F4: snapshot the config pointer ONCE for the rest of Dial. All
+	// subsequent reads dereference the local — never c._config directly —
+	// so a concurrent Dial error path storing nil cannot TOCTOU us.
+	cfg := c.getConfig()
+	if cfg == nil {
+		return fmt.Errorf("%s config went nil after dial readiness check", c.ConfigFileName)
+	}
+
 	// if rest target ca cert files defined, load self-signed ca certs so that this service may use those host resources
-	if util.LenTrim(c._config.Target.RestTargetCACertFiles) > 0 {
-		if err := rest.AppendServerCAPemFiles(strings.Split(c._config.Target.RestTargetCACertFiles, ",")...); err != nil {
+	if util.LenTrim(cfg.Target.RestTargetCACertFiles) > 0 {
+		if err := rest.AppendServerCAPemFiles(strings.Split(cfg.Target.RestTargetCACertFiles, ",")...); err != nil {
 			if z := c.ZLog(); z != nil {
-				z.Errorf("!!! Load Rest Target Self-Signed CA Cert Files '" + c._config.Target.RestTargetCACertFiles + "' Failed: " + err.Error() + " !!!")
+				z.Errorf("!!! Load Rest Target Self-Signed CA Cert Files '" + cfg.Target.RestTargetCACertFiles + "' Failed: " + err.Error() + " !!!")
 			}
 		}
 	}
 
 	if z := c.ZLog(); z != nil {
-		z.Printf("Client " + c._config.AppName + " Starting to Connect with " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + "...")
+		z.Printf("Client " + cfg.AppName + " Starting to Connect with " + cfg.Target.ServiceName + "." + cfg.Target.NamespaceName + "...")
 	}
 
 	// setup sqs and sns if configured
-	if util.LenTrim(c._config.Queues.SqsLoggerQueueUrl) > 0 {
-		sqsAdapter, e := queue.NewQueueAdapter(awsregion.GetAwsRegion(c._config.Target.Region), nil)
+	if util.LenTrim(cfg.Queues.SqsLoggerQueueUrl) > 0 {
+		sqsAdapter, e := queue.NewQueueAdapter(awsregion.GetAwsRegion(cfg.Target.Region), nil)
 		if e != nil {
 			if z := c.ZLog(); z != nil {
 				z.Errorf("Get SQS Queue Adapter Failed: %s", e.Error())
@@ -1397,11 +1444,11 @@ func (c *Client) Dial(ctx context.Context) error {
 	}
 	eps := c.endpointsSnapshot() // protect _endpoints read
 	if len(eps) == 0 {
-		return fmt.Errorf("no service endpoints discovered for %s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		return fmt.Errorf("no service endpoints discovered for %s.%s", cfg.Target.ServiceName, cfg.Target.NamespaceName)
 	}
 
 	if z := c.ZLog(); z != nil {
-		z.Printf("... Service Discovery for " + c._config.Target.ServiceName + "." + c._config.Target.NamespaceName + " Found " + strconv.Itoa(len(eps)) + " Endpoints:")
+		z.Printf("... Service Discovery for " + cfg.Target.ServiceName + "." + cfg.Target.NamespaceName + " Found " + strconv.Itoa(len(eps)) + " Endpoints:")
 	}
 
 	// get endpoint addresses
@@ -1423,15 +1470,15 @@ func (c *Client) Dial(ctx context.Context) error {
 	var target string
 	var loadBalancerPolicy string
 
-	if c._config.Target.ServiceDiscoveryType != "direct" {
+	if cfg.Target.ServiceDiscoveryType != "direct" {
 		var err error
 
 		// very important: client load balancer scheme name must be alpha and lower cased
 		//                 if scheme name is not valid, error will occur: transport error, tcp port unknown
-		schemeName, _ := util.ExtractAlpha(c._config.AppName)
+		schemeName, _ := util.ExtractAlpha(cfg.AppName)
 		schemeName = strings.ToLower("clb" + schemeName)
 
-		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(schemeName, fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName), endpointAddrs)
+		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(schemeName, fmt.Sprintf("%s.%s", cfg.Target.ServiceName, cfg.Target.NamespaceName), endpointAddrs)
 
 		if err != nil {
 			return fmt.Errorf("build client load balancer failed: %w", err)
@@ -1476,7 +1523,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			z.Printf("Dialing gRPC Service @ " + target + "...")
 		}
 
-		dialSec := c._config.Grpc.DialMinConnectTimeout
+		dialSec := cfg.Grpc.DialMinConnectTimeout
 		if dialSec == 0 {
 			dialSec = 5
 		}
@@ -1550,7 +1597,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			cleanupWeb = true
 
 			// wait for readiness first; propagate deterministic readiness failures
-			if e := c.waitForWebServerReady(ctx, time.Duration(c._config.Target.SdTimeout)*time.Second); e != nil {
+			if e := c.waitForWebServerReady(ctx, time.Duration(cfg.Target.SdTimeout)*time.Second); e != nil {
 				if z := c.ZLog(); z != nil {
 					z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
 				}
@@ -1639,7 +1686,9 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 		}
 	}
 
-	if c._config == nil {
+	// CL-F4: snapshot config once — all subsequent dereferences use cfg.
+	cfg := c.getConfig()
+	if cfg == nil {
 		return 0, fmt.Errorf("Config Data Not Loaded")
 	}
 
@@ -1653,24 +1702,24 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 
 	if !connReady || connState == connectivity.Shutdown {
 		errorf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 		return 0, fmt.Errorf("GetLiveEndpointsCount requires current client connection already established first")
 	}
 
-	if c._config.Target.ServiceDiscoveryType == "direct" {
+	if cfg.Target.ServiceDiscoveryType == "direct" {
 		count := len(c.endpointsSnapshot())
 		printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct = %d",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, count)
+			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName, count)
 		return count, nil
 	}
 
-	printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Started...", c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+	printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Started...", cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 
 	forceRefresh := len(c.endpointsSnapshot()) == 0 || updateEndpointsToLoadBalanceResolver
 
 	if e := c.discoverEndpoints(forceRefresh); e != nil {
 		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName, e.Error())
 		errorf("%s", s)
 		return 0, errors.New(s)
 	}
@@ -1678,7 +1727,7 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 	eps := c.endpointsSnapshot()
 	if len(eps) == 0 {
 		s := fmt.Sprintf("GetLiveEndpointsCount for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) No Live Endpoints",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 		errorf("%s", s)
 		return 0, errors.New(s)
 	}
@@ -1700,28 +1749,28 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 
 		if len(endpointAddrs) == 0 {
 			s := fmt.Sprintf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required",
-				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+				cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 			errorf("%s", s)
 			return 0, errors.New(s)
 		}
 
 		// update load balance resolver with new endpoint addresses
-		serviceName := fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
-		schemeName, _ := util.ExtractAlpha(c._config.AppName)
+		serviceName := fmt.Sprintf("%s.%s", cfg.Target.ServiceName, cfg.Target.NamespaceName)
+		schemeName, _ := util.ExtractAlpha(cfg.AppName)
 		schemeName = strings.ToLower("clb" + schemeName)
 
 		if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
 			errorf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s",
-				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+				cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName, e.Error())
 			return 0, e
 		}
 
 		printf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' OK",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 	}
 
 	printf("GetLiveEndpointsCount for Client %s with Service '%s.%s' OK",
-		c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 	return len(eps), nil
 }
 
@@ -1750,7 +1799,9 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		}
 	}
 
-	if c._config == nil {
+	// CL-F4: snapshot config once — all subsequent dereferences use cfg.
+	cfg := c.getConfig()
+	if cfg == nil {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
 
@@ -1764,24 +1815,24 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 
 	if !connReady || connState == connectivity.Shutdown {
 		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Requires Current Client Connection Already Established First",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 		return fmt.Errorf("UpdateLoadBalanceResolver Requires Current Client Connection Already Established First")
 	}
 
-	if c._config.Target.ServiceDiscoveryType == "direct" {
+	if cfg.Target.ServiceDiscoveryType == "direct" {
 		printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Service Discovery Type is Direct",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 		return nil
 	}
 
 	printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Started...",
-		c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 
 	eps := c.endpointsSnapshot()
 	if len(eps) == 0 {
 		if e := c.discoverEndpoints(false); e != nil {
 			s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: (Discover Endpoints From Cloudmap) %s",
-				c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+				cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName, e.Error())
 			errorf("%s", s)
 			return errors.New(s)
 		}
@@ -1791,7 +1842,7 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 
 	if len(eps) == 0 {
 		s := fmt.Sprintf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Aborted: Endpoint Addresses Required",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 		errorf("%s", s)
 		return errors.New(s)
 	}
@@ -1810,19 +1861,19 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 	}
 
 	// update load balance resolver with new endpoint addresses
-	serviceName := fmt.Sprintf("%s.%s", c._config.Target.ServiceName, c._config.Target.NamespaceName)
+	serviceName := fmt.Sprintf("%s.%s", cfg.Target.ServiceName, cfg.Target.NamespaceName)
 
-	schemeName, _ := util.ExtractAlpha(c._config.AppName)
+	schemeName, _ := util.ExtractAlpha(cfg.AppName)
 	schemeName = strings.ToLower("clb" + schemeName)
 
 	if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
 		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s",
-			c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName, e.Error())
+			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName, e.Error())
 		return e
 	}
 
 	printf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' OK",
-		c._config.AppName, c._config.Target.ServiceName, c._config.Target.NamespaceName)
+		cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName)
 	return nil
 }
 
@@ -1856,7 +1907,8 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		return fmt.Errorf("Client is closed")
 	}
 
-	if c._config == nil { // guard against nil config (prevents panic if called before Dial)
+	// CL-F4: guard against nil config (prevents panic if called before Dial)
+	if c.getConfig() == nil {
 		return fmt.Errorf("Client config not loaded; call Dial() first")
 	}
 
@@ -2116,9 +2168,10 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 	}
 
 	// default health-check target to configured service name when available
+	// CL-F4: snapshot to avoid two-load TOCTOU.
 	serviceName := ""
-	if c._config != nil && util.LenTrim(c._config.Target.ServiceName) > 0 {
-		serviceName = c._config.Target.ServiceName
+	if cfg := c.getConfig(); cfg != nil && util.LenTrim(cfg.Target.ServiceName) > 0 {
+		serviceName = cfg.Target.ServiceName
 	}
 
 	timeout := 5 * time.Second
@@ -2485,8 +2538,9 @@ func (c *Client) connectSd() error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
-	// guard against missing config to avoid nil deref when connectSd is called directly.
-	if c._config == nil {
+	// CL-F4: snapshot config — guard against missing config to avoid nil deref when connectSd is called directly.
+	cfg := c.getConfig()
+	if cfg == nil {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
 
@@ -2500,13 +2554,13 @@ func (c *Client) connectSd() error {
 	}
 
 	// skip CloudMap wiring when using direct discovery to avoid unnecessary AWS dependency
-	if strings.EqualFold(c._config.Target.ServiceDiscoveryType, "direct") {
+	if strings.EqualFold(cfg.Target.ServiceDiscoveryType, "direct") {
 		return nil
 	}
 
-	if util.LenTrim(c._config.Target.NamespaceName) > 0 && util.LenTrim(c._config.Target.ServiceName) > 0 && util.LenTrim(c._config.Target.Region) > 0 {
+	if util.LenTrim(cfg.Target.NamespaceName) > 0 && util.LenTrim(cfg.Target.ServiceName) > 0 && util.LenTrim(cfg.Target.Region) > 0 {
 		cm := &cloudmap.CloudMap{
-			AwsRegion: awsregion.GetAwsRegion(c._config.Target.Region),
+			AwsRegion: awsregion.GetAwsRegion(cfg.Target.Region),
 		}
 		if err := cm.Connect(); err != nil {
 			return fmt.Errorf("Connect SD Failed: %w", err)
@@ -2525,11 +2579,13 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 		return fmt.Errorf("Client Object Nil")
 	}
 
-	if c._config == nil {
+	// CL-F4: snapshot config once.
+	cfg := c.getConfig()
+	if cfg == nil {
 		return fmt.Errorf("Config Data Not Loaded")
 	}
 
-	cacheExpSeconds := c._config.Target.SdEndpointCacheExpires
+	cacheExpSeconds := cfg.Target.SdEndpointCacheExpires
 	if cacheExpSeconds == 0 {
 		cacheExpSeconds = defaultCacheExpireSeconds
 	}
@@ -2537,19 +2593,19 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 	cacheExpires := time.Now().Add(time.Duration(cacheExpSeconds) * time.Second)
 
 	var err error
-	switch c._config.Target.ServiceDiscoveryType {
+	switch cfg.Target.ServiceDiscoveryType {
 	case "direct":
-		err = c.setDirectConnectEndpoint(cacheExpires, c._config.Target.DirectConnectIpPort)
+		err = c.setDirectConnectEndpoint(cacheExpires, cfg.Target.DirectConnectIpPort)
 	case "srv":
 		fallthrough
 	case "a":
-		err = c.setDnsDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceDiscoveryType == "srv", c._config.Target.ServiceName,
-			c._config.Target.NamespaceName, c._config.Target.InstancePort, forceRefresh)
+		err = c.setDnsDiscoveredIpPorts(cacheExpires, cfg.Target.ServiceDiscoveryType == "srv", cfg.Target.ServiceName,
+			cfg.Target.NamespaceName, cfg.Target.InstancePort, forceRefresh)
 	case "api":
-		err = c.setApiDiscoveredIpPorts(cacheExpires, c._config.Target.ServiceName, c._config.Target.NamespaceName, c._config.Target.InstanceVersion,
-			int64(c._config.Target.SdInstanceMaxResult), c._config.Target.SdTimeout, forceRefresh)
+		err = c.setApiDiscoveredIpPorts(cacheExpires, cfg.Target.ServiceName, cfg.Target.NamespaceName, cfg.Target.InstanceVersion,
+			int64(cfg.Target.SdInstanceMaxResult), cfg.Target.SdTimeout, forceRefresh)
 	default:
-		err = fmt.Errorf("unexpected service discovery type: %s", c._config.Target.ServiceDiscoveryType)
+		err = fmt.Errorf("unexpected service discovery type: %s", cfg.Target.ServiceDiscoveryType)
 	}
 
 	if err != nil {
@@ -2925,8 +2981,10 @@ func (c *Client) updateHealth(p *serviceEndpoint, healthy bool) error {
 	c.connMu.RLock()
 	sd := c._sd
 	c.connMu.RUnlock()
+	// CL-F4: snapshot _config via atomic.Pointer before nil-check.
+	cfg := c.getConfig()
 
-	if sd != nil && c._config != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
+	if sd != nil && cfg != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
 		return registry.UpdateHealthStatus(sd, p.InstanceId, p.ServiceId, healthy)
 	} else {
 		return nil
@@ -2954,11 +3012,11 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		}
 	}
 
-	// Snapshot _sd and _config under connMu to prevent race with Close()/connectSd()
+	// Snapshot _sd under connMu; snapshot _config via atomic.Pointer (CL-F4).
 	c.connMu.RLock()
 	sd := c._sd
 	c.connMu.RUnlock()
-	cfg := c._config
+	cfg := c.getConfig()
 
 	if sd != nil && cfg != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
 		logprintf("De-Register Instance '%s:%s-%s' Begin...", p.Host, util.UintToStr(p.Port), p.InstanceId)
@@ -3013,8 +3071,14 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 		return status.Error(codes.Unavailable, "client is closed")
 	}
 
-	// guard against nil _config
-	if c._config == nil || !c._config.Grpc.CircuitBreakerEnabled {
+	// CL-F4: snapshot _config into a local to eliminate TOCTOU between
+	// the nil check and the Grpc.* field dereferences below. A direct
+	// two-load (check then deref) against the shared atomic.Pointer
+	// would nil-deref panic if a Dial error path stores nil between
+	// the two reads. Every read in this function must use cfg, not
+	// c._config, and never re-load mid-operation.
+	cfg := c.getConfig()
+	if cfg == nil || !cfg.Grpc.CircuitBreakerEnabled {
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
 
@@ -3057,11 +3121,11 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 
 		var e error
 		if cb, e = plugins.NewHystrixGoPlugin(method,
-			int(c._config.Grpc.CircuitBreakerTimeout),
-			int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
-			int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
-			int(c._config.Grpc.CircuitBreakerSleepWindow),
-			int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
+			int(cfg.Grpc.CircuitBreakerTimeout),
+			int(cfg.Grpc.CircuitBreakerMaxConcurrentRequests),
+			int(cfg.Grpc.CircuitBreakerRequestVolumeThreshold),
+			int(cfg.Grpc.CircuitBreakerSleepWindow),
+			int(cfg.Grpc.CircuitBreakerErrorPercentThreshold),
 			z); e != nil {
 			if z := c.ZLog(); z != nil {
 				z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
@@ -3121,8 +3185,10 @@ func (c *Client) streamCircuitBreakerHandler(
 		return nil, status.Error(codes.Unavailable, "client is closed")
 	}
 
-	// guard against nil _config to avoid panic
-	if c._config == nil || !c._config.Grpc.CircuitBreakerEnabled {
+	// CL-F4: snapshot _config into a local to eliminate TOCTOU. See the
+	// matching comment in unaryCircuitBreakerHandler for rationale.
+	cfg := c.getConfig()
+	if cfg == nil || !cfg.Grpc.CircuitBreakerEnabled {
 		return streamer(ctx, desc, cc, method, opts...)
 	}
 
@@ -3165,11 +3231,11 @@ func (c *Client) streamCircuitBreakerHandler(
 
 		var e error
 		cb, e = plugins.NewHystrixGoPlugin(method,
-			int(c._config.Grpc.CircuitBreakerTimeout),
-			int(c._config.Grpc.CircuitBreakerMaxConcurrentRequests),
-			int(c._config.Grpc.CircuitBreakerRequestVolumeThreshold),
-			int(c._config.Grpc.CircuitBreakerSleepWindow),
-			int(c._config.Grpc.CircuitBreakerErrorPercentThreshold),
+			int(cfg.Grpc.CircuitBreakerTimeout),
+			int(cfg.Grpc.CircuitBreakerMaxConcurrentRequests),
+			int(cfg.Grpc.CircuitBreakerRequestVolumeThreshold),
+			int(cfg.Grpc.CircuitBreakerSleepWindow),
+			int(cfg.Grpc.CircuitBreakerErrorPercentThreshold),
 			z)
 
 		if e != nil {
