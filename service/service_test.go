@@ -310,18 +310,15 @@ type Dummy struct {
 	LastName  string
 }
 
-// TestSliceDeleteFunc exercises common.SliceDeleteElement -- but the
-// canonical contract tests for that helper now live in
-// aldelo/common/helper-other_test.go (TestSliceDeleteElement_*). Until
-// connector picks up a common version that contains the P0-13 fix
-// (the "settable copy via reflect.New(t).Elem()" patch), running this
-// against common@v1.7.9 panics inside reflect.Value.Set -- which kills
-// the test binary and masks every test that runs after it. Skip here
-// unblocks the rest of the service test suite; the upstream coverage
-// in common already validates the fix once a fresh tag is published.
+// TestSliceDeleteFunc exercises common.SliceDeleteElement against the
+// connector's typical pointer-slice usage pattern. The canonical contract
+// tests for the helper itself live in aldelo/common/helper-other_test.go
+// (TestSliceDeleteElement_*) added in common P0-13 / v1.7.10. This test
+// stays here as a smoke check that connector's go.mod pin is on a common
+// version that includes the P0-13 fix — if connector's pin ever regresses
+// below v1.7.10, this test will panic inside reflect.Value.Set just like
+// it did before the fix.
 func TestSliceDeleteFunc(t *testing.T) {
-	t.Skip("skipping: covered by aldelo/common helper-other_test.go (TestSliceDeleteElement_*); pending common patch release")
-
 	slice := []*Dummy{
 		{FirstName: "John", LastName: "Smith"},
 		{FirstName: "Mike", LastName: "Smith"},
@@ -330,7 +327,13 @@ func TestSliceDeleteFunc(t *testing.T) {
 
 	resultSlice := util.SliceDeleteElement(slice, -1)
 
-	newSlice := resultSlice.([]*Dummy)
+	newSlice, ok := resultSlice.([]*Dummy)
+	if !ok {
+		t.Fatalf("expected []*Dummy result, got %T", resultSlice)
+	}
+	if len(newSlice) != 2 {
+		t.Fatalf("expected len 2 after deleting index -1 from length-3 slice, got %d", len(newSlice))
+	}
 
 	for _, v := range newSlice {
 		t.Log(v)
