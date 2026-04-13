@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -199,7 +200,13 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 		if closeDelay <= 0 {
 			closeDelay = connectionCloseDelay
 		}
-		go func(oldConn *grpc.ClientConn, logger *data.ZapLog, d time.Duration) {
+		// CL-F5: wrap in safeGo so a panic in grpc.ClientConn.Close
+		// (e.g., from a race with a pending in-flight RPC, or a
+		// buggy resolver) cannot tear down the whole process.
+		oldConn := old
+		logger := c.ZLog()
+		d := closeDelay
+		safeGo("close-old-conn", func() {
 			time.Sleep(d) // Allow in-flight RPCs to complete
 			if err := oldConn.Close(); err != nil {
 				if logger != nil {
@@ -208,7 +215,7 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 					log.Printf("Failed to close old connection: %v", err)
 				}
 			}
-		}(old, c.ZLog(), closeDelay)
+		})
 	}
 }
 
@@ -681,7 +688,10 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 		// every notifier-enabled client in the fleet. Replaced with a
 		// persistent closedCh fed into the select so Close() wakes the
 		// goroutine immediately and no polling is needed.
-		go func() {
+		// CL-F5: wrapped in safeGo so a panic in
+		// DoNotifierAlertService → Subscribe → user-supplied
+		// ServiceHostOnlineHandler does NOT tear down the process.
+		safeGo("notifier-reconnect-loop", func() {
 			defer c.notifierReconnectActive.Store(false)
 
 			ticker := time.NewTicker(defaultNotifierReconnectDelay)
@@ -727,7 +737,7 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 				}
 				return
 			}
-		}()
+		})
 	}
 }
 
@@ -773,6 +783,60 @@ func (c *Client) getConfig() *config {
 		return nil
 	}
 	return c._config.Load()
+}
+
+// safeGo runs fn in a new goroutine with panic recovery. If fn panics,
+// the value and full stack trace are logged and the goroutine exits
+// cleanly — the process keeps running.
+//
+// Fix: CL-F5 (deep-review-2026-04-13-contrarian). Mirror of the
+// server-side safeGo in service.go (SVC-F6). Pre-fix, every
+// goroutine spawned from client.go / notifierclient.go — the
+// notifier reconnect loop, the async close-old-conn goroutine, the
+// webserver errCh observer — ran without any panic guard. Any panic
+// in one of them (including panics in user callbacks invoked
+// transitively via Subscribe → ServiceHostOnlineHandler) would
+// tear down the whole process. grpc_recovery covers only RPC
+// handler invocations, not goroutines the client package launches
+// itself.
+//
+// Use safeGo for every client-package-internal goroutine spawn.
+func safeGo(name string, fn func()) {
+	if fn == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("!!! client.safeGo panic recovered in %q: %v\n%s !!!", name, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
+
+// safeCall invokes a user-provided callback (notifier handler,
+// lifecycle hook, etc.) with panic recovery. If fn panics, the
+// value and full stack trace are logged and control returns
+// normally — the caller goroutine survives.
+//
+// Fix: CL-F5 (deep-review-2026-04-13-contrarian). Wrap every
+// invocation of a user-supplied func field so a buggy consumer
+// cannot crash the reconnect goroutine, the Close path, or an
+// in-flight notification. Use this for BeforeClientDial /
+// AfterClientDial / BeforeClientClose / AfterClientClose and for
+// ServiceHostOnlineHandler / ServiceHostOfflineHandler /
+// ServiceAlertSkippedHandler / ServiceAlertStoppedHandler.
+func safeCall(name string, fn func()) {
+	if fn == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("!!! client.safeCall panic recovered in %q: %v\n%s !!!", name, r, debug.Stack())
+		}
+	}()
+	fn()
 }
 
 // readConfig will read in config data
@@ -1497,7 +1561,8 @@ func (c *Client) Dial(ctx context.Context) error {
 				z.Printf("Before gRPC Client Dial Begin...")
 			}
 
-			c.BeforeClientDial(c)
+			// CL-F5: invoke user callback with panic recovery.
+			safeCall("BeforeClientDial", func() { c.BeforeClientDial(c) })
 
 			if z := c.ZLog(); z != nil {
 				z.Printf("... Before gRPC Client Dial End")
@@ -1511,7 +1576,8 @@ func (c *Client) Dial(ctx context.Context) error {
 					z.Printf("After gRPC Client Dial Begin...")
 				}
 
-				c.AfterClientDial(c)
+				// CL-F5: invoke user callback with panic recovery.
+				safeCall("AfterClientDial", func() { c.AfterClientDial(c) })
 
 				if z := c.ZLog(); z != nil {
 					z.Printf("... After gRPC Client Dial End")
@@ -1623,7 +1689,9 @@ func (c *Client) Dial(ctx context.Context) error {
 
 			// keep observing the server goroutine so late startup failures are not silent
 			if !consumed {
-				go func() {
+				// CL-F5: safeGo so a panic on late errCh delivery does
+				// not crash the process.
+				safeGo("webserver-errch-observer", func() {
 					if webErr := <-serveErrCh; webErr != nil {
 						if z := c.ZLog(); z != nil {
 							z.Errorf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
@@ -1631,7 +1699,7 @@ func (c *Client) Dial(ctx context.Context) error {
 							log.Printf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
 						}
 					}
-				}()
+				})
 			}
 
 			if z := c.ZLog(); z != nil {
@@ -2430,7 +2498,8 @@ func (c *Client) Close() {
 
 	if c.BeforeClientClose != nil {
 		printf("Before gRPC Client Close Begin...")
-		c.BeforeClientClose(c)
+		// CL-F5: invoke user callback with panic recovery.
+		safeCall("BeforeClientClose", func() { c.BeforeClientClose(c) })
 		printf("... Before gRPC Client Close End")
 	}
 
@@ -2448,7 +2517,8 @@ func (c *Client) Close() {
 	defer func() {
 		if c.AfterClientClose != nil {
 			printf("After gRPC Client Close Begin...")
-			c.AfterClientClose(c)
+			// CL-F5: invoke user callback with panic recovery.
+			safeCall("AfterClientClose", func() { c.AfterClientClose(c) })
 			printf("... After gRPC Client Close End")
 		}
 	}()

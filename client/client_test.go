@@ -442,6 +442,135 @@ func TestCL_F4_CircuitBreakerHandlerSurvivesConcurrentNilStore(t *testing.T) {
 	}
 }
 
+// -------- CL-F5 safeGo / safeCall panic-recovery tests --------
+// CL-F5 adds safeGo + safeCall helpers so a panic in a buggy user
+// callback (ServiceHostOnlineHandler, BeforeClientClose, etc.) or a
+// client-internal background goroutine cannot propagate up and crash
+// the process. grpc_recovery covers only RPC handler invocations, not
+// package-internal goroutines or lifecycle hook invocations.
+//
+// Invariants pinned by these tests:
+//  1. safeGo runs fn on a new goroutine, recovers any panic, logs it,
+//     and returns without crashing the parent.
+//  2. safeCall invokes fn synchronously, recovers any panic, and
+//     returns normally so the calling goroutine survives.
+//  3. Both helpers are no-ops when fn is nil (defensive guard).
+//  4. Panic in a user-supplied notifier alert handler dispatched via
+//     callAlertSkipped / callAlertStopped does not escape.
+
+func TestCL_F5_SafeGoRecoversPanic(t *testing.T) {
+	done := make(chan struct{})
+	safeGo("test-panic", func() {
+		defer close(done)
+		panic("boom")
+	})
+	select {
+	case <-done:
+		// good: goroutine ran, panicked, recovered, deferred close fired
+	case <-time.After(2 * time.Second):
+		t.Fatal("safeGo goroutine did not complete within 2s — panic may have escaped")
+	}
+}
+
+func TestCL_F5_SafeGoNilFnIsNoop(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("safeGo(nil) panicked: %v", r)
+		}
+	}()
+	safeGo("test-nil", nil) // must not panic, must not spawn a goroutine
+	// Give any stray goroutine a chance to crash if it existed.
+	time.Sleep(20 * time.Millisecond)
+}
+
+func TestCL_F5_SafeCallRecoversPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("safeCall let panic escape: %v", r)
+		}
+	}()
+	safeCall("test-panic", func() {
+		panic("kaboom")
+	})
+	// If we reach here, recovery worked and the caller survived.
+}
+
+func TestCL_F5_SafeCallNilFnIsNoop(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("safeCall(nil) panicked: %v", r)
+		}
+	}()
+	safeCall("test-nil", nil) // must be a silent no-op
+}
+
+// TestCL_F5_CallAlertSkippedSurvivesPanicHandler is the closest-to-
+// production reproducer: install a panicking ServiceAlertSkippedHandler
+// on a NotifierClient, call callAlertSkipped, and confirm the caller
+// goroutine survives. Pre-fix, the same raw invocation in the Subscribe
+// loop would have crashed the reconnect goroutine and the process.
+func TestCL_F5_CallAlertSkippedSurvivesPanicHandler(t *testing.T) {
+	nc := &NotifierClient{}
+	var called atomic.Int32
+	nc.ServiceAlertSkippedHandler = func(reason string) {
+		called.Add(1)
+		panic("user-handler panic: " + reason)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("callAlertSkipped let panic escape: %v", r)
+		}
+	}()
+	nc.callAlertSkipped("test reason")
+
+	if called.Load() != 1 {
+		t.Errorf("handler called %d times, want 1", called.Load())
+	}
+}
+
+func TestCL_F5_CallAlertStoppedSurvivesPanicHandler(t *testing.T) {
+	nc := &NotifierClient{}
+	var called atomic.Int32
+	nc.ServiceAlertStoppedHandler = func(reason string) {
+		called.Add(1)
+		panic("user-handler panic: " + reason)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("callAlertStopped let panic escape: %v", r)
+		}
+	}()
+	nc.callAlertStopped("test reason")
+
+	if called.Load() != 1 {
+		t.Errorf("handler called %d times, want 1", called.Load())
+	}
+}
+
+// Nil-receiver guards on the helper methods must not panic either —
+// callers in the Subscribe loop rely on this for defensive dispatch.
+func TestCL_F5_CallAlertSkipped_NilReceiverNoop(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("callAlertSkipped nil receiver panicked: %v", r)
+		}
+	}()
+	var nc *NotifierClient
+	nc.callAlertSkipped("should be swallowed")
+}
+
+func TestCL_F5_CallAlertStopped_NilReceiverNoop(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("callAlertStopped nil receiver panicked: %v", r)
+		}
+	}()
+	var nc *NotifierClient
+	nc.callAlertStopped("should be swallowed")
+}
+
 // panicError wraps a recovered panic value so it can flow through a
 // channel typed as error.
 type panicError struct{ r interface{} }

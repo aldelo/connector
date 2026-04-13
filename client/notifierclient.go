@@ -297,6 +297,26 @@ func (n *NotifierClient) PurgeEndpointCache() {
 	}
 }
 
+// callAlertSkipped invokes ServiceAlertSkippedHandler with panic recovery (CL-F5).
+// User-supplied handler panics must not propagate up through Subscribe →
+// DoNotifierAlertService → reconnect goroutine and crash the process.
+func (n *NotifierClient) callAlertSkipped(reason string) {
+	if n == nil || n.ServiceAlertSkippedHandler == nil {
+		return
+	}
+	safeCall("ServiceAlertSkippedHandler", func() { n.ServiceAlertSkippedHandler(reason) })
+}
+
+// callAlertStopped invokes ServiceAlertStoppedHandler with panic recovery (CL-F5).
+// User-supplied handler panics must not propagate up through Subscribe →
+// DoNotifierAlertService → reconnect goroutine and crash the process.
+func (n *NotifierClient) callAlertStopped(reason string) {
+	if n == nil || n.ServiceAlertStoppedHandler == nil {
+		return
+	}
+	safeCall("ServiceAlertStoppedHandler", func() { n.ServiceAlertStoppedHandler(reason) })
+}
+
 // Dial will connect the notifier client to the notifier server
 func (n *NotifierClient) Dial() error {
 	if n == nil {
@@ -464,8 +484,9 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 		return err
 	}
 
+	// CL-F5: panic-safe dispatch to user callback.
 	if n.ServiceAlertStartedHandler != nil {
-		n.ServiceAlertStartedHandler()
+		safeCall("ServiceAlertStartedHandler", n.ServiceAlertStartedHandler)
 	}
 
 	n._grpcClient.ZLog().Printf("+++ Notifier Client Subscribe TopicArn Success +++")
@@ -487,9 +508,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 	for {
 		select {
 		case <-ctxDone.Done():
-			if n.ServiceAlertStoppedHandler != nil {
-				n.ServiceAlertStoppedHandler("Notification Alert Services Stopped")
-			}
+			// CL-F5: panic-safe dispatch to user callback.
+			n.callAlertStopped("Notification Alert Services Stopped")
 
 			atomic.StoreInt32(&n._notificationServicesStarted, 0)
 			n._subMu.Lock()
@@ -523,9 +543,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					if data.Topic != topicArn {
 						n._grpcClient.ZLog().Printf("!!! Notifier Client Received Notification Data's TopicArn Mismatch: Received " + data.Topic + ", Expected " + topicArn + ", Recv Loop Skips to Next Cycle !!!")
 
-						if n.ServiceAlertSkippedHandler != nil {
-							n.ServiceAlertSkippedHandler("Received Topic " + data.Topic + ", Expected Topic " + topicArn)
-						}
+						// CL-F5: panic-safe dispatch to user callback.
+						n.callAlertSkipped("Received Topic " + data.Topic + ", Expected Topic " + topicArn)
 
 						continue
 					}
@@ -533,9 +552,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					if util.LenTrim(data.Message) == 0 {
 						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data's Message is Blank, Recv Loop Skips to Next Cycle !!!")
 
-						if n.ServiceAlertSkippedHandler != nil {
-							n.ServiceAlertSkippedHandler("Notification Message is Blank")
-						}
+						// CL-F5: panic-safe dispatch to user callback.
+						n.callAlertSkipped("Notification Message is Blank")
 
 						continue
 					}
@@ -547,9 +565,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					if parseErr != nil {
 						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Parser Not Valid: " + parseErr.Error() + "， Recv Loop Skips to Next Cycle !!!")
 
-						if n.ServiceAlertSkippedHandler != nil {
-							n.ServiceAlertSkippedHandler("Notification Timestamp Parse Error: " + parseErr.Error())
-						}
+						// CL-F5: panic-safe dispatch to user callback.
+						n.callAlertSkipped("Notification Timestamp Parse Error: " + parseErr.Error())
 
 						continue
 					}
@@ -559,9 +576,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					if util.AbsDuration(t2.Sub(t1)).Minutes() > 15 {
 						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Exceeded 15 Minute Limit: Message Timestamp " + util.FormatDateTime(t1) + ", Current Timestamp " + util.FormatDateTime(t2) + ", Recv Loop Skips to Next Cycle !!!")
 
-						if n.ServiceAlertSkippedHandler != nil {
-							n.ServiceAlertSkippedHandler("Notification Expired (Exceeded 15 Minutes): Received " + util.FormatDateTime(t1) + ", Current " + util.FormatDateTime(t2))
-						}
+						// CL-F5: panic-safe dispatch to user callback.
+						n.callAlertSkipped("Notification Expired (Exceeded 15 Minutes): Received " + util.FormatDateTime(t1) + ", Current " + util.FormatDateTime(t2))
 
 						continue
 					}
@@ -574,9 +590,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					if unmarshalErr != nil {
 						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Unmarshal Json Failed: " + unmarshalErr.Error() + ", Recv Loop Skips to Next Cycle !!!")
 
-						if n.ServiceAlertSkippedHandler != nil {
-							n.ServiceAlertSkippedHandler("Notification Message Unmarshal Failed: " + unmarshalErr.Error())
-						}
+						// CL-F5: panic-safe dispatch to user callback.
+						n.callAlertSkipped("Notification Message Unmarshal Failed: " + unmarshalErr.Error())
 
 						continue
 					}
@@ -587,9 +602,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 						if splitErr != nil {
 							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "', Recv Loop Skips to Next Cycle !!!")
 
-							if n.ServiceAlertSkippedHandler != nil {
-								n.ServiceAlertSkippedHandler("Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "'")
-							}
+							// CL-F5: panic-safe dispatch to user callback.
+							n.callAlertSkipped("Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "'")
 
 							continue
 						}
@@ -601,9 +615,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 							if net.ParseIP(ip) == nil {
 								n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host IP Not Valid: Received '" + ip + "', Recv Loop Skips to Next Cycle !!!")
 
-								if n.ServiceAlertSkippedHandler != nil {
-									n.ServiceAlertSkippedHandler("Notification Host IP Not Valid: Received '" + ip + "'")
-								}
+								// CL-F5: panic-safe dispatch to user callback.
+								n.callAlertSkipped("Notification Host IP Not Valid: Received '" + ip + "'")
 
 								continue
 							}
@@ -611,9 +624,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 							if port == 0 || port > 65535 {
 								n._grpcClient.ZLog().Warnf("!!! Notification Client Received Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "', Recv Loop Skips to Next Cycle !!!")
 
-								if n.ServiceAlertSkippedHandler != nil {
-									n.ServiceAlertSkippedHandler("Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "'")
-								}
+								// CL-F5: panic-safe dispatch to user callback.
+								n.callAlertSkipped("Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "'")
 
 								continue
 							}
@@ -649,13 +661,17 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 							isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
 
 							// notify the discovered host
+							// CL-F5: wrap in safeCall so a panic in a
+							// user-supplied handler does not propagate
+							// back up through Subscribe into the
+							// reconnect goroutine and crash the process.
 							if isOnline {
 								if n.ServiceHostOnlineHandler != nil {
-									n.ServiceHostOnlineHandler(ip, port)
+									safeCall("ServiceHostOnlineHandler", func() { n.ServiceHostOnlineHandler(ip, port) })
 								}
 							} else {
 								if n.ServiceHostOfflineHandler != nil {
-									n.ServiceHostOfflineHandler(ip, port)
+									safeCall("ServiceHostOfflineHandler", func() { n.ServiceHostOfflineHandler(ip, port) })
 								}
 							}
 
@@ -664,9 +680,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					} else {
 						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Message Type Not Expected: Received '" + hostDiscNotification.MsgType + "', Expected 'host-discovery', Recv Loop Skips to Next Cycle !!!")
 
-						if n.ServiceAlertSkippedHandler != nil {
-							n.ServiceAlertSkippedHandler("Notification Message Type Not Expected: 'Received " + hostDiscNotification.MsgType + "', Expected 'host-discovery'")
-						}
+						// CL-F5: panic-safe dispatch to user callback.
+						n.callAlertSkipped("Notification Message Type Not Expected: 'Received " + hostDiscNotification.MsgType + "', Expected 'host-discovery'")
 
 						continue
 					}
@@ -674,9 +689,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					// notify nil data received
 					n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data is Nil, Recv Loop Skips to Next Cycle !!!")
 
-					if n.ServiceAlertSkippedHandler != nil {
-						n.ServiceAlertSkippedHandler("Notification Data Nil")
-					}
+					// CL-F5: panic-safe dispatch to user callback.
+					n.callAlertSkipped("Notification Data Nil")
 
 					continue
 				}
@@ -685,9 +699,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 				if err == io.EOF {
 					n._grpcClient.ZLog().Printf("!!! Notifier Client Stream Receive Action Encountered EOF, Recv Loop Ending !!!")
 
-					if n.ServiceAlertStoppedHandler != nil {
-						n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Notifier Server Stream EOF")
-					}
+					// CL-F5: panic-safe dispatch to user callback.
+					n.callAlertStopped("Alert Service Stopped Due To Notifier Server Stream EOF")
 
 					atomic.StoreInt32(&n._notificationServicesStarted, 0)
 					n._subMu.Lock()
@@ -705,9 +718,8 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 					// other error, continue
 					n._grpcClient.ZLog().Errorf("!!! Notifier Client Stream Receive Action Encountered Error: " + err.Error() + ", Recv Loop Ending !!!")
 
-					if n.ServiceAlertStoppedHandler != nil {
-						n.ServiceAlertStoppedHandler("Alert Service Stopped Due To Notifier Server Stream Error: " + err.Error())
-					}
+					// CL-F5: panic-safe dispatch to user callback.
+					n.callAlertStopped("Alert Service Stopped Due To Notifier Server Stream Error: " + err.Error())
 
 					atomic.StoreInt32(&n._notificationServicesStarted, 0)
 					n._subMu.Lock()
