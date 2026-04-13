@@ -362,6 +362,17 @@ type Client struct {
 	closed  atomic.Bool
 	closing atomic.Bool
 
+	// P1-5: closedCh is closed when the client transitions from open to
+	// closed. Long-lived select loops (reconnect, health-check retry)
+	// use this channel so they wake *immediately* on Close() rather
+	// than polling c.closed.Load() or evaluating an IIFE once per
+	// select entry (which suffers a TOCTOU gap between evaluation and
+	// the timer firing). Guarded by closedChMu because Dial() can
+	// re-allocate a fresh channel when the client is re-dialed after
+	// a previous Close.
+	closedChMu sync.Mutex
+	closedCh   chan struct{}
+
 	// guard to avoid spawning overlapping notifier reconnect loops
 	notifierReconnectActive atomic.Bool
 	notifierStartMu         sync.Mutex
@@ -375,6 +386,51 @@ type Client struct {
 	webServerStop    chan struct{}  // signal channel to stop web server
 	webServerMu      sync.Mutex
 	_origWebCleanUp  func()        // FIX #33: original user-provided cleanup, prevents closure accumulation
+}
+
+// resetClosedChLocked allocates a fresh closedCh for a new client
+// lifecycle. Called from Dial() so a re-dialed client gets a clean
+// shutdown signal separate from any previous lifecycle's channel.
+func (c *Client) resetClosedCh() {
+	c.closedChMu.Lock()
+	defer c.closedChMu.Unlock()
+	c.closedCh = make(chan struct{})
+}
+
+// getClosedCh returns the current closedCh. Long-lived select loops
+// snapshot this once per iteration so they always observe the channel
+// that was current when they entered the select, even if Dial() has
+// since swapped in a new one for a subsequent lifecycle. Returns a
+// pre-closed channel if closedCh has never been initialized (treating
+// an uninitialized client as not-yet-blockable — callers should
+// always check c.closed.Load() first).
+func (c *Client) getClosedCh() <-chan struct{} {
+	c.closedChMu.Lock()
+	defer c.closedChMu.Unlock()
+	if c.closedCh == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	return c.closedCh
+}
+
+// markClosedCh fires the closedCh exactly once. Idempotent: subsequent
+// calls within the same lifecycle are no-ops. Must be called from the
+// Close() path AFTER the closed CAS flip so that observers which wake
+// on the channel also see c.closed.Load() == true.
+func (c *Client) markClosedCh() {
+	c.closedChMu.Lock()
+	defer c.closedChMu.Unlock()
+	if c.closedCh == nil {
+		return
+	}
+	select {
+	case <-c.closedCh:
+		// already closed, no-op
+	default:
+		close(c.closedCh)
+	}
 }
 
 // safely replace the current endpoints slice
@@ -523,14 +579,18 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 		}
 
 		// Issue #4: Simplify the reconnect loop with proper cancellation
+		// P1-4: Previously this used a 100ms checkTimer to poll
+		// c.closed.Load() 50 times per 5-second reconnect cycle across
+		// every notifier-enabled client in the fleet. Replaced with a
+		// persistent closedCh fed into the select so Close() wakes the
+		// goroutine immediately and no polling is needed.
 		go func() {
 			defer c.notifierReconnectActive.Store(false)
 
 			ticker := time.NewTicker(defaultNotifierReconnectDelay)
 			defer ticker.Stop()
 
-			checkTimer := time.NewTimer(100 * time.Millisecond)
-			defer checkTimer.Stop()
+			closedCh := c.getClosedCh()
 
 			for {
 				// Check if closed before waiting
@@ -538,17 +598,12 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 					return
 				}
 
-				// Wait for ticker or periodic check for close state
+				// Wait for ticker tick or Close() signal — no polling.
 				select {
 				case <-ticker.C:
 					// Continue to reconnection attempt
-				case <-checkTimer.C:
-					// Periodic check for close state during long ticker intervals
-					if c.closed.Load() {
-						return
-					}
-					checkTimer.Reset(100 * time.Millisecond)
-					continue
+				case <-closedCh:
+					return
 				}
 
 				// Re-check after ticker fires
@@ -1114,6 +1169,12 @@ func (c *Client) Dial(ctx context.Context) error {
 	// Issue #6: Reset both closed and closing flags at the start of Dial to allow re-dial
 	c.closed.Store(false)
 	c.closing.Store(false)
+	// P1-5: allocate a fresh closedCh for this dial lifecycle. Long-lived
+	// selects (reconnect loop, health-check retry) will use this channel
+	// as an immediate wake signal on Close(). Must be done AFTER the
+	// closed flag reset so any stray goroutine that was still observing
+	// the previous lifecycle's channel does not race in here.
+	c.resetClosedCh()
 	c.setConnection(nil, "")
 
 	// read client config data in
@@ -1926,20 +1987,17 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 			warnf("Health Status Check: connection in transient failure; retrying until deadline...")
 			// FIX: Use time.NewTimer instead of time.After to avoid goroutine leak
 			// when ctx.Done or closed fires first.
+			// P1-5: Use persistent closedCh rather than an IIFE that was
+			// evaluated once at select entry — the IIFE couldn't observe
+			// a close() that happened *after* the select started.
 			backoffTimer := time.NewTimer(interval)
+			closedCh := c.getClosedCh()
 			select {
 			case <-ctx.Done():
 				backoffTimer.Stop()
 				return ctx.Err()
 			case <-backoffTimer.C:
-			case <-func() <-chan struct{} {
-				if !c.closed.Load() {
-					return nil
-				}
-				ch := make(chan struct{})
-				close(ch)
-				return ch
-			}():
+			case <-closedCh:
 				backoffTimer.Stop()
 				return fmt.Errorf("Health Status Check Failed: client is closed")
 			}
@@ -1968,20 +2026,16 @@ func (c *Client) waitForEndpointReady(ctx context.Context, timeoutDuration ...ti
 		}
 
 		// FIX: Use time.NewTimer instead of time.After to avoid goroutine leak
+		// P1-5: Use persistent closedCh instead of IIFE — closes after
+		// select entry are now observed immediately.
 		sleepTimer := time.NewTimer(sleep)
+		closedCh := c.getClosedCh()
 		select { // honor ctx/closed during sleep
 		case <-ctx.Done():
 			sleepTimer.Stop()
 			return ctx.Err()
 		case <-sleepTimer.C:
-		case <-func() <-chan struct{} {
-			if !c.closed.Load() {
-				return nil // no signal, keep waiting
-			}
-			ch := make(chan struct{})
-			close(ch)
-			return ch
-		}():
+		case <-closedCh:
 			sleepTimer.Stop()
 			return fmt.Errorf("Health Status Check Failed: client is closed")
 		}
@@ -2128,6 +2182,11 @@ func (c *Client) Close() {
 		// already closed by another goroutine after the hook finished
 		return
 	}
+	// P1-5: fire closedCh so any goroutine blocked in a select (reconnect
+	// loop, health-check retry) wakes immediately instead of waiting for
+	// the next timer tick or loop iteration. Must be after the CAS so
+	// observers that wake on the channel also see c.closed.Load() == true.
+	c.markClosedCh()
 
 	defer func() {
 		if c.AfterClientClose != nil {
