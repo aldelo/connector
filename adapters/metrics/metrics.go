@@ -100,6 +100,26 @@ type MemorySink struct {
 	mu         sync.RWMutex
 	counters   map[string]*atomic.Int64
 	histograms map[string]*histogramState
+
+	// labelLimit caps the total number of distinct (name, labels) series
+	// across counters AND histograms combined. When a new series would
+	// push the total above the cap, it is silently dropped and
+	// overflowDropped is incremented instead. A value <= 0 means
+	// unlimited (the default for NewMemorySink).
+	//
+	// Why a cap? Label values that drift with unbounded input — request
+	// ID, raw URL path, tenant ID — can grow the map without bound,
+	// holding arbitrary memory and degrading Snapshot() from O(series)
+	// to O(unbounded). A hard cap turns the failure mode from "slow
+	// OOM" into "visible dropped-metric counter", which an operator can
+	// spot on a dashboard and fix by redesigning the labels.
+	//
+	// The cap is global (not per-name) to keep accounting trivial and
+	// to avoid the "well-behaved name starves next to badly-behaved
+	// name" dynamic that per-name caps create. The badly-behaved name
+	// IS the signal you want to see.
+	labelLimit      int
+	overflowDropped atomic.Int64
 }
 
 // histogramState tracks min/max/sum/count for a single histogram series.
@@ -113,7 +133,9 @@ type histogramState struct {
 	max   float64
 }
 
-// NewMemorySink returns a fresh, empty MemorySink ready for use.
+// NewMemorySink returns a fresh, empty MemorySink ready for use. It has
+// no cardinality cap — every distinct (name, labels) pair allocates a
+// new series. For bounded-memory behavior, use NewMemorySinkWithLimit.
 func NewMemorySink() *MemorySink {
 	return &MemorySink{
 		counters:   make(map[string]*atomic.Int64),
@@ -121,8 +143,40 @@ func NewMemorySink() *MemorySink {
 	}
 }
 
+// NewMemorySinkWithLimit returns a MemorySink that caps the total
+// number of distinct (name, labels) series across counters and
+// histograms combined. When a new series would exceed limit, it is
+// silently dropped and OverflowDropped() is incremented. A limit <= 0
+// is equivalent to NewMemorySink (unlimited).
+//
+// Existing series continue to accept writes even after the cap is
+// reached — only the *creation* of new series is gated. This preserves
+// continuity for the metrics you already care about while bounding the
+// blast radius of a label-design mistake.
+func NewMemorySinkWithLimit(limit int) *MemorySink {
+	m := NewMemorySink()
+	m.labelLimit = limit
+	return m
+}
+
+// OverflowDropped returns the cumulative count of Counter/Observe calls
+// whose (name, labels) series was dropped because it would have
+// exceeded the configured cardinality cap. Always 0 when the sink was
+// constructed without a limit.
+//
+// Scrape this alongside Snapshot() on a debug endpoint — a non-zero
+// value means some label key has unbounded cardinality and the metric
+// surface is incomplete. This is the user-visible signal that replaces
+// the silent OOM mode of an uncapped sink.
+func (m *MemorySink) OverflowDropped() int64 {
+	return m.overflowDropped.Load()
+}
+
 // Counter increments the named counter by delta. Negative deltas are
-// silently dropped to preserve monotonicity.
+// silently dropped to preserve monotonicity. If the sink was
+// constructed with a cardinality cap and this call would create a new
+// series that exceeds the cap, the call is dropped and OverflowDropped
+// is incremented.
 func (m *MemorySink) Counter(name string, labels map[string]string, delta int64) {
 	if delta < 0 {
 		return
@@ -141,6 +195,15 @@ func (m *MemorySink) Counter(name string, labels map[string]string, delta int64)
 	// Slow path: insert under write lock with double-check.
 	m.mu.Lock()
 	if c, ok = m.counters[key]; !ok {
+		// Cardinality cap (if configured) is enforced under the write
+		// lock, so the check-then-insert sequence is atomic: two
+		// concurrent new-key writers serialize on the lock and the
+		// second observes the incremented len. The cap is strict.
+		if m.labelLimit > 0 && len(m.counters)+len(m.histograms) >= m.labelLimit {
+			m.mu.Unlock()
+			m.overflowDropped.Add(1)
+			return
+		}
 		c = &atomic.Int64{}
 		m.counters[key] = c
 	}
@@ -148,7 +211,11 @@ func (m *MemorySink) Counter(name string, labels map[string]string, delta int64)
 	c.Add(delta)
 }
 
-// Observe records a sample for the named histogram series.
+// Observe records a sample for the named histogram series. If the sink
+// was constructed with a cardinality cap and this call would create a
+// new series that exceeds the cap, the sample is dropped entirely and
+// OverflowDropped is incremented — an unobservable series cannot have
+// its min/max/sum/count updated.
 func (m *MemorySink) Observe(name string, labels map[string]string, value float64) {
 	key := seriesKey(name, labels)
 
@@ -157,6 +224,10 @@ func (m *MemorySink) Observe(name string, labels map[string]string, value float6
 
 	h, ok := m.histograms[key]
 	if !ok {
+		if m.labelLimit > 0 && len(m.counters)+len(m.histograms) >= m.labelLimit {
+			m.overflowDropped.Add(1)
+			return
+		}
 		h = &histogramState{min: value, max: value}
 		m.histograms[key] = h
 	}

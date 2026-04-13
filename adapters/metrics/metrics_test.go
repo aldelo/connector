@@ -21,6 +21,7 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -149,6 +150,162 @@ func TestMemorySink_Counter_ConcurrentWriters(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// MemorySink — cardinality cap
+// -----------------------------------------------------------------------
+//
+// Pin the R12 WithLabelCardinalityLimit contract: a sink constructed
+// with a positive limit drops NEW series past the cap (counters and
+// histograms share one global budget), existing series continue to
+// update, and OverflowDropped() reports the cumulative loss. A plain
+// NewMemorySink remains unbounded and never reports drops.
+
+func TestMemorySink_CardinalityCap_ZeroMeansUnlimited(t *testing.T) {
+	m := NewMemorySinkWithLimit(0)
+	for i := 0; i < 1000; i++ {
+		m.Counter("hits", map[string]string{"id": fmt.Sprintf("%d", i)}, 1)
+	}
+	cs, _ := m.Snapshot()
+	if len(cs) != 1000 {
+		t.Errorf("limit=0 should be unlimited, got %d series", len(cs))
+	}
+	if got := m.OverflowDropped(); got != 0 {
+		t.Errorf("limit=0 should never drop, got %d", got)
+	}
+}
+
+func TestMemorySink_CardinalityCap_CounterDropped(t *testing.T) {
+	m := NewMemorySinkWithLimit(3)
+	m.Counter("rpc", map[string]string{"id": "a"}, 1)
+	m.Counter("rpc", map[string]string{"id": "b"}, 1)
+	m.Counter("rpc", map[string]string{"id": "c"}, 1)
+	m.Counter("rpc", map[string]string{"id": "d"}, 1) // dropped
+	m.Counter("rpc", map[string]string{"id": "e"}, 1) // dropped
+
+	cs, _ := m.Snapshot()
+	if len(cs) != 3 {
+		t.Errorf("cap=3, want 3 series, got %d", len(cs))
+	}
+	if got := m.OverflowDropped(); got != 2 {
+		t.Errorf("want 2 overflow drops, got %d", got)
+	}
+}
+
+func TestMemorySink_CardinalityCap_HistogramDropped(t *testing.T) {
+	m := NewMemorySinkWithLimit(2)
+	m.Observe("lat", map[string]string{"id": "a"}, 0.1)
+	m.Observe("lat", map[string]string{"id": "b"}, 0.2)
+	m.Observe("lat", map[string]string{"id": "c"}, 0.3) // dropped
+
+	_, hs := m.Snapshot()
+	if len(hs) != 2 {
+		t.Errorf("cap=2, want 2 histograms, got %d", len(hs))
+	}
+	if got := m.OverflowDropped(); got != 1 {
+		t.Errorf("want 1 overflow drop, got %d", got)
+	}
+}
+
+func TestMemorySink_CardinalityCap_MixedDropped(t *testing.T) {
+	// Cap is global across counters AND histograms combined.
+	m := NewMemorySinkWithLimit(3)
+	m.Counter("c1", map[string]string{"k": "a"}, 1)   // series 1
+	m.Observe("h1", map[string]string{"k": "b"}, 0.5) // series 2
+	m.Counter("c2", map[string]string{"k": "c"}, 1)   // series 3
+	m.Observe("h2", map[string]string{"k": "d"}, 0.5) // dropped
+	m.Counter("c3", map[string]string{"k": "e"}, 1)   // dropped
+
+	cs, hs := m.Snapshot()
+	if total := len(cs) + len(hs); total != 3 {
+		t.Errorf("cap=3 (global), got %d counters + %d histograms = %d",
+			len(cs), len(hs), total)
+	}
+	if got := m.OverflowDropped(); got != 2 {
+		t.Errorf("want 2 overflow drops, got %d", got)
+	}
+}
+
+func TestMemorySink_CardinalityCap_ExistingSeriesStillUpdatable(t *testing.T) {
+	// Once the cap is hit, existing series must still accept new writes —
+	// only NEW series are gated. This preserves continuity on the metrics
+	// you already care about when a label-design bug floods new keys.
+	m := NewMemorySinkWithLimit(1)
+	m.Counter("rpc", map[string]string{"id": "a"}, 5)
+	m.Counter("rpc", map[string]string{"id": "b"}, 1) // dropped (new series)
+	m.Counter("rpc", map[string]string{"id": "a"}, 3) // accepted (existing)
+
+	cs, _ := m.Snapshot()
+	if len(cs) != 1 {
+		t.Fatalf("want 1 series, got %d", len(cs))
+	}
+	if cs[0].Value != 8 {
+		t.Errorf("existing series should update past the cap: want 8, got %d", cs[0].Value)
+	}
+	if got := m.OverflowDropped(); got != 1 {
+		t.Errorf("want 1 overflow drop, got %d", got)
+	}
+
+	// Existing histogram series should also keep updating past the cap.
+	m2 := NewMemorySinkWithLimit(1)
+	m2.Observe("lat", map[string]string{"id": "a"}, 0.1)
+	m2.Observe("lat", map[string]string{"id": "b"}, 0.5) // dropped
+	m2.Observe("lat", map[string]string{"id": "a"}, 0.3) // accepted
+	_, hs := m2.Snapshot()
+	if len(hs) != 1 || hs[0].Count != 2 {
+		t.Errorf("existing histogram should update past the cap: hs=%+v", hs)
+	}
+	if got := m2.OverflowDropped(); got != 1 {
+		t.Errorf("want 1 overflow drop on histogram, got %d", got)
+	}
+}
+
+func TestMemorySink_CardinalityCap_Concurrent(t *testing.T) {
+	// Race-detector sentinel: hammering the cap from many goroutines
+	// must not corrupt state, panic, or lose accounting. Because the
+	// cap check is performed under the write lock, it is strict — the
+	// map size can never exceed the limit. Every call must be
+	// accounted for as either an accepted series OR an overflow drop.
+	const goroutines = 32
+	const itersPer = 100
+	const limit = 50
+
+	m := NewMemorySinkWithLimit(limit)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		gg := g
+		go func() {
+			defer wg.Done()
+			for i := 0; i < itersPer; i++ {
+				m.Counter("rpc", map[string]string{"id": fmt.Sprintf("%d-%d", gg, i)}, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	cs, _ := m.Snapshot()
+	if len(cs) > limit {
+		t.Errorf("len=%d > limit=%d — cap breached under concurrent writers", len(cs), limit)
+	}
+	total := m.OverflowDropped() + int64(len(cs))
+	want := int64(goroutines * itersPer)
+	if total != want {
+		t.Errorf("lost metrics under concurrency: accepted=%d dropped=%d total=%d want=%d",
+			len(cs), m.OverflowDropped(), total, want)
+	}
+}
+
+func TestMemorySink_CardinalityCap_OverflowDroppedNoLimit(t *testing.T) {
+	// Plain NewMemorySink should never report any drops.
+	m := NewMemorySink()
+	for i := 0; i < 100; i++ {
+		m.Counter("rpc", map[string]string{"id": fmt.Sprintf("%d", i)}, 1)
+	}
+	if got := m.OverflowDropped(); got != 0 {
+		t.Errorf("unbounded sink should never drop, got %d", got)
+	}
+}
+
+// -----------------------------------------------------------------------
 // seriesKey — round trip
 // -----------------------------------------------------------------------
 
@@ -208,8 +365,8 @@ func TestSeriesKey_AdversarialLabelValues(t *testing.T) {
 		{"path": "/a", "extra": "b,c"},
 		{"name": "tenant=acme"},
 		{"k": `v1\,v2=v3`},
-		{"k": `\\`}, // raw double-backslash
-		{"a,b": "x"},  // delimiter inside a key, not just a value
+		{"k": `\\`},  // raw double-backslash
+		{"a,b": "x"}, // delimiter inside a key, not just a value
 		{"a=b": "y"},
 		{"empty": ""},
 	}
