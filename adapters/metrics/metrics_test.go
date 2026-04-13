@@ -22,6 +22,7 @@ package metrics
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -259,6 +260,109 @@ func TestSeriesKey_CounterAggregationDoesNotCollideAcrossAdversarialLabels(t *te
 	if !foundA || !foundB {
 		t.Errorf("MET-F1 regression: distinct series collapsed — foundA=%v foundB=%v cs=%+v", foundA, foundB, cs)
 	}
+}
+
+// -----------------------------------------------------------------------
+// seriesKey — fuzz target
+// -----------------------------------------------------------------------
+
+// FuzzSeriesKey_Roundtrip is the MET-F1 long-term follow-up. The
+// hand-written TestSeriesKey_AdversarialLabelValues pins 8 specific
+// delimiter-bearing cases, but that does not prove the escaping state
+// machine holds across arbitrary byte inputs. This fuzz target drives
+// seriesKey/parseSeriesKey with two-label maps built from
+// fuzzer-supplied strings and asserts the round-trip invariant:
+//
+//	parseSeriesKey(seriesKey(name, labels)) == (name, labels)
+//
+// The fuzzer is seeded with the 8 adversarial cases from
+// TestSeriesKey_AdversarialLabelValues plus a handful of byte-level
+// boundary inputs, so corpus mutation starts from known-hard regions.
+//
+// Two inputs are pre-filtered (not bugs, just out-of-contract):
+//
+//  1. A metric name containing `|`. Per the seriesKey godoc, names are
+//     package-level constants (mServerRequests etc.) and are not
+//     escaped. parseSeriesKey splits on the first `|`, so a name
+//     containing `|` would be truncated by design.
+//
+//  2. A labels map containing {"": ""}. parseSeriesKey's flush() guard
+//     skips a pair when both key and value are empty, because the
+//     encoder emits `name|=` which is structurally indistinguishable
+//     from a zero-label trailing boundary. Empty-on-empty is
+//     nonsensical as a label anyway — no real caller produces it.
+//
+// Run with:
+//
+//	go test -run=^$ -fuzz=FuzzSeriesKey_Roundtrip -fuzztime=30s \
+//	  ./adapters/metrics/...
+//
+// The `-run=^$` disables normal tests during the fuzz run so only the
+// fuzzer executes. Without `-fuzz`, this function compiles into the
+// test binary but does NOT run — `go test ./...` skips it, so CI is
+// unaffected.
+func FuzzSeriesKey_Roundtrip(f *testing.F) {
+	// Seed 1: the 8 adversarial cases from
+	// TestSeriesKey_AdversarialLabelValues.
+	f.Add("rpc", "path", "/a=b,c", "", "")
+	f.Add("rpc", "path", "/a", "extra", "b,c")
+	f.Add("rpc", "name", "tenant=acme", "", "")
+	f.Add("rpc", "k", `v1\,v2=v3`, "", "")
+	f.Add("rpc", "k", `\\`, "", "")
+	f.Add("rpc", "a,b", "x", "a=b", "y")
+	f.Add("rpc", "empty", "x", "", "")
+	f.Add("rpc", "method", "/x.Y/Z", "code", "OK")
+
+	// Seed 2: byte-level boundary inputs to kick the mutator into
+	// non-ASCII regions quickly.
+	f.Add("rpc", "\x00", "\x01", "\xff", "\xfe")
+	f.Add("rpc", `\\\`, "===", ",,,", `\=,`)
+	f.Add("rpc", "日本語", "値", "ключ", "значение")
+
+	f.Fuzz(func(t *testing.T, name, k1, v1, k2, v2 string) {
+		// Pre-filter 1: skip metric names containing `|`. The
+		// package contract says names are not user-controlled and
+		// therefore not escaped; parseSeriesKey splits on the first
+		// `|`. A name containing `|` is out of contract.
+		if strings.ContainsRune(name, '|') {
+			t.Skip()
+		}
+
+		// Build the input map. Go map writes dedupe equal keys, so
+		// if k1 == k2 the map ends up with 1 entry (v2 wins). That
+		// matches what the encoder then receives — there is no
+		// parallel "list of pairs" view, only the deduplicated map.
+		in := map[string]string{}
+		in[k1] = v1
+		in[k2] = v2
+
+		// Pre-filter 2: skip {"": ""} pairs. parseSeriesKey drops
+		// them via the flush() empty-guard. Not a contract we test.
+		if v, ok := in[""]; ok && v == "" {
+			t.Skip()
+		}
+
+		key := seriesKey(name, in)
+		outName, outLabels := parseSeriesKey(key)
+
+		if outName != name {
+			t.Fatalf("name lost: in=%q key=%q out=%q", name, key, outName)
+		}
+
+		if len(outLabels) != len(in) {
+			t.Fatalf("label count mismatch: in=%v out=%v key=%q", in, outLabels, key)
+		}
+
+		for k, v := range in {
+			ov, ok := outLabels[k]
+			if !ok {
+				t.Fatalf("label key missing after round-trip: in[%q]=%q key=%q out=%v", k, v, key, outLabels)
+			}
+			if ov != v {
+				t.Fatalf("label value drifted: in[%q]=%q out[%q]=%q key=%q", k, v, k, ov, key)
+			}
+		}
+	})
 }
 
 // -----------------------------------------------------------------------
