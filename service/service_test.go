@@ -28,6 +28,8 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"log"
 	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -42,6 +44,42 @@ func (a *AnswerServiceImpl) Greeting(ctx context.Context, q *testpb.Question) (*
 }
 
 func TestService_Serve(t *testing.T) {
+	// P1-6: This is a manual integration test. Serve() starts a real
+	// gRPC listener, connects to AWS CloudMap for service discovery,
+	// and blocks on awaitOsSigExit() waiting for a real OS signal.
+	// Previously this test ran to the 10-minute test-framework timeout
+	// and panicked, masking every other test in the package.
+	//
+	// CI safety: skip unless CONNECTOR_RUN_INTEGRATION=1 is set.
+	// When enabled, spawn a watchdog goroutine that sends SIGTERM to
+	// ourselves after a short window — since Serve() registers a
+	// signal.Notify handler for SIGTERM, the signal routes to the
+	// handler channel (unblocking awaitOsSigExit) rather than killing
+	// the test process. Allows the happy path to be exercised when a
+	// developer has valid AWS credentials + config, while guaranteeing
+	// the test can never again hang CI.
+	if os.Getenv("CONNECTOR_RUN_INTEGRATION") != "1" {
+		t.Skip("skipping: manual integration test (requires real AWS CloudMap + service.yaml); set CONNECTOR_RUN_INTEGRATION=1 to run")
+	}
+
+	// Watchdog: send SIGTERM to ourselves after Serve has had a chance
+	// to register its signal handler. Kept short so a broken Serve
+	// doesn't hold the test suite up. Uses a channel-gated cancel so
+	// the goroutine exits cleanly if the test ends via an early error.
+	cancelWatchdog := make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(2 * time.Second):
+			p, err := os.FindProcess(os.Getpid())
+			if err == nil {
+				_ = p.Signal(syscall.SIGTERM)
+			}
+		case <-cancelWatchdog:
+			return
+		}
+	}()
+	t.Cleanup(func() { close(cancelWatchdog) })
+
 	svc := NewService("testservice", "service", "", func(grpcServer *grpc.Server) {
 		testpb.RegisterAnswerServiceServer(grpcServer, &AnswerServiceImpl{})
 	})
