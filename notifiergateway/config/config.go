@@ -50,6 +50,10 @@ type NotifierGatewayData struct {
 	HealthReportCleanUpFrequencySeconds uint          `mapstructure:"health_report_cleanup_frequency_seconds"`
 	HealthReportRecordStaleMinutes      uint          `mapstructure:"health_report_record_stale_minutes"`
 	HashKeys                            []HashKeyData `mapstructure:"hash_keys"`
+	// RequireSNSSignature enforces AWS SNS signature verification on all
+	// inbound SubscriptionConfirmation / Notification callbacks. Secure by
+	// default — operators must explicitly set this to false to bypass.
+	RequireSNSSignature bool `mapstructure:"require_sns_signature"`
 }
 
 // FIX #7: Exported so other packages can construct HashKeyData values
@@ -243,6 +247,24 @@ func (c *Config) SetHealthReportRecordStaleMinutes(i uint) error {
 	return nil
 }
 
+// SetRequireSNSSignature toggles the enforcement of AWS SNS signature
+// verification on inbound SNS callbacks. Default is true (secure by default).
+// Operators must explicitly call SetRequireSNSSignature(false) to bypass
+// verification — typically only for local development or simulator testing.
+func (c *Config) SetRequireSNSSignature(b bool) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
+	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureGatewayData()
+	c._v.Set("notifier_gateway.require_sns_signature", b)
+	c.NotifierGatewayData.RequireSNSSignature = b
+	return nil
+}
+
 // FIX #4: Trim key names and secrets before storing so that lookups
 // using trimmed names (e.g. model.GetHashKey("mykey")) match correctly.
 func (c *Config) SetHashKeys(hk ...HashKeyData) error {
@@ -316,6 +338,9 @@ func (c *Config) Read() error {
 	v.Default("notifier_gateway.health_report_cleanup_frequency_seconds", 120)
 	v.Default("notifier_gateway.health_report_record_stale_minutes", 5)
 	v.Default("notifier_gateway.hash_keys", []HashKeyData{})
+	// Secure by default — SNS signature verification is enforced unless
+	// operators explicitly disable it via config.
+	v.Default("notifier_gateway.require_sns_signature", true)
 
 	if ok, err := v.Init(); err != nil {
 		return err

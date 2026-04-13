@@ -38,6 +38,10 @@ var (
 	healthReportCleanUpFrequencySeconds uint
 	healthReportRecordStaleMinutes      uint
 	hashKeys                            map[string]string
+	// requireSNSSignature gates enforcement of AWS SNS signature verification
+	// for all inbound SNS callbacks. Default is true (secure by default) —
+	// see notifiergateway/config/config.go viper default.
+	requireSNSSignature = true
 )
 
 // GetDynamoDBActionRetryAttempts returns the configured retry attempts value
@@ -142,6 +146,20 @@ func GetHashKey(name string) (secret string, found bool) {
 	defer configMu.RUnlock()
 	secret, found = hashKeys[name]
 	return
+}
+
+// GetRequireSNSSignature returns whether SNS signature verification is enforced.
+func GetRequireSNSSignature() bool {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return requireSNSSignature
+}
+
+// SetRequireSNSSignature toggles SNS signature verification enforcement.
+func SetRequireSNSSignature(v bool) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	requireSNSSignature = v
 }
 
 type serverRoute struct {

@@ -133,6 +133,17 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 			hashKeysMap[v.HashKeyName] = v.HashKeySecret
 		}
 		model.SetHashKeys(hashKeysMap)
+
+		// Publish the secure-by-default SNS signature enforcement flag to
+		// the model package so snsrouter handlers can read it. When the
+		// operator explicitly disables verification via config, emit a WARN
+		// so the state is observable in logs.
+		model.SetRequireSNSSignature(cfg.NotifierGatewayData.RequireSNSSignature)
+		if !cfg.NotifierGatewayData.RequireSNSSignature {
+			log.Println("WARN: Notifier Gateway SNS signature verification is DISABLED by config (require_sns_signature=false). Inbound SNS callbacks will NOT be cryptographically verified. This is insecure and should only be used for local development or simulator testing.")
+		} else {
+			log.Println("Notifier Gateway SNS signature verification is ENABLED (secure by default).")
+		}
 	}
 
 	// setup gateway server
@@ -462,10 +473,10 @@ func callerid(c *gin.Context, bindingInputPtr interface{}) {
 // snsrouter is a gin handler that processes inbound sns payload for either confirmation or notification callbacks
 // note: bindingInputPtr is not used by this method, please ignore in code
 //
-// TODO: SNS signature verification (buildConfirmationSigningPayload / buildNotificationSigningPayload)
-// is not currently invoked. For production hardening, verify the SNS message signature using the
-// signing certificate before processing confirmation or notification payloads to prevent SSRF and
-// message injection attacks.
+// SNS signature verification is performed inside snsconfirmation / snsnotification
+// immediately after BindJSON succeeds. Verification is gated by
+// model.GetRequireSNSSignature() which defaults to true (secure by default).
+// See snssigverify.go for the verification implementation.
 func snsrouter(c *gin.Context, bindingInputPtr interface{}) {
 	// validate gin context input
 	if c == nil {
@@ -530,6 +541,23 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 			_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' BindJSON Error: %s", err.Error()))
 		}
 	} else {
+		// SNS signature verification — secure by default.
+		// When enforcement is enabled, reject any payload whose RSA signature
+		// does not verify against the AWS-published signing cert. The cert URL
+		// is host-allowlisted before fetch (SSRF pre-gate in verifyAWSSNSSignature).
+		if model.GetRequireSNSSignature() {
+			if verr := verifySNSConfirmationSignature(confirm); verr != nil {
+				log.Printf("/snsrouter 'subscriptionconfirmation' signature verification failed (MessageId=%s, IP=%s): %s",
+					escapeUserInput(confirm.MessageId), escapeUserInput(c.ClientIP()), escapeUserInput(verr.Error()))
+				c.String(403, "SNS Signature Verification Failed")
+
+				if seg != nil && seg.Ready() {
+					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' signature verification failed: %s", escapeUserInput(verr.Error())))
+				}
+				return
+			}
+		}
+
 		// auto confirm
 		if url := confirm.SubscribeURL; util.LenTrim(url) > 0 {
 			log.Println("/snsrouter 'subscriptionconfirmation' SubscribeURL From SNS = " + escapeUserInput(url))
@@ -743,6 +771,22 @@ func snsnotification(c *gin.Context, serverKey string) {
 			_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' BindJSON Error: %s", err.Error()))
 		}
 	} else {
+		// SNS signature verification — secure by default. See snsconfirmation
+		// for the same gate. Rejects forged notifications before any downstream
+		// relay occurs.
+		if model.GetRequireSNSSignature() {
+			if verr := verifySNSNotificationSignature(notify); verr != nil {
+				log.Printf("/snsrouter 'notification' signature verification failed (MessageId=%s, IP=%s): %s",
+					escapeUserInput(notify.MessageId), escapeUserInput(c.ClientIP()), escapeUserInput(verr.Error()))
+				c.String(403, "SNS Signature Verification Failed")
+
+				if seg != nil && seg.Ready() {
+					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' signature verification failed: %s", escapeUserInput(verr.Error())))
+				}
+				return
+			}
+		}
+
 		// valid notification data
 		if util.LenTrim(notify.MessageId) == 0 {
 			log.Println("/snsrouter 'notification' SNS Data Missing MessageId")
