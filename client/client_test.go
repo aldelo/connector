@@ -18,11 +18,14 @@ package client
 
 import (
 	"context"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	testpb "github.com/aldelo/connector/example/proto/test"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"log"
-	"testing"
 )
 
 // TestClient_Dial is an integration test that requires:
@@ -81,5 +84,110 @@ func TestClient_Dial(t *testing.T) {
 		log.Println("Health Probe Failed: " + err.Error())
 	} else {
 		log.Println(status.String())
+	}
+}
+
+// -------- CL-F1 watchdog helper tests --------
+// closeOnClosed bridges Client.Close()'s closedCh into an in-flight
+// notifier Subscribe by calling a cancel func when closedCh fires first,
+// and exiting cleanly when the local doneCh fires first. See client.go
+// CL-F1 fix for context.
+
+func TestCloseOnClosed_FiresCancelOnClosedCh(t *testing.T) {
+	closedCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	var called atomic.Int32
+	fired := make(chan struct{})
+
+	go func() {
+		closeOnClosed(closedCh, doneCh, func() {
+			called.Add(1)
+			close(fired)
+		})
+	}()
+
+	// Simulate Client.Close() firing the closedCh.
+	close(closedCh)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelFn not called within 2s after closedCh fired")
+	}
+	if got := called.Load(); got != 1 {
+		t.Errorf("cancelFn called %d times, want 1", got)
+	}
+}
+
+func TestCloseOnClosed_ExitsOnDone(t *testing.T) {
+	closedCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	var called atomic.Int32
+	exited := make(chan struct{})
+
+	go func() {
+		defer close(exited)
+		closeOnClosed(closedCh, doneCh, func() { called.Add(1) })
+	}()
+
+	// Simulate the Subscribe call returning normally: close doneCh
+	// before closedCh ever fires.
+	close(doneCh)
+
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeOnClosed did not exit within 2s after doneCh fired")
+	}
+	if got := called.Load(); got != 0 {
+		t.Errorf("cancelFn called %d times on done-path, want 0", got)
+	}
+}
+
+func TestCloseOnClosed_NilCancelFn(t *testing.T) {
+	closedCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	exited := make(chan struct{})
+
+	go func() {
+		defer close(exited)
+		// nil cancelFn must not panic when closedCh fires.
+		closeOnClosed(closedCh, doneCh, nil)
+	}()
+
+	close(closedCh)
+
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeOnClosed did not exit within 2s with nil cancelFn")
+	}
+}
+
+func TestCloseOnClosed_ClosedChWinsRace(t *testing.T) {
+	// If closedCh is already closed at entry, cancelFn must fire
+	// (Go select picks a ready case; with both ready either can win,
+	// but when only closedCh is ready at entry the result is
+	// deterministic: cancelFn fires). This mirrors the realistic case
+	// where Client.Close() has already run by the time
+	// DoNotifierAlertService reaches the watchdog spawn point.
+	closedCh := make(chan struct{})
+	close(closedCh)
+	doneCh := make(chan struct{})
+	var called atomic.Int32
+	exited := make(chan struct{})
+
+	go func() {
+		defer close(exited)
+		closeOnClosed(closedCh, doneCh, func() { called.Add(1) })
+	}()
+
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeOnClosed did not exit within 2s")
+	}
+	if got := called.Load(); got != 1 {
+		t.Errorf("cancelFn called %d times, want 1", got)
 	}
 }

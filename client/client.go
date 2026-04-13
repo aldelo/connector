@@ -212,6 +212,33 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 	}
 }
 
+// closeOnClosed is a small watchdog goroutine body used to bridge a
+// Client shutdown signal into an in-flight blocking call that the Client
+// cannot otherwise cancel directly. It selects on closedCh (normally
+// c.getClosedCh()) and doneCh (a per-call local channel). When closedCh
+// fires first, cancelFn is invoked exactly once; when doneCh fires first
+// (the blocking call has returned on its own), it exits without calling
+// cancelFn. Either side exiting unblocks the other.
+//
+// Fix: CL-F1 (deep-review-2026-04-13-contrarian). Before this helper,
+// Client.Close() cancelled the notifier Subscribe.Recv loop via a direct
+// getNotifierClient -> nc.Close() call. That path has a TOCTOU window
+// around setNotifierClient(nil) in the reconnect goroutine, where Close()
+// can read nil and miss the freshly-stored new notifier client
+// DoNotifierAlertService stores moments later. The watchdog closes that
+// window by living alongside the blocking Subscribe call and firing
+// nc.Close() regardless of which order Close() and setNotifierClient(nc)
+// interleaved in.
+func closeOnClosed(closedCh <-chan struct{}, doneCh <-chan struct{}, cancelFn func()) {
+	select {
+	case <-closedCh:
+		if cancelFn != nil {
+			cancelFn()
+		}
+	case <-doneCh:
+	}
+}
+
 // clears connection state under lock and returns old conn for closing
 func (c *Client) clearConnection() *grpc.ClientConn {
 	if c == nil {
@@ -1890,6 +1917,26 @@ func (c *Client) DoNotifierAlertService() (err error) {
 		c.setNotifierClient(nil)
 		return fmt.Errorf("Client is closed")
 	}
+
+	// CL-F1: bridge Client.Close() -> nc.Close() for this Subscribe call.
+	// This closes the TOCTOU window where the reconnect goroutine's
+	// setNotifierClient(nil) is briefly visible to Close()'s direct
+	// getNotifierClient path, after which we store the new nc here and
+	// block in Subscribe. The watchdog lives for exactly the duration of
+	// this Subscribe call: defer close(watchdogDone) terminates it on the
+	// Subscribe-returns-normally path, and closedCh firing terminates it
+	// via nc.Close() -> cancel of the in-flight Recv loop on the closed
+	// path. nc.Close() is idempotent (NotifierClient guards via
+	// _notificationServicesStarted), and re-entry into Client.Close()
+	// through this path is a no-op because Client.Close() already holds
+	// the single-shot CAS on c.closed.
+	watchdogDone := make(chan struct{})
+	go closeOnClosed(c.getClosedCh(), watchdogDone, func() {
+		if nc != nil {
+			nc.Close()
+		}
+	})
+	defer close(watchdogDone)
 
 	if err = nc.Subscribe(arn); err != nil {
 		if nc != nil {
