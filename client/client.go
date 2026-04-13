@@ -431,6 +431,23 @@ type Client struct {
 	closed  atomic.Bool
 	closing atomic.Bool
 
+	// CL-F3: _lifecycleMu serializes Dial and Close for a single Client
+	// instance. Without this, a concurrent Close arriving after Dial has
+	// reset closed=false and begun spinning up fresh state can flip
+	// closed=true mid-setup, leaving the client "closed" but holding a
+	// newly-dialed gRPC connection that nothing will reclaim. The result
+	// is a connection leak plus caller confusion ("I just dialed and
+	// Close hasn't been called from my side"). The window is small but
+	// shows up under real contention — e.g., a parent orchestrator
+	// calling Close() on shutdown while a reconnect loop is calling
+	// Dial() from another goroutine.
+	//
+	// The mutex is deliberately coarse: Dial and Close are rare,
+	// lifecycle-level operations. RPC fast paths use connMu/endpointsMu
+	// and never touch _lifecycleMu, so serializing Dial against Close
+	// has no effect on steady-state throughput.
+	_lifecycleMu sync.Mutex
+
 	// P1-5: closedCh is closed when the client transitions from open to
 	// closed. Long-lived select loops (reconnect, health-check retry)
 	// use this channel so they wake *immediately* on Close() rather
@@ -1240,6 +1257,13 @@ func (c *Client) Dial(ctx context.Context) error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
+
+	// CL-F3: serialize Dial against Close for this Client. Without this
+	// lock a concurrent Close arriving after closed.Store(false) below
+	// can shut the client down while state init is still in flight,
+	// leaking the freshly-dialed gRPC connection.
+	c._lifecycleMu.Lock()
+	defer c._lifecycleMu.Unlock()
 
 	cleanupConn := false // track gRPC conn cleanup on failure
 	cleanupWeb := false  // track web server cleanup on failure
@@ -2317,10 +2341,23 @@ func (c *Client) Close() {
 		return
 	}
 
-	// make Close idempotent to avoid double teardown in concurrent/duplicate calls
+	// make Close idempotent to avoid double teardown in concurrent/duplicate calls.
+	// This fast path intentionally sits OUTSIDE _lifecycleMu so a second
+	// concurrent Close returns immediately instead of waiting on the
+	// first caller's teardown.
 	if !c.closing.CompareAndSwap(false, true) {
 		return
 	}
+
+	// CL-F3: serialize Close against Dial for this Client. If a Dial is
+	// currently spinning up fresh state (closed already flipped to
+	// false, TCP dial in flight), we wait for it to finish before tearing
+	// down. This prevents the leak where Close observes a half-initialized
+	// client and nil's out only part of the state that Dial is about to
+	// set. Note: the closing CAS above still makes duplicate Close calls
+	// return without contending for this lock.
+	c._lifecycleMu.Lock()
+	defer c._lifecycleMu.Unlock()
 
 	z := c.ZLog()
 	printf := func(msg string, args ...interface{}) {

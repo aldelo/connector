@@ -28,6 +28,103 @@ import (
 	"log"
 )
 
+// -------- CL-F3 _lifecycleMu tests --------
+// CL-F3 adds a per-Client mutex that serializes Dial and Close. Pre-fix,
+// a concurrent Close arriving after Dial reset closed=false but before
+// state init completed would leave the client "closed" while still
+// holding freshly-initialized state (connection leak + caller confusion).
+// These tests pin the serialization invariant: Close must wait for an
+// in-progress Dial to finish, and a duplicate Close must NOT wait on
+// _lifecycleMu because its closing-CAS fast path runs before the lock.
+
+// TestCL_F3_CloseSerializesAgainstDialHoldingLifecycleMu holds
+// _lifecycleMu directly (simulating Dial in progress), launches a
+// concurrent Close, and verifies that Close blocks until the lock is
+// released. This is the core regression test for the observable
+// serialization contract.
+func TestCL_F3_CloseSerializesAgainstDialHoldingLifecycleMu(t *testing.T) {
+	c := &Client{}
+
+	// Simulate Dial acquiring _lifecycleMu and beginning state init.
+	c._lifecycleMu.Lock()
+
+	closeReturned := make(chan struct{})
+	go func() {
+		defer close(closeReturned)
+		c.Close()
+	}()
+
+	// Close must block while "Dial" holds the lock. Give it 150ms to
+	// attempt the lock acquire + block.
+	select {
+	case <-closeReturned:
+		t.Fatal("Close returned while _lifecycleMu was held — not serialized against Dial")
+	case <-time.After(150 * time.Millisecond):
+		// good: Close is blocked on the lock
+	}
+
+	// Release "Dial's" lock; Close must proceed and return promptly.
+	c._lifecycleMu.Unlock()
+	select {
+	case <-closeReturned:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within 2s after _lifecycleMu release")
+	}
+
+	// After Close, closed flag should be set (proves Close actually ran
+	// the body, not just the fast-path exit).
+	if !c.closed.Load() {
+		t.Error("Close ran but did not set closed=true; lock path may have exited early")
+	}
+}
+
+// TestCL_F3_DuplicateCloseFastPathDoesNotBlockOnLifecycleMu verifies
+// that a second concurrent Close returns immediately via its closing-CAS
+// fast path instead of queueing on _lifecycleMu. This is important:
+// panicked / repeated Close calls must not pile up behind an in-flight
+// one, or a shutdown storm would serialize the entire shutdown sequence.
+func TestCL_F3_DuplicateCloseFastPathDoesNotBlockOnLifecycleMu(t *testing.T) {
+	c := &Client{}
+
+	// Pre-set closing=true so the next Close hits the CAS-fail fast path.
+	c.closing.Store(true)
+
+	// Hold _lifecycleMu so a NEW caller who goes past the fast path
+	// would get wedged. The test proves the fast path runs FIRST.
+	c._lifecycleMu.Lock()
+	defer c._lifecycleMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Close() // must return immediately via CAS-fail path
+	}()
+
+	select {
+	case <-done:
+		// good: duplicate Close exited without touching the held lock
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("duplicate Close blocked on _lifecycleMu — fast path is broken")
+	}
+}
+
+// TestCL_F3_NilClientCloseDoesNotTouchLifecycleMu verifies the nil
+// receiver path in Close returns immediately without attempting to
+// lock anything. If Close unconditionally acquired _lifecycleMu, a
+// nil Client call would panic on the lock access.
+func TestCL_F3_NilClientCloseDoesNotTouchLifecycleMu(t *testing.T) {
+	var c *Client
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("nil Client Close panicked: %v", r)
+		}
+	}()
+
+	c.Close() // must be a no-op, not a panic
+}
+
 // TestClient_Dial is an integration test that requires:
 //   - A populated client.yaml with real Target.ServiceName / NamespaceName / Region
 //   - A reachable AWS Cloud Map namespace for service discovery
