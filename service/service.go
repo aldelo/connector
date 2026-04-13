@@ -149,6 +149,16 @@ type Service struct {
 	// grpc serving status and mutex locking
 	_serving bool
 	_mu      sync.RWMutex
+
+	// P1-3: deregisterInstance is invoked from multiple shutdown paths
+	// (GracefulStop/ImmediateStop, the internal quit handler goroutine,
+	// and the Serve() defer). Previously this led to duplicate CloudMap
+	// DeregisterInstance requests under concurrent Stop. _deregOnce
+	// ensures the actual deregister runs at most once per Service
+	// lifetime; the cached _deregErr is returned to all subsequent
+	// callers so error reporting stays consistent.
+	_deregOnce sync.Once
+	_deregErr  error
 }
 
 // create service
@@ -1661,7 +1671,25 @@ func (s *Service) updateHealth(healthy bool) error {
 
 // deregisterInstance will remove instance from cloudmap and route 53.
 // FIX #12: Added sdoperationstatus.Fail check to return immediately on permanent failure.
+//
+// P1-3: Guarded by _deregOnce so concurrent shutdown paths
+// (GracefulStop/ImmediateStop, the internal quit-handler goroutine,
+// the Serve() defer) cannot issue duplicate CloudMap DeregisterInstance
+// requests. The first caller wins and does the actual work; any later
+// concurrent caller blocks on the Once until the first one returns,
+// then gets the same cached error. A caller that arrives after the
+// Once has fully completed also gets the cached error.
 func (s *Service) deregisterInstance() error {
+	s._deregOnce.Do(func() {
+		s._deregErr = s.doDeregisterInstance()
+	})
+	return s._deregErr
+}
+
+// doDeregisterInstance performs the actual CloudMap deregister. It is
+// only called through _deregOnce, so it is guaranteed to run at most
+// once per Service lifetime.
+func (s *Service) doDeregisterInstance() error {
 	s._mu.RLock()
 	sd := s._sd
 	cfg := s._config
@@ -1679,47 +1707,47 @@ func (s *Service) deregisterInstance() error {
 	}
 
 	if operationId, err := registry.DeregisterInstance(sd, cfg.Instance.Id, cfg.Service.Id, timeoutDuration...); err != nil {
-			log.Println("... De-Register Instance Failed: " + err.Error())
-			return fmt.Errorf("De-Register Instance Fail: %s", err.Error())
-		} else {
-			tryCount := 0
+		log.Println("... De-Register Instance Failed: " + err.Error())
+		return fmt.Errorf("De-Register Instance Fail: %s", err.Error())
+	} else {
+		tryCount := 0
 
-			time.Sleep(250 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 
-			for {
-				if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration...); e != nil {
-					log.Println("... De-Register Instance Failed: " + e.Error())
-					return fmt.Errorf("De-Register Instance Fail: %s", e.Error())
-				} else {
-					if status == sdoperationstatus.Success {
-						log.Println("... De-Register Instance OK")
+		for {
+			if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration...); e != nil {
+				log.Println("... De-Register Instance Failed: " + e.Error())
+				return fmt.Errorf("De-Register Instance Fail: %s", e.Error())
+			} else {
+				if status == sdoperationstatus.Success {
+					log.Println("... De-Register Instance OK")
 
-						cfg.SetInstanceId("")
+					cfg.SetInstanceId("")
 
-						if e2 := cfg.Save(); e2 != nil {
-							log.Println("... Update Config with De-Registered Instance Failed: " + e2.Error())
-							return fmt.Errorf("De-Register Instance Fail When Save Config Errored: %s", e2.Error())
-						} else {
-							log.Println("... Update Config with De-Registered Instance OK")
-							return nil
-						}
-					} else if status == sdoperationstatus.Fail {
-						// FIX #12: Permanent failure — do not retry
-						log.Println("... De-Register Instance Failed: Operation returned Fail status")
-						return fmt.Errorf("De-Register Instance Failed: Operation returned permanent Fail status")
+					if e2 := cfg.Save(); e2 != nil {
+						log.Println("... Update Config with De-Registered Instance Failed: " + e2.Error())
+						return fmt.Errorf("De-Register Instance Fail When Save Config Errored: %s", e2.Error())
 					} else {
-						if tryCount < 20 {
-							tryCount++
-							log.Println("... Checking De-Register Instance Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
-							time.Sleep(250 * time.Millisecond)
-						} else {
-							log.Println("... De-Register Instance Failed: Operation Timeout After 5 Seconds")
-							return fmt.Errorf("De-register Instance Fail When Operation Timed Out After 5 Seconds")
-						}
+						log.Println("... Update Config with De-Registered Instance OK")
+						return nil
+					}
+				} else if status == sdoperationstatus.Fail {
+					// FIX #12: Permanent failure — do not retry
+					log.Println("... De-Register Instance Failed: Operation returned Fail status")
+					return fmt.Errorf("De-Register Instance Failed: Operation returned permanent Fail status")
+				} else {
+					if tryCount < 20 {
+						tryCount++
+						log.Println("... Checking De-Register Instance Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
+						time.Sleep(250 * time.Millisecond)
+					} else {
+						log.Println("... De-Register Instance Failed: Operation Timeout After 5 Seconds")
+						return fmt.Errorf("De-register Instance Fail When Operation Timed Out After 5 Seconds")
 					}
 				}
 			}
 		}
+	}
 }
 
 // unsubscribe all existing sns subscriptions if any
