@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -825,7 +826,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 	go func() {
 		if s.BeforeServerStart != nil {
 			log.Println("Before gRPC Server Starts Begin...")
-			s.BeforeServerStart(s)
+			s.runHook("BeforeServerStart", s.BeforeServerStart)
 			log.Println("... Before gRPC Server Starts End")
 		}
 
@@ -1080,7 +1081,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 
 		// trigger after server start event
 		if s.AfterServerStart != nil {
-			s.AfterServerStart(s)
+			s.runHook("AfterServerStart", s.AfterServerStart)
 		}
 	}()
 
@@ -1562,6 +1563,36 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 // registration).
 var ErrServiceAlreadyStarted = errors.New("connector/service: Service.Serve called more than once (Service is single-use; construct a new Service instance to re-start)")
 
+// runHook invokes a user-provided lifecycle hook (BeforeServerStart,
+// AfterServerStart, BeforeServerShutdown, AfterServerShutdown) with
+// panic recovery so a buggy or unstable hook cannot crash the Service
+// lifecycle. If hook is nil, runHook is a no-op.
+//
+// Fix: SVC-F2 (deep-review-2026-04-13-contrarian). Before this helper,
+// panics in BeforeServerStart / AfterServerStart crashed the startup
+// goroutine with zero diagnostic; panics in BeforeServerShutdown /
+// AfterServerShutdown crashed Serve() itself mid-cleanup, preventing
+// the function from returning cleanly and leaking the signal handler,
+// quit-handler goroutine, and listener from the earlier phase.
+//
+// Recovery is intentional: lifecycle hooks are user-supplied callbacks
+// whose failure must not bring down the Service. The recovered panic
+// is logged with the hook name, the panic value, and the full stack
+// trace so the issue is not silent. The hook name is hard-coded at
+// each call site so the log message clearly identifies which hook
+// misbehaved.
+func (s *Service) runHook(name string, hook func(*Service)) {
+	if hook == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("!!! %s hook panic recovered: %v\n%s !!!", name, r, debug.Stack())
+		}
+	}()
+	hook(s)
+}
+
 // Serve runs the full service lifecycle and blocks until the gRPC
 // server has shut down. The sequence is:
 //
@@ -1642,7 +1673,7 @@ func (s *Service) Serve() error {
 
 	if s.BeforeServerShutdown != nil {
 		log.Println("Before gRPC Server Shutdown Begin...")
-		s.BeforeServerShutdown(s)
+		s.runHook("BeforeServerShutdown", s.BeforeServerShutdown)
 		log.Println("... Before gRPC Server Shutdown End")
 	}
 
@@ -1651,7 +1682,7 @@ func (s *Service) Serve() error {
 
 	if s.AfterServerShutdown != nil {
 		log.Println("After gRPC Server Shutdown Begin...")
-		s.AfterServerShutdown(s)
+		s.runHook("AfterServerShutdown", s.AfterServerShutdown)
 		log.Println("... After gRPC Server Shutdown End")
 	}
 

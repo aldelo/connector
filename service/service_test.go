@@ -635,6 +635,130 @@ func TestService_Serve_FreshInstancesIndependent(t *testing.T) {
 	}
 }
 
+// -----------------------------------------------------------------------
+// SVC-F2 — hook panic recovery
+// -----------------------------------------------------------------------
+//
+// runHook wraps user-supplied lifecycle callbacks
+// (BeforeServerStart/AfterServerStart/BeforeServerShutdown/
+// AfterServerShutdown) with defer recover() so a panicking hook cannot
+// crash the Service lifecycle. Pre-fix behavior: a panic in
+// BeforeServerShutdown crashed Serve() mid-cleanup, leaking the signal
+// handler, quit-handler goroutine, and listener; panics in the startup
+// hooks crashed the startup goroutine silently.
+//
+// These tests exercise runHook directly because it is the ONLY new
+// surface area for the fix, and driving it through Serve() would
+// require real gRPC lifecycle machinery (listener, signal handler,
+// cloudmap) that has nothing to do with the invariant under test.
+
+// TestService_RunHook_NilHookIsNoOp verifies that a nil hook is silently
+// skipped and no panic escapes. This protects the common case where the
+// caller does not supply a given lifecycle hook.
+func TestService_RunHook_NilHookIsNoOp(t *testing.T) {
+	s := &Service{}
+	// Must not panic. Must not deadlock. Must simply return.
+	s.runHook("BeforeServerStart", nil)
+}
+
+// TestService_RunHook_NormalHookInvoked verifies that a well-behaved
+// hook runs to completion and the caller observes its side effects.
+func TestService_RunHook_NormalHookInvoked(t *testing.T) {
+	s := &Service{}
+	called := false
+	var receivedSvc *Service
+
+	s.runHook("AfterServerStart", func(svc *Service) {
+		called = true
+		receivedSvc = svc
+	})
+
+	if !called {
+		t.Error("hook was not invoked")
+	}
+	if receivedSvc != s {
+		t.Errorf("hook received %p, want %p (runHook must pass receiver)", receivedSvc, s)
+	}
+}
+
+// TestService_RunHook_PanickingHookRecovered verifies the core SVC-F2
+// invariant: a hook that panics does NOT propagate the panic out of
+// runHook. The test itself would abort with `panic: boom` if recovery
+// was broken (defer/recover inside runHook is the only thing standing
+// between the panic and the test goroutine).
+func TestService_RunHook_PanickingHookRecovered(t *testing.T) {
+	s := &Service{}
+
+	// If runHook re-panics, the `defer` below never runs and `recovered`
+	// stays false — but more importantly the test binary would abort.
+	// We use a local recover as an extra belt-and-braces assertion that
+	// no panic escaped runHook.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("runHook let panic escape: %v", r)
+		}
+	}()
+
+	s.runHook("BeforeServerShutdown", func(svc *Service) {
+		panic("boom")
+	})
+
+	// Reaching this line proves the panic did not escape runHook.
+}
+
+// TestService_RunHook_PanickingHookDoesNotBlockNextHook verifies that
+// recovery does not leave runHook in a wedged state — subsequent hook
+// invocations on the same Service still work. This guards against a
+// future refactor that puts runHook state behind a sync primitive and
+// forgets to release it on the recover path.
+func TestService_RunHook_PanickingHookDoesNotBlockNextHook(t *testing.T) {
+	s := &Service{}
+	s.runHook("BeforeServerStart", func(svc *Service) {
+		panic("first hook panicked")
+	})
+
+	// Second hook must still run. If runHook was holding a lock on the
+	// recover path, this call would deadlock — so we wrap it in a
+	// timeout via a channel.
+	done := make(chan struct{})
+	var called bool
+	go func() {
+		defer close(done)
+		s.runHook("AfterServerShutdown", func(svc *Service) {
+			called = true
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runHook deadlocked on second invocation after recovery")
+	}
+	if !called {
+		t.Error("second hook was not invoked after first hook recovered")
+	}
+}
+
+// TestService_RunHook_PanickingHookRuntimeError verifies recovery for
+// a runtime.Error panic (e.g., nil pointer deref), which is the most
+// likely real-world panic shape — user hook accidentally dereferences
+// a field that isn't set yet. Distinct from explicit `panic("str")`
+// because runtime errors flow through a different panic path internally.
+func TestService_RunHook_PanickingHookRuntimeError(t *testing.T) {
+	s := &Service{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("runHook let runtime panic escape: %v", r)
+		}
+	}()
+
+	s.runHook("BeforeServerStart", func(svc *Service) {
+		var p *int
+		_ = *p // nil pointer deref, SIGSEGV-ish runtime panic
+	})
+}
+
 // TestStopGRPCServerBounded_ZeroTimeoutUsesDefault verifies that a zero
 // or negative timeout falls back to the 30-second default rather than
 // timing out immediately.
