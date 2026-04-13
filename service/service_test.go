@@ -759,6 +759,139 @@ func TestService_RunHook_PanickingHookRuntimeError(t *testing.T) {
 	})
 }
 
+// -----------------------------------------------------------------------
+// SVC-F6 safeGo tests
+// -----------------------------------------------------------------------
+//
+// safeGo wraps every service-internal goroutine spawn so a panic in
+// background code (AWS SDK poll loops, startup orchestrator, quit
+// handler, etc.) is recovered and logged instead of crashing the
+// process. Pre-SVC-F6, grpc_recovery was the ONLY panic safety net,
+// and it covers ONLY handler interceptor invocations — the 7 background
+// goroutines in service.go had zero protection.
+//
+// These tests pin the observable contract of safeGo:
+//   - nil fn is a no-op (does not spawn, does not panic)
+//   - normal fn runs to completion in a new goroutine
+//   - panicking fn is recovered; caller never sees the panic escape
+//   - runtime panics (nil deref) are also recovered
+
+// TestSafeGo_NilFnIsNoOp: nil fn must NOT spawn a goroutine. The test
+// completes immediately without any observable side effect.
+func TestSafeGo_NilFnIsNoOp(t *testing.T) {
+	// If safeGo spawned a goroutine despite nil fn, the anonymous func
+	// inside would call fn() and panic on nil — the defer would catch
+	// it but the log line would still fire. We can't observe that
+	// directly, so just verify that no panic escapes the caller.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("safeGo(nil) panicked at the call site: %v", r)
+		}
+	}()
+
+	safeGo("nil-fn", nil)
+	// Give any accidentally-spawned goroutine a moment to run.
+	time.Sleep(20 * time.Millisecond)
+}
+
+// TestSafeGo_NormalFnCompletes: a well-behaved fn runs in a goroutine
+// and signals completion via channel. Verifies the happy path.
+func TestSafeGo_NormalFnCompletes(t *testing.T) {
+	done := make(chan struct{})
+
+	safeGo("normal-fn", func() {
+		close(done)
+	})
+
+	select {
+	case <-done:
+		// pass
+	case <-time.After(2 * time.Second):
+		t.Fatal("safeGo fn did not execute within 2s")
+	}
+}
+
+// TestSafeGo_PanickingFnRecovered: a panicking fn must be recovered
+// inside the goroutine. Since the goroutine runs concurrently, the
+// caller's defer/recover cannot catch a panic escaping from it — a
+// runtime that didn't recover would crash the test binary with
+// `panic: runtime error` and `go test` would report FAIL with the
+// panic trace. The fact that the assertion after sleep runs at all
+// proves the recovery worked.
+func TestSafeGo_PanickingFnRecovered(t *testing.T) {
+	entered := make(chan struct{})
+
+	safeGo("panicking-fn", func() {
+		close(entered)
+		panic("deliberate panic in safeGo test")
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("safeGo fn did not start within 2s")
+	}
+
+	// Give the panic + recovery + log a moment to complete.
+	time.Sleep(50 * time.Millisecond)
+
+	// If we got here without the test binary crashing, recovery worked.
+}
+
+// TestSafeGo_PanickingFnRuntimeError: recovers a runtime.Error panic
+// (nil pointer deref) — the most likely real-world shape, since AWS SDK
+// poll loops tend to deref cached response fields.
+func TestSafeGo_PanickingFnRuntimeError(t *testing.T) {
+	entered := make(chan struct{})
+
+	safeGo("runtime-error-fn", func() {
+		close(entered)
+		var p *int
+		_ = *p // nil deref
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("safeGo fn did not start within 2s")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+}
+
+// TestSafeGo_ConcurrentPanicsAllRecovered: fleet of 50 panicking
+// goroutines — all must be recovered independently. A single escaped
+// panic would crash the binary. Also verifies safeGo has no shared
+// state causing recovery contention.
+func TestSafeGo_ConcurrentPanicsAllRecovered(t *testing.T) {
+	const n = 50
+	var started sync.WaitGroup
+	started.Add(n)
+
+	for i := 0; i < n; i++ {
+		safeGo("concurrent-panic", func() {
+			started.Done()
+			panic("concurrent panic")
+		})
+	}
+
+	// Wait for all goroutines to have at least entered fn.
+	done := make(chan struct{})
+	go func() {
+		started.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("not all safeGo goroutines started within 3s")
+	}
+
+	// Drain recovery logs.
+	time.Sleep(100 * time.Millisecond)
+}
+
 // TestStopGRPCServerBounded_ZeroTimeoutUsesDefault verifies that a zero
 // or negative timeout falls back to the 30-second default rather than
 // timing out immediately.
