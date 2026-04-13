@@ -313,7 +313,7 @@ func readConfig(appName string, configFileName string, customConfigPath string) 
 	}
 
 	if err := c.Read(); err != nil {
-		return nil, fmt.Errorf("Read Config Failed: %s", err.Error())
+		return nil, fmt.Errorf("Read Config Failed: %w", err)
 	}
 
 	if c.WebServer.Port > 65535 {

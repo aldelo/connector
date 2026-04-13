@@ -457,7 +457,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 		atomic.StoreInt32(&n._notificationServicesStarted, 0)
 		n._grpcClient.ZLog().Errorf("!!! Notifier Client Subscribe to TopicArn Failed: " + err.Error() + " !!!")
-		err = fmt.Errorf("Notifier Client Subscribe to TopicArn Failed: %s", err.Error())
+		err = fmt.Errorf("Notifier Client Subscribe to TopicArn Failed: %w", err)
 		return err
 	}
 
@@ -808,7 +808,7 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 		n._subscriberTopicArn = ""
 		n._subscribeCancel = nil
 		n._subMu.Unlock()
-		err = fmt.Errorf("Notifier Client ID %s Unsubscribe From TopicARN %s Failed: %s", subID, subTopic, err.Error())
+		err = fmt.Errorf("Notifier Client ID %s Unsubscribe From TopicARN %s Failed: %w", subID, subTopic, err)
 		return err
 	} else {
 		// unsubscribe ok

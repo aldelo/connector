@@ -116,14 +116,14 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	}
 
 	if err := cfg.Read(); err != nil {
-		return nil, fmt.Errorf("Read Notifier Gateway Config Failed: %s", err.Error())
+		return nil, fmt.Errorf("Read Notifier Gateway Config Failed: %w", err)
 	}
 
 	// establish data store connection
 	// FIX #9: ConnectDataStore already sets DynamoDBActionRetryAttempts atomically,
 	// so the redundant SetDynamoDBActionRetryAttempts call is removed.
 	if err := model.ConnectDataStore(cfg); err != nil {
-		return nil, fmt.Errorf("Connect Notifier Gateway Data Store Failed: %s", err.Error())
+		return nil, fmt.Errorf("Connect Notifier Gateway Data Store Failed: %w", err)
 	} else {
 		model.SetGatewayKey(cfg.NotifierGatewayData.GatewayKey)
 
@@ -538,7 +538,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 		c.String(412, "Expected Confirmation Payload")
 
 		if seg != nil && seg.Ready() {
-			_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' BindJSON Error: %s", err.Error()))
+			_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' BindJSON Error: %w", err))
 		}
 	} else {
 		// SNS signature verification — secure by default.
@@ -607,7 +607,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 					c.String(412, "Server Key Not Valid")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error()))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %w", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err))
 					}
 
 					return
@@ -643,7 +643,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				c.String(412, "Subscription Confirm Callback Failed")
 
 				if seg != nil && seg.Ready() {
-					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Failed: %s", err.Error()))
+					_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Failed: %w", err))
 				}
 			} else if status != 200 {
 				log.Println("/snsrouter 'subscriptionconfirmation' GET Not Status 200: [" + util.Itoa(status) + "] Body: " + body)
@@ -679,7 +679,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 						log.Println("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Failed: (SNS Subscription Still Valid, This is Warning Only) " + err.Error())
 
 						if seg != nil && seg.Ready() {
-							_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Failed: (SNS Subscription Still Valid, This is Warning Only) %s", err.Error()))
+							_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Failed: (SNS Subscription Still Valid, This is Warning Only) %w", err))
 						}
 					} else if status != 200 {
 						log.Println("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Not Receive Status 200: (SNS Subscription Still Valid, This is Warning Only) Info = " + body)
@@ -768,7 +768,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 		c.String(412, "Expected Notification Payload")
 
 		if seg != nil && seg.Ready() {
-			_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' BindJSON Error: %s", err.Error()))
+			_ = seg.Seg.AddError(fmt.Errorf("/snsrouter 'notification' BindJSON Error: %w", err))
 		}
 	} else {
 		// SNS signature verification — secure by default. See snsconfirmation
@@ -838,7 +838,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 			c.String(412, "Server Key Not Valid")
 
 			if seg != nil && seg.Ready() {
-				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %s", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error()))
+				_ = seg.Seg.AddError(fmt.Errorf("Server Key %s Lookup Failed: (IP Source: %s) %w", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err))
 			}
 		} else if util.LenTrim(serverUrl) == 0 {
 			log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank")
@@ -855,7 +855,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 				c.String(412, "Notification Marshal Failed")
 
 				if seg != nil && seg.Ready() {
-					_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error()))
+					_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %w", escapeUserInput(serverKey), serverUrl, err))
 				}
 			} else {
 				// relay sns notification to target notify server
@@ -873,7 +873,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 					c.String(412, "Route Notification to Internal Host Failed")
 
 					if seg != nil && seg.Ready() {
-						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error()))
+						_ = seg.Seg.AddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %w", escapeUserInput(serverKey), serverUrl, err))
 					}
 				} else if statusCode != 200 {
 					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", escapeUserInput(serverKey), serverUrl, statusCode)
@@ -1128,7 +1128,7 @@ func connectSd(namespaceId string, awsRegionName string) (sd *cloudmap.CloudMap,
 	}
 
 	if err := sd.Connect(); err != nil {
-		return nil, fmt.Errorf("Connect SD for NamespaceID '%s' Failed: %s", namespaceId, err.Error())
+		return nil, fmt.Errorf("Connect SD for NamespaceID '%s' Failed: %w", namespaceId, err)
 	} else {
 		return sd, nil
 	}

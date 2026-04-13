@@ -671,7 +671,7 @@ func (c *Client) readConfig() error {
 
 	if err := c._config.Read(); err != nil {
 		c._config = nil
-		return fmt.Errorf("Read Config Failed: %s", err.Error())
+		return fmt.Errorf("Read Config Failed: %w", err)
 	}
 
 	if c._config.Target.InstancePort > 65535 {
@@ -1337,7 +1337,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			if z := c.ZLog(); z != nil {
 				z.Errorf("Dial Failed: (If TLS/mTLS, Check Certificate SAN) %s", err.Error())
 			}
-			e := fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: (If TLS/mTLS, Check Certificate SAN) %s", target, err.Error())
+			e := fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: (If TLS/mTLS, Check Certificate SAN) %w", target, err)
 			if seg != nil {
 				_ = seg.Seg.AddError(e)
 			}
@@ -2300,7 +2300,7 @@ func (c *Client) connectSd() error {
 			AwsRegion: awsregion.GetAwsRegion(c._config.Target.Region),
 		}
 		if err := cm.Connect(); err != nil {
-			return fmt.Errorf("Connect SD Failed: %s", err.Error())
+			return fmt.Errorf("Connect SD Failed: %w", err)
 		}
 		c.connMu.Lock()
 		c._sd = cm
@@ -2762,7 +2762,7 @@ func (c *Client) deregisterInstance(p *serviceEndpoint) error {
 		operationId, err := registry.DeregisterInstance(sd, p.InstanceId, p.ServiceId, timeoutDuration...)
 		if err != nil {
 			errorf("... De-Register Instance '%s:%s-%s' Failed: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
-			return fmt.Errorf("De-Register Instance '%s:%s-%s' Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
+			return fmt.Errorf("De-Register Instance '%s:%s-%s' Fail: %w", p.Host, util.UintToStr(p.Port), p.InstanceId, err)
 		}
 
 		tryCount := 0

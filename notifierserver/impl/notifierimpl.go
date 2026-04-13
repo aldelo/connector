@@ -474,7 +474,7 @@ func (n *NotifierImpl) ReadConfig(appName string, configFileName string, customC
 	}
 
 	if err := n.ConfigData.Read(); err != nil {
-		return fmt.Errorf("Read Notifier Config Failed: %s", err.Error())
+		return fmt.Errorf("Read Notifier Config Failed: %w", err)
 	}
 
 	if strings.ToLower(util.Left(n.ConfigData.NotifierServerData.GatewayUrl, 7)) != "http://" && strings.ToLower(util.Left(n.ConfigData.NotifierServerData.GatewayUrl, 8)) != "https://" {

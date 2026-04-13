@@ -198,7 +198,7 @@ func (s *Service) readConfig() error {
 	}
 
 	if err := s._config.Read(); err != nil {
-		return fmt.Errorf("Read Config Failed: %s", err.Error())
+		return fmt.Errorf("Read Config Failed: %w", err)
 	}
 
 	if s._config.Instance.Port > 65535 {
@@ -645,7 +645,7 @@ func (s *Service) connectSd() error {
 		}
 
 		if err := s._sd.Connect(); err != nil {
-			return fmt.Errorf("Connect SD Failed: %s", err.Error())
+			return fmt.Errorf("Connect SD Failed: %w", err)
 		}
 	} else {
 		s._sd = nil
@@ -1114,7 +1114,7 @@ func (s *Service) registerSd(ip string, port uint) error {
 				log.Println("... De-Register Instance OK")
 			}
 		}
-		return fmt.Errorf("Register Instance Failed: %s", err.Error())
+		return fmt.Errorf("Register Instance Failed: %w", err)
 	}
 
 	return nil
@@ -1708,7 +1708,7 @@ func (s *Service) doDeregisterInstance() error {
 
 	if operationId, err := registry.DeregisterInstance(sd, cfg.Instance.Id, cfg.Service.Id, timeoutDuration...); err != nil {
 		log.Println("... De-Register Instance Failed: " + err.Error())
-		return fmt.Errorf("De-Register Instance Fail: %s", err.Error())
+		return fmt.Errorf("De-Register Instance Fail: %w", err)
 	} else {
 		tryCount := 0
 

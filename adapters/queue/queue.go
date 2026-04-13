@@ -78,7 +78,7 @@ func ensureSnsPolicy(q *sqs.SQS, queueUrl, queueArn, snsTopicArn string, timeout
 	// Fetch existing policy (if any)
 	attrs, err := q.GetQueueAttributes(queueUrl, []sqsgetqueueattribute.SQSGetQueueAttribute{sqsgetqueueattribute.Policy}, timeoutDuration...)
 	if err != nil {
-		return fmt.Errorf("GetQueue Failed: (Get Queue Attributes Error) %s", err.Error())
+		return fmt.Errorf("GetQueue Failed: (Get Queue Attributes Error) %w", err)
 	}
 
 	existing := ""
@@ -279,7 +279,7 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 	queueUrl, notFound, err = q.GetQueueUrl(queueName, timeoutDuration...)
 
 	if err != nil {
-		return "", "", fmt.Errorf("GetQueue Failed: %s", err.Error())
+		return "", "", fmt.Errorf("GetQueue Failed: %w", err)
 	}
 
 	// Only treat empty queueUrl as an error when the queue was expected to exist.
@@ -338,7 +338,7 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 
 		if queueUrl, err = q.CreateQueue(queueName, attrs, timeoutDuration...); err != nil {
 			// create queue failed
-			return "", "", fmt.Errorf("CreateQueue Failed: %s", err.Error())
+			return "", "", fmt.Errorf("CreateQueue Failed: %w", err)
 		} else {
 			// queue created
 			queueArn, e := q.GetQueueArnFromQueue(queueUrl, timeoutDuration...)
