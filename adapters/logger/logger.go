@@ -56,6 +56,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	data "github.com/aldelo/common/wrapper/zap"
 	"google.golang.org/grpc"
@@ -224,14 +225,31 @@ func codeOf(err error) codes.Code {
 	return status.Code(err)
 }
 
-// truncate returns s if it fits in max bytes, otherwise s[:max] + "...".
-// Operates on bytes, not runes — fine for log fields where we just want a
-// hard upper bound on storage.
+// truncate returns s if it fits in max bytes, otherwise truncates s at the
+// largest rune boundary <= max bytes and appends "..." as a continuation
+// marker.
+//
+// MET-F2 fix: pre-fix this byte-sliced at exactly `max`, which lands
+// mid-rune for any non-ASCII string (Japanese/emoji/accented chars), and
+// Zap's JSON encoder then either rejects the field with InvalidUTF8Error
+// or escapes the partial bytes as \ufffd — corrupting structured logs
+// downstream. Walking forward via utf8.DecodeRuneInString ensures we
+// always cut on a rune boundary, even when the input itself contains
+// invalid bytes (DecodeRuneInString returns size=1 for an invalid byte,
+// so the loop still makes forward progress).
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "..."
+	n := 0
+	for n < len(s) {
+		_, size := utf8.DecodeRuneInString(s[n:])
+		if n+size > max {
+			break
+		}
+		n += size
+	}
+	return s[:n] + "..."
 }
 
 // redactMetadata returns a flat map[string]string copy of md with

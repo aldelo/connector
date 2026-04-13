@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -77,6 +78,75 @@ func TestTruncate_OverLimit(t *testing.T) {
 	// Truncated body should be exactly maxErrorLen chars + "..."
 	if len(got) != maxErrorLen+3 {
 		t.Errorf("expected len %d, got %d", maxErrorLen+3, len(got))
+	}
+}
+
+// TestTruncate_PreservesUTF8Boundary pins MET-F2: when an input string
+// exceeds the byte cap and contains multi-byte runes, the result must
+// always be valid UTF-8. Pre-fix, byte-slicing at exactly `max` landed
+// mid-rune for any non-ASCII script, and Zap's JSON encoder then
+// rejected the field with InvalidUTF8Error or replaced it with \ufffd,
+// corrupting structured logs downstream.
+func TestTruncate_PreservesUTF8Boundary(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		max  int
+	}{
+		{"ascii_fits", "hello world", 256},
+		{"ascii_truncate", strings.Repeat("a", 300), 256},
+		// each "こ" is 3 bytes — 100*3 = 300 > 256, and 256 % 3 != 0 so
+		// the naive byte-slice would land mid-rune
+		{"japanese", strings.Repeat("こ", 100), 256},
+		// each "🎉" is 4 bytes — 50*4 = 200 fits, so use 70 to force overflow
+		{"emoji_truncate", strings.Repeat("🎉", 70), 256},
+		// mixed ASCII + multi-byte with a tight byte cap
+		{"mixed_tight", "hello こんにちは 🎉", 16},
+		// edge: cap smaller than a single rune's width — must still
+		// produce valid UTF-8 (empty body + ellipsis is acceptable)
+		{"sub_rune_cap", "こんにちは", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := truncate(tc.in, tc.max)
+			// Strip the ellipsis (if added) before validating, so we
+			// pin the contract on the truncated content itself, not
+			// the marker.
+			body := out
+			if len(out) > len(tc.in) || strings.HasSuffix(out, "...") && len(tc.in) > tc.max {
+				body = strings.TrimSuffix(out, "...")
+			}
+			if !utf8.ValidString(body) {
+				t.Errorf("MET-F2 regression: invalid UTF-8 after truncate: in=%q out=%q body=%q", tc.in, out, body)
+			}
+			// Body must not exceed the byte cap (the ellipsis is
+			// allowed to push total length over).
+			if len(body) > tc.max {
+				t.Errorf("body exceeded max: len(body)=%d max=%d out=%q", len(body), tc.max, out)
+			}
+			// If the input fits, output must equal input (no ellipsis).
+			if len(tc.in) <= tc.max && out != tc.in {
+				t.Errorf("fits but was modified: in=%q out=%q", tc.in, out)
+			}
+		})
+	}
+}
+
+// TestTruncate_InvalidInputBytesStillMakesProgress confirms the
+// loop terminates and produces valid output even when the input
+// itself contains invalid UTF-8 bytes — DecodeRuneInString returns
+// size=1 for an invalid byte, so each iteration advances at least
+// one byte.
+func TestTruncate_InvalidInputBytesStillMakesProgress(t *testing.T) {
+	// Construct a string with an embedded invalid byte sequence.
+	in := "abc" + string([]byte{0xff, 0xfe, 0xfd}) + strings.Repeat("x", 300)
+	got := truncate(in, maxErrorLen)
+	if len(got) > maxErrorLen+3 {
+		t.Errorf("output too long: %d", len(got))
+	}
+	// Must terminate (test would hang otherwise) and end with ellipsis.
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("expected trailing ellipsis, got tail %q", got[len(got)-10:])
 	}
 }
 
