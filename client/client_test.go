@@ -25,7 +25,20 @@ import (
 	"testing"
 )
 
+// TestClient_Dial is an integration test that requires:
+//   - A populated client.yaml with real Target.ServiceName / NamespaceName / Region
+//   - A reachable AWS Cloud Map namespace for service discovery
+//   - A running gRPC AnswerService at the discovered endpoint
+//
+// It is skipped under `go test -short` (and therefore in CI) because the
+// default client.yaml has empty discovery fields and no server is running.
+// Run manually with: `go test -run TestClient_Dial ./client/` after
+// configuring client.yaml and starting the example server. P2-16.
 func TestClient_Dial(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires configured client.yaml + running gRPC AnswerService")
+	}
+
 	cli := NewClient("testclient", "client", "")
 
 	// cli.StatsHandler
