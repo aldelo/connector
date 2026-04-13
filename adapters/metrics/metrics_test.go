@@ -21,6 +21,7 @@ package metrics
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -183,6 +184,80 @@ func TestSeriesKey_NoLabels(t *testing.T) {
 	}
 	if len(labels) != 0 {
 		t.Errorf("expected nil/empty labels, got %v", labels)
+	}
+}
+
+// TestSeriesKey_AdversarialLabelValues pins MET-F1: label values
+// containing the structural delimiters `,` and `=` (and the escape
+// character `\`) must NOT collide across distinct logical series, and
+// must round-trip exactly through seriesKey/parseSeriesKey.
+//
+// Pre-fix, the encoder concatenated label values raw, so:
+//
+//	{"path":"/a=b,c"}              ->  rpc|path=/a=b,c
+//	{"path":"/a","extra":"b,c"}    ->  rpc|extra=b,c,path=/a   (different)
+//
+// while a more realistic collision arose when two label values shared
+// the same delimiter pattern. The fix backslash-escapes both keys and
+// values on encode, and a byte-walking parser respects the escapes on
+// decode.
+func TestSeriesKey_AdversarialLabelValues(t *testing.T) {
+	cases := []map[string]string{
+		{"path": "/a=b,c"},
+		{"path": "/a", "extra": "b,c"},
+		{"name": "tenant=acme"},
+		{"k": `v1\,v2=v3`},
+		{"k": `\\`}, // raw double-backslash
+		{"a,b": "x"},  // delimiter inside a key, not just a value
+		{"a=b": "y"},
+		{"empty": ""},
+	}
+	seen := map[string]map[string]string{}
+	for _, c := range cases {
+		k := seriesKey("rpc", c)
+		if prev, ok := seen[k]; ok && !reflect.DeepEqual(prev, c) {
+			t.Errorf("collision: %v and %v both produced %q", prev, c, k)
+		}
+		seen[k] = c
+
+		// Round-trip must restore the exact map.
+		name, out := parseSeriesKey(k)
+		if name != "rpc" {
+			t.Errorf("name lost: in=%v key=%q name=%q", c, k, name)
+		}
+		if !reflect.DeepEqual(out, c) {
+			t.Errorf("round-trip lost data: in=%v key=%q out=%v", c, k, out)
+		}
+	}
+}
+
+// TestSeriesKey_CounterAggregationDoesNotCollideAcrossAdversarialLabels
+// is the production-shaped reproducer: pre-fix, two distinct Counter
+// calls with adversarial label values would silently sum into a single
+// series. Post-fix, each call increments its own series.
+func TestSeriesKey_CounterAggregationDoesNotCollideAcrossAdversarialLabels(t *testing.T) {
+	m := NewMemorySink()
+	a := map[string]string{"path": "/a=b,c"}
+	b := map[string]string{"path": "/a", "extra": "b,c"}
+	m.Counter("rpc", a, 1)
+	m.Counter("rpc", b, 1)
+
+	cs, _ := m.Snapshot()
+	if len(cs) < 2 {
+		t.Fatalf("MET-F1 regression: expected at least 2 distinct counters, got %d", len(cs))
+	}
+
+	var foundA, foundB bool
+	for _, c := range cs {
+		if c.Name == "rpc" && reflect.DeepEqual(c.Labels, a) && c.Value == 1 {
+			foundA = true
+		}
+		if c.Name == "rpc" && reflect.DeepEqual(c.Labels, b) && c.Value == 1 {
+			foundB = true
+		}
+	}
+	if !foundA || !foundB {
+		t.Errorf("MET-F1 regression: distinct series collapsed — foundA=%v foundB=%v cs=%+v", foundA, foundB, cs)
 	}
 }
 

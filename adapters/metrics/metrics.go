@@ -235,11 +235,40 @@ func (m *MemorySink) Snapshot() ([]CounterSnapshot, []HistogramSnapshot) {
 	return cs, hs
 }
 
+// escapeLabel backslash-escapes the three structural characters used by
+// seriesKey so that label keys/values containing `,` or `=` cannot collide
+// across different (key, value) pairs. The escape character itself is
+// escaped FIRST so that double-escaping cannot conflate input bytes.
+//
+// MET-F1 fix: pre-fix, an unescaped `,` or `=` in a label value silently
+// merged distinct series — e.g. {"path":"/a=b,c"} and
+// {"path":"/a","extra":"b,c"} produced the same key. With escaping, both
+// round-trip uniquely.
+func escapeLabel(s string) string {
+	if !strings.ContainsAny(s, `\,=`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' || c == ',' || c == '=' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
 // seriesKey builds a deterministic string key for a (name, labels) pair.
 // Labels are sorted by key so the same logical series always hashes to
 // the same map slot regardless of caller iteration order.
 //
-// Format: name|k1=v1,k2=v2,...
+// Format: name|k1=v1,k2=v2,...   where each k and v is backslash-escaped
+// (see escapeLabel). The metric name itself is not escaped because the
+// package owns it (callers pass package-level constants like
+// mServerRequests, never user input). Label keys and values may be
+// user-controlled, so they are always escaped.
 //
 // The format is internal — callers should not parse it. Use parseSeriesKey
 // (intentionally limited) to recover the original components.
@@ -261,9 +290,9 @@ func seriesKey(name string, labels map[string]string) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(k)
+		b.WriteString(escapeLabel(k))
 		b.WriteByte('=')
-		b.WriteString(labels[k])
+		b.WriteString(escapeLabel(labels[k]))
 	}
 	return b.String()
 }
@@ -274,6 +303,12 @@ func seriesKey(name string, labels map[string]string) string {
 // This is a deliberate round-trip — Snapshot needs the originals for
 // CounterSnapshot/HistogramSnapshot. We accept the cost of re-parsing
 // rather than storing duplicate (key, name, labels) tuples in the map.
+//
+// MET-F1 fix: byte-walk parser that respects backslash escapes for `,`
+// (pair separator) and `=` (key/value separator). A literal `\` in input
+// arrives as `\\` and is restored to a single `\`. Any unescaped `,` or
+// `=` is treated as a structural delimiter, exactly as the encoder
+// emits it.
 func parseSeriesKey(key string) (string, map[string]string) {
 	pipe := strings.IndexByte(key, '|')
 	if pipe < 0 {
@@ -284,13 +319,53 @@ func parseSeriesKey(key string) (string, map[string]string) {
 	if rest == "" {
 		return name, nil
 	}
+
 	labels := make(map[string]string)
-	for _, pair := range strings.Split(rest, ",") {
-		eq := strings.IndexByte(pair, '=')
-		if eq < 0 {
+	var keyB, valB strings.Builder
+	inValue := false
+	flush := func() {
+		if keyB.Len() > 0 || valB.Len() > 0 {
+			labels[keyB.String()] = valB.String()
+		}
+		keyB.Reset()
+		valB.Reset()
+		inValue = false
+	}
+
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if c == '\\' && i+1 < len(rest) {
+			// Escape: emit the next byte literally into the
+			// current half (key or value). This restores `\`,
+			// `,`, and `=` produced by escapeLabel.
+			next := rest[i+1]
+			if inValue {
+				valB.WriteByte(next)
+			} else {
+				keyB.WriteByte(next)
+			}
+			i++ // consume the escaped byte
 			continue
 		}
-		labels[pair[:eq]] = pair[eq+1:]
+		if c == '=' && !inValue {
+			inValue = true
+			continue
+		}
+		if c == ',' {
+			flush()
+			continue
+		}
+		if inValue {
+			valB.WriteByte(c)
+		} else {
+			keyB.WriteByte(c)
+		}
+	}
+	// trailing pair
+	flush()
+
+	if len(labels) == 0 {
+		return name, nil
 	}
 	return name, labels
 }
