@@ -115,7 +115,9 @@ type healthreport struct {
 //     these fields against caller-side writes.
 //   - GracefulStop, ImmediateStop, and the internal signal handler may
 //     be invoked concurrently from any goroutine — they are guarded by
-//     _mu and a sync.Once on the Cloud Map deregister path.
+//     _mu plus an atomic.Bool one-shot CAS (_deregFired) on the Cloud
+//     Map deregister path that ensures exactly-once dereg without
+//     blocking concurrent callers.
 //
 // Lifecycle (see also _src/docs/repos/connector/architecture.md):
 //
@@ -257,15 +259,26 @@ type Service struct {
 	// awaitOsSigExit loops, no duplicate Cloud Map registration.
 	_started atomic.Bool
 
-	// P1-3: deregisterInstance is invoked from multiple shutdown paths
+	// SVC-F4: deregisterInstance is invoked from multiple shutdown paths
 	// (GracefulStop/ImmediateStop, the internal quit handler goroutine,
-	// and the Serve() defer). Previously this led to duplicate CloudMap
-	// DeregisterInstance requests under concurrent Stop. _deregOnce
-	// ensures the actual deregister runs at most once per Service
-	// lifetime; the cached _deregErr is returned to all subsequent
-	// callers so error reporting stays consistent.
-	_deregOnce sync.Once
-	_deregErr  error
+	// and the Serve() defer). The original P1-3 fix used sync.Once +
+	// cached error, but sync.Once.Do BLOCKS every concurrent caller
+	// behind the first caller's CloudMap poll loop (up to ~5s typical,
+	// ~100s pathological). That broke ImmediateStop's break-glass
+	// semantics: an operator invoking ImmediateStop while the signal
+	// path was mid-dereg would stall behind AWS.
+	//
+	// _deregFired is a one-shot atomic claim token. The first caller
+	// CAS-wins and runs the AWS deregister; every concurrent or later
+	// caller CAS-loses and returns nil immediately, letting paths like
+	// ImmediateStop fall through to gs.Stop() without waiting. The
+	// AWS API is itself idempotent on DeregisterInstance, and the
+	// one-shot CAS prevents any spurious duplicate call (the original
+	// P1-3 guarantee). Later callers no longer observe the first
+	// caller's error, but every call site treats the error as
+	// log-only — verified across all six deregisterInstance call
+	// sites — so no semantic regression.
+	_deregFired atomic.Bool
 }
 
 // NewService constructs a Service ready for further configuration.
@@ -1606,7 +1619,8 @@ func (s *Service) runHook(name string, hook func(*Service)) {
 //     panic from the server goroutine, or an explicit GracefulStop /
 //     ImmediateStop call.
 //  8. Run BeforeServerShutdown hook.
-//  9. Deregister from Cloud Map (sync.Once-guarded — see _deregOnce).
+//  9. Deregister from Cloud Map (one-shot atomic.Bool CAS-guarded —
+//     see _deregFired).
 //  10. grpc.Server.GracefulStop (or Stop, depending on shutdown path).
 //  11. Run AfterServerShutdown hook.
 //
@@ -1921,23 +1935,33 @@ func (s *Service) updateHealth(healthy bool) error {
 // deregisterInstance will remove instance from cloudmap and route 53.
 // FIX #12: Added sdoperationstatus.Fail check to return immediately on permanent failure.
 //
-// P1-3: Guarded by _deregOnce so concurrent shutdown paths
-// (GracefulStop/ImmediateStop, the internal quit-handler goroutine,
-// the Serve() defer) cannot issue duplicate CloudMap DeregisterInstance
-// requests. The first caller wins and does the actual work; any later
-// concurrent caller blocks on the Once until the first one returns,
-// then gets the same cached error. A caller that arrives after the
-// Once has fully completed also gets the cached error.
+// SVC-F4: Guarded by _deregFired (atomic.Bool one-shot CAS) so
+// concurrent shutdown paths (GracefulStop/ImmediateStop, the internal
+// quit-handler goroutine, the Serve() defer) cannot issue duplicate
+// CloudMap DeregisterInstance requests. Unlike the prior sync.Once
+// approach, later callers DO NOT block behind the first caller's
+// AWS poll loop — they CAS-fail and return nil immediately. This
+// preserves ImmediateStop's break-glass semantics: an operator
+// hitting the kill switch while the signal path is mid-dereg falls
+// through to gs.Stop() without waiting ~5s (or worse) on AWS.
+//
+// Returned error semantics: only the winning caller observes the
+// real deregister result; every other caller gets nil. All call
+// sites use the error for logging only (verified), so this is a
+// safe trade-off. The AWS DeregisterInstance API is idempotent, so
+// external correctness is unaffected.
 func (s *Service) deregisterInstance() error {
-	s._deregOnce.Do(func() {
-		s._deregErr = s.doDeregisterInstance()
-	})
-	return s._deregErr
+	if !s._deregFired.CompareAndSwap(false, true) {
+		// Another goroutine already claimed the deregister. Return
+		// without blocking — this is the core SVC-F4 fix.
+		return nil
+	}
+	return s.doDeregisterInstance()
 }
 
 // doDeregisterInstance performs the actual CloudMap deregister. It is
-// only called through _deregOnce, so it is guaranteed to run at most
-// once per Service lifetime.
+// only called through the _deregFired CAS guard in deregisterInstance,
+// so it is guaranteed to run at most once per Service lifetime.
 func (s *Service) doDeregisterInstance() error {
 	s._mu.RLock()
 	sd := s._sd
@@ -2046,9 +2070,11 @@ func (s *Service) unsubscribeSNS() {
 // allows in-flight RPCs to complete before tearing down connections.
 //
 // GracefulStop is safe to call concurrently with the internal
-// signal-driven shutdown path and with ImmediateStop. The
-// Cloud Map deregister step is sync.Once-guarded (see _deregOnce) so
-// duplicate concurrent invocations result in a single deregister call.
+// signal-driven shutdown path and with ImmediateStop. The Cloud Map
+// deregister step is guarded by a one-shot atomic.Bool CAS
+// (_deregFired, see SVC-F4): the first concurrent caller wins and
+// runs the AWS dereg; every other caller CAS-fails and returns
+// immediately without blocking on the first caller's AWS poll loop.
 //
 // This method does not wait for the gRPC server to fully drain — that
 // is grpc.Server.GracefulStop's responsibility. The Serve goroutine
@@ -2123,7 +2149,12 @@ func (s *Service) GracefulStop() {
 //
 // Like GracefulStop, this method is safe to invoke concurrently with
 // the signal-driven shutdown path; the Cloud Map deregister is
-// sync.Once-guarded.
+// guarded by a one-shot atomic.Bool CAS (_deregFired, see SVC-F4).
+// ImmediateStop's "immediate" semantics are PRESERVED under concurrent
+// shutdown: if another path has already claimed the dereg CAS and is
+// mid-AWS-poll, this call CAS-fails and falls through to gs.Stop()
+// without waiting. Operators can rely on ImmediateStop as a break-glass
+// kill switch even while the signal path is stuck on AWS.
 func (s *Service) ImmediateStop() {
 	s._mu.RLock()
 	cfg := s._config

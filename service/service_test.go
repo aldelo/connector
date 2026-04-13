@@ -789,3 +789,166 @@ func TestStopGRPCServerBounded_ZeroTimeoutUsesDefault(t *testing.T) {
 	}
 	_ = start
 }
+
+// -----------------------------------------------------------------------
+// SVC-F4 — _deregFired atomic.Bool replaces sync.Once on Cloud Map dereg
+// -----------------------------------------------------------------------
+//
+// The P1-3 fix used sync.Once to guarantee at-most-once Cloud Map
+// DeregisterInstance under concurrent shutdown, but sync.Once.Do BLOCKS
+// every concurrent caller behind the first caller's AWS poll loop.
+// That broke ImmediateStop's break-glass semantics: an operator hitting
+// ImmediateStop while the signal path was mid-dereg would stall up to
+// ~5s typical / ~100s pathological behind AWS.
+//
+// The SVC-F4 fix swaps sync.Once for an atomic.Bool one-shot CAS:
+// the first caller wins and runs doDeregisterInstance; every concurrent
+// or later caller CAS-fails and returns nil IMMEDIATELY. The at-most-
+// once guarantee is preserved (AWS DeregisterInstance is itself
+// idempotent; the CAS prevents any duplicate).
+//
+// These tests pin the two invariants of the new primitive:
+//  1. Single-call fires the body and flips _deregFired to true.
+//  2. A concurrent second call does NOT block behind the first caller's
+//     doDeregisterInstance — this is the actual "ImmediateStop stays
+//     immediate" invariant.
+
+// TestService_DeregisterInstance_FirstCallFires verifies the happy path:
+// a fresh Service with nil _sd (so the body fast-returns nil) correctly
+// CAS-wins, runs the body, and flips _deregFired to true.
+func TestService_DeregisterInstance_FirstCallFires(t *testing.T) {
+	s := &Service{}
+	if s._deregFired.Load() {
+		t.Fatal("pre: _deregFired should start false on a fresh Service")
+	}
+
+	if err := s.deregisterInstance(); err != nil {
+		t.Errorf("first call returned error: %v (_sd is nil so body should no-op)", err)
+	}
+	if !s._deregFired.Load() {
+		t.Error("_deregFired did not transition to true after first call")
+	}
+}
+
+// TestService_DeregisterInstance_SecondCallSkipsBody verifies the
+// CAS-fail fast path: once _deregFired is true, subsequent calls return
+// nil without touching any Service state. Pre-setting the flag is
+// equivalent to "another goroutine already claimed the dereg" — if
+// the implementation regressed to sync.Once or any blocking primitive,
+// the second call would still enter doDeregisterInstance and hit RLock.
+func TestService_DeregisterInstance_SecondCallSkipsBody(t *testing.T) {
+	s := &Service{}
+	s._deregFired.Store(true) // simulate "another goroutine already claimed it"
+
+	// This call must return nil without entering doDeregisterInstance.
+	// We don't have a body-entry counter, but the non-blocking test
+	// below proves the fast path; here we just check the return value
+	// and that the flag stays true.
+	if err := s.deregisterInstance(); err != nil {
+		t.Errorf("second call returned error: %v, want nil", err)
+	}
+	if !s._deregFired.Load() {
+		t.Error("_deregFired got reset by a skipped call — should stay true")
+	}
+}
+
+// TestService_DeregisterInstance_SecondCallDoesNotBlock is the critical
+// SVC-F4 regression test. It pins the exact invariant that motivated
+// the fix: when goroutine A is inside doDeregisterInstance (blocked
+// here on _mu.RLock because the test holds _mu.Lock), goroutine B's
+// deregisterInstance call must return within a tight deadline.
+//
+// If this test regresses to sync.Once, goroutine B will block on
+// sync.Once.Do until goroutine A completes (which it can't, because
+// we hold _mu.Lock) — the test times out with a deadlock diagnostic
+// instead of passing.
+func TestService_DeregisterInstance_SecondCallDoesNotBlock(t *testing.T) {
+	s := &Service{}
+
+	// Hold _mu.Lock so that any goroutine entering doDeregisterInstance
+	// blocks on its _mu.RLock. This simulates "AWS poll loop taking
+	// forever" without needing to mock AWS.
+	s._mu.Lock()
+
+	// Goroutine A: claim the dereg CAS, then block inside
+	// doDeregisterInstance on _mu.RLock.
+	aEntered := make(chan struct{})
+	aReturned := make(chan struct{})
+	go func() {
+		close(aEntered)
+		_ = s.deregisterInstance()
+		close(aReturned)
+	}()
+
+	// Give goroutine A time to flip the CAS and block on RLock.
+	// (10ms is generous; the CAS itself is nanoseconds.)
+	<-aEntered
+	time.Sleep(20 * time.Millisecond)
+
+	if !s._deregFired.Load() {
+		s._mu.Unlock()
+		t.Fatal("goroutine A did not reach the CAS — test setup broken")
+	}
+
+	// Goroutine B: must return within 50ms even though goroutine A is
+	// still blocked inside the body. 50ms is generously above any
+	// scheduler jitter but well below a real AWS poll (~250ms+).
+	bDone := make(chan error, 1)
+	go func() {
+		bDone <- s.deregisterInstance()
+	}()
+
+	select {
+	case err := <-bDone:
+		if err != nil {
+			t.Errorf("goroutine B returned error: %v, want nil", err)
+		}
+	case <-time.After(50 * time.Millisecond):
+		s._mu.Unlock() // release A so we don't leak it
+		<-aReturned
+		t.Fatal("SVC-F4 regression: second deregisterInstance call blocked — sync.Once deadlock semantics have returned")
+	}
+
+	// Release goroutine A so it can finish and not leak.
+	s._mu.Unlock()
+	select {
+	case <-aReturned:
+	case <-time.After(2 * time.Second):
+		t.Error("goroutine A never returned after _mu was released — doDeregisterInstance is wedged")
+	}
+}
+
+// TestService_DeregisterInstance_ConcurrentCallsNoDeadlock spawns a
+// fleet of goroutines all calling deregisterInstance simultaneously.
+// Invariant: every goroutine returns, no deadlock, _deregFired ends
+// true. This guards against future refactors that add locking on the
+// CAS path and forget to handle the fast-path release.
+func TestService_DeregisterInstance_ConcurrentCallsNoDeadlock(t *testing.T) {
+	s := &Service{}
+
+	const n = 16
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			_ = s.deregisterInstance()
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent deregisterInstance calls deadlocked")
+	}
+
+	if !s._deregFired.Load() {
+		t.Error("_deregFired is false after concurrent calls — the CAS path is broken")
+	}
+}
