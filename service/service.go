@@ -91,47 +91,119 @@ type healthreport struct {
 	HashSignature string `json:"HashSignature"`
 }
 
-// Service represents a gRPC server's service definition and entry point
+// Service is the gRPC server lifecycle owner for a connector-managed
+// service instance. A Service binds together: configuration loading
+// (service.yaml), gRPC server setup, AWS Cloud Map service discovery
+// registration/heartbeat/deregistration, optional health-check handlers,
+// optional rate limiting and TLS, optional companion HTTP web server,
+// and a set of caller-defined lifecycle hooks (BeforeServerStart,
+// AfterServerStart, BeforeServerShutdown, AfterServerShutdown).
+//
+// Construct one with NewService, then optionally configure exported
+// fields BEFORE calling Serve. Serve blocks until an OS signal
+// (SIGTERM/SIGINT) or an explicit GracefulStop/ImmediateStop call. After
+// Serve returns the Service has fully shut down — both the gRPC server
+// and the Cloud Map deregistration. A given Service is single-use; do
+// not call Serve more than once.
+//
+// Concurrency contract:
+//   - Exported fields (AppName, hooks, interceptors, RateLimit,
+//     WebServerConfig, etc.) MUST be set before Serve is called and MUST
+//     NOT be mutated after. The Service does not synchronize reads of
+//     these fields against caller-side writes.
+//   - GracefulStop, ImmediateStop, and the internal signal handler may
+//     be invoked concurrently from any goroutine — they are guarded by
+//     _mu and a sync.Once on the Cloud Map deregister path.
+//
+// Lifecycle (see also _src/docs/repos/connector/architecture.md):
+//
+//	NewService -> (configure fields) -> Serve
+//	  Serve: readConfig -> (BeforeServerStart) -> startServer
+//	    startServer: bind -> register-with-cloudmap -> serve gRPC
+//	  -> (AfterServerStart) -> awaitOsSigExit
+//	  -> (BeforeServerShutdown) -> deregister-with-cloudmap -> grpc.GracefulStop
+//	  -> (AfterServerShutdown) -> Serve returns
 type Service struct {
-	// service properties
-	AppName          string
-	ConfigFileName   string
+	// AppName is the logical name used to discover this service's config
+	// file (service.yaml or {AppName}.yaml depending on layout). Required.
+	AppName string
+
+	// ConfigFileName overrides the config file basename. Optional —
+	// defaults to "service" when empty.
+	ConfigFileName string
+
+	// CustomConfigPath overrides the config file directory. Optional —
+	// defaults to the standard config search path when empty.
 	CustomConfigPath string
 
-	// web server config
+	// WebServerConfig optionally enables a sidecar HTTP server (gin)
+	// for non-gRPC routes. When non-nil, Serve also starts the web
+	// server on its own port and shuts it down during Service teardown.
 	WebServerConfig *WebServerConfig
 
+	// RegisterServiceHandlers is the caller-provided callback that
+	// registers protobuf-generated server handlers on the gRPC server
+	// instance. Required — Serve fails fast with an error if nil.
 	RegisterServiceHandlers func(grpcServer *grpc.Server)
 
-	// setup optional health check handlers
-	DefaultHealthCheckHandler  func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+	// DefaultHealthCheckHandler returns the SERVING status for the
+	// default (empty-string) health-check service name. Optional — if
+	// nil, the embedded grpc_health_v1 server reports SERVING
+	// unconditionally.
+	DefaultHealthCheckHandler func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
+
+	// ServiceHealthCheckHandlers maps named gRPC services to their
+	// per-service health-check status function. Optional. Use this to
+	// expose per-service liveness independent of the default handler.
 	ServiceHealthCheckHandlers map[string]func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus
 
-	// setup optional rate limit server interceptor
+	// RateLimit, if non-nil, gates inbound RPCs through the supplied
+	// rate limiter. Note: the rate-limit reject path was added in P1-1
+	// (deep-review-2026-04-12); prior to that fix the limiter recorded
+	// hits but did not actually reject excess traffic.
 	RateLimit ratelimiter.RateLimiterIFace
 
-	// one or more unary server interceptors for handling wrapping actions
+	// UnaryServerInterceptors is the unary interceptor chain. Order
+	// matters: interceptors run in slice order on the way in (request)
+	// and reverse order on the way out (response). The recommended
+	// ordering is: tracing -> metrics -> auth -> tenancy -> logger ->
+	// recovery -> handler. Wire metrics and logger via the
+	// adapters/metrics and adapters/logger constructors.
 	UnaryServerInterceptors []grpc.UnaryServerInterceptor
 
-	// one or more stream server interceptors for handling wrapping actions
+	// StreamServerInterceptors is the stream interceptor chain.
+	// Same ordering rules as UnaryServerInterceptors.
 	StreamServerInterceptors []grpc.StreamServerInterceptor
 
-	// typically wrapper action to handle monitoring
+	// StatsHandler is the optional grpc/stats.Handler for connection
+	// and RPC lifecycle events. Used by tracing/metrics integrations
+	// that need lower-level events than interceptors expose.
 	StatsHandler stats.Handler
 
-	// handler for unknown requests rather than sending back an error
+	// UnknownStreamHandler handles RPCs whose method is not registered
+	// on the server. Default behavior (nil) returns Unimplemented;
+	// override to implement proxying or graceful degradation.
 	UnknownStreamHandler grpc.StreamHandler
 
-	// handler to invoke before gRPC server is to start
+	// BeforeServerStart runs synchronously immediately before the gRPC
+	// listener is created. Use it for late configuration (mutating
+	// other Service fields) or for warm-up actions that must complete
+	// before the server accepts traffic. nil is a no-op.
 	BeforeServerStart func(svc *Service)
 
-	// handler to invoke after gRPC server started
+	// AfterServerStart runs synchronously immediately after the gRPC
+	// server is accepting connections AND the Cloud Map register call
+	// has succeeded. nil is a no-op.
 	AfterServerStart func(svc *Service)
 
-	// handler to invoke before gRPC server is to shutdown
+	// BeforeServerShutdown runs synchronously at the start of the
+	// shutdown sequence, before deregister or grpc.GracefulStop. nil
+	// is a no-op. Use this to drain caller-managed background work.
 	BeforeServerShutdown func(svc *Service)
 
-	// handler to invoke after gRPC server has shutdown
+	// AfterServerShutdown runs synchronously after the gRPC server has
+	// fully stopped and Cloud Map deregistration has completed. nil
+	// is a no-op. This is the last hook to fire before Serve returns.
 	AfterServerShutdown func(svc *Service)
 
 	// read or persist service config settings
@@ -161,7 +233,19 @@ type Service struct {
 	_deregErr  error
 }
 
-// create service
+// NewService constructs a Service ready for further configuration.
+// appName is the logical service name used to locate the config file
+// and to seed Cloud Map registration. configFileName overrides the
+// default basename ("service") when the YAML lives at a non-default
+// path. customConfigPath overrides the default config search directory.
+// registerServiceHandlers is the caller's protobuf handler-registration
+// callback — typically a one-line wrapper around the generated
+// pb.RegisterFooServiceServer call. It is REQUIRED; passing nil here
+// causes Serve to fail.
+//
+// The returned Service has only the four constructor parameters set;
+// configure all other fields directly on the returned struct before
+// calling Serve.
 func NewService(appName string, configFileName string, customConfigPath string, registerServiceHandlers func(grpcServer *grpc.Server)) *Service {
 	return &Service{
 		AppName:                 appName,
@@ -1394,7 +1478,29 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 	return true
 }
 
-// Serve will setup grpc service and start serving
+// Serve runs the full service lifecycle and blocks until the gRPC
+// server has shut down. The sequence is:
+//
+//  1. Read config from service.yaml.
+//  2. Bind the gRPC listener and (optionally) the sidecar HTTP server.
+//  3. Run BeforeServerStart hook.
+//  4. Register with AWS Cloud Map (if Cloud Map is configured).
+//  5. Start the gRPC server in a worker goroutine.
+//  6. Run AfterServerStart hook.
+//  7. Block on awaitOsSigExit waiting for SIGTERM/SIGINT, an internal
+//     panic from the server goroutine, or an explicit GracefulStop /
+//     ImmediateStop call.
+//  8. Run BeforeServerShutdown hook.
+//  9. Deregister from Cloud Map (sync.Once-guarded — see _deregOnce).
+//  10. grpc.Server.GracefulStop (or Stop, depending on shutdown path).
+//  11. Run AfterServerShutdown hook.
+//
+// Returns the first error encountered along the way. A successful
+// shutdown returns nil. Serve is single-use: do not call it more than
+// once on the same Service instance.
+//
+// All exported fields on Service must be set before calling Serve;
+// post-Serve mutation is not synchronized.
 func (s *Service) Serve() error {
 	s.setLocalAddress("")
 
@@ -1806,7 +1912,20 @@ func (s *Service) unsubscribeSNS() {
 	}
 }
 
-// GracefulStop allows existing actions be completed before shutting down gRPC server
+// GracefulStop initiates an orderly shutdown of the Service: it
+// publishes a final discovery notification, unsubscribes from SNS,
+// removes the health report from the shared data store, deregisters
+// from Cloud Map, and finally calls grpc.Server.GracefulStop which
+// allows in-flight RPCs to complete before tearing down connections.
+//
+// GracefulStop is safe to call concurrently with the internal
+// signal-driven shutdown path and with ImmediateStop. The
+// Cloud Map deregister step is sync.Once-guarded (see _deregOnce) so
+// duplicate concurrent invocations result in a single deregister call.
+//
+// This method does not wait for the gRPC server to fully drain — that
+// is grpc.Server.GracefulStop's responsibility. The Serve goroutine
+// will return after the server has stopped.
 func (s *Service) GracefulStop() {
 	s._mu.RLock()
 	cfg := s._config
@@ -1867,7 +1986,17 @@ func (s *Service) GracefulStop() {
 	}
 }
 
-// ImmediateStop will forcefully shutdown gRPC server regardless of pending actions being processed
+// ImmediateStop forcibly tears down the Service without waiting for
+// in-flight RPCs to complete: it goes through the same SNS/Cloud Map
+// cleanup as GracefulStop but ends with grpc.Server.Stop instead of
+// GracefulStop, immediately closing all open connections.
+//
+// Use this for hard shutdown paths (panic recovery, fatal config error,
+// shutdown deadline exceeded). Prefer GracefulStop in the normal case.
+//
+// Like GracefulStop, this method is safe to invoke concurrently with
+// the signal-driven shutdown path; the Cloud Map deregister is
+// sync.Once-guarded.
 func (s *Service) ImmediateStop() {
 	s._mu.RLock()
 	cfg := s._config

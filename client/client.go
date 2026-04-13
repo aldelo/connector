@@ -281,10 +281,35 @@ func (c *Client) getNotifierClient() *NotifierClient {
 // not normal RPC operations which proceed concurrently after dial completes.
 var _mux sync.Mutex
 
-// Client represents a gRPC client's connection and entry point,
-// also provides optional gin based web server upon dial
+// Client is the gRPC client lifecycle owner for a connector-managed
+// outbound connection. A Client encapsulates: configuration loading
+// (client.yaml), service-discovery resolution (Cloud Map / DNS / direct),
+// gRPC connection establishment with TLS or plaintext, an optional
+// notifier sub-client for push-based service-discovery updates, an
+// optional sidecar HTTP server for non-gRPC routes, automatic reconnect
+// on notifier-driven service changes, and a graceful Close path that
+// drains in-flight RPCs before tearing down the connection.
 //
-// note:
+// Construct one with NewClient, then optionally configure exported
+// fields BEFORE calling Dial. Dial returns once the gRPC connection is
+// READY (or fails fast on misconfiguration). Use the underlying
+// *grpc.ClientConn (accessed via the resolver hooks) to make RPCs after
+// Dial returns. Call Close exactly once when done — Close is idempotent
+// against repeated invocation but a Client is not designed for
+// re-Dial-after-Close cycles unless the caller explicitly resets state.
+//
+// Concurrency:
+//   - Exported fields (AppName, WebServerConfig, WaitForServerReady,
+//     ConnectionCloseDelay, ...) MUST be set before Dial and MUST NOT
+//     be mutated after.
+//   - Dial and Close are guarded internally; Dial drains any stale
+//     notifier-reconnect goroutine from a prior lifecycle (P2-13)
+//     before flipping the closed flag.
+//   - The notifier reconnect goroutine is single-instance via the
+//     notifierReconnectActive atomic CAS guard and a defer-clear
+//     pattern (see Close + Dial drain logic).
+//
+// Notes:
 //
 //  1. Using Compressor with RPC
 //     a) import "google.golang.org/grpc/encoding/gzip"
@@ -665,7 +690,15 @@ type serviceEndpoint struct {
 	CacheExpire time.Time
 }
 
-// NewClient creates grpc client
+// NewClient constructs a Client with only AppName / ConfigFileName /
+// CustomConfigPath set. Configure all other exported fields (such as
+// WebServerConfig, WaitForServerReady, ConnectionCloseDelay, the
+// notifier handlers) on the returned struct BEFORE calling Dial.
+//
+// Unlike NewService for the server side, this constructor does not
+// validate inputs — validation happens at Dial time when the config
+// file is read. A returned Client whose AppName is empty will fail at
+// Dial with a config-load error.
 func NewClient(appName string, configFileName string, customConfigPath string) *Client {
 	return &Client{
 		AppName:          appName,
@@ -938,7 +971,14 @@ func (c *Client) shutdownWebServerLocked(timeout time.Duration, callCleanup bool
 	c.webServer = nil
 }
 
-// ZLog access internal zap logger
+// ZLog returns the internal *data.ZapLog used by the Client for
+// structured logging. The logger is created during Dial from the
+// loaded config (Target.ZapLogEnabled / ZapLogOutputConsole). If
+// Dial has not yet been called, or if the receiver is nil, ZLog
+// returns nil — callers should nil-check before logging.
+//
+// The returned logger is shared across the Client and any
+// notifier sub-client it owns; do not replace it after Dial.
 func (c *Client) ZLog() *data.ZapLog {
 	if c == nil {
 		log.Println("ZLog(): Client Object Nil")
@@ -1140,7 +1180,31 @@ func (c *Client) Ready() bool {
 	return false
 }
 
-// Dial will dial grpc service and establish client connection
+// Dial loads the client configuration, resolves the target service
+// (Cloud Map, DNS, or direct address depending on the config), opens
+// a gRPC connection, optionally starts the sidecar HTTP server, and
+// initializes the notifier sub-client when configured.
+//
+// The supplied context governs only this Dial call's deadline /
+// cancellation — once Dial returns, the underlying gRPC connection
+// outlives the context. Pass nil for context.Background semantics.
+//
+// Dial is single-use per logical lifecycle: calling it again after
+// Close on the same Client is unusual and not the primary supported
+// pattern. When Dial is invoked on a previously-closed Client, the
+// implementation drains any stale notifier-reconnect goroutine from
+// the prior lifecycle (P2-13) before flipping the closed flag back to
+// false. The drain is bounded by notifierReconnectDrainTimeout and
+// will log a warning if a stale goroutine is still in-flight after
+// the drain window.
+//
+// Returns an error if any step fails — the Client is in a partially-
+// initialized state on failure and should be Closed before discarding.
+//
+// Concurrency: Dial is internally serialized through the global _mux
+// because gRPC's resolver registration is not thread-safe. This
+// serialization is bounded to Dial only — established connections
+// proceed concurrently for normal RPCs.
 func (c *Client) Dial(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -2185,7 +2249,21 @@ func (c *Client) GetState() connectivity.State {
 	}
 }
 
-// Close will close grpc client connection
+// Close tears down the Client: it sets the closed flag, signals the
+// notifier reconnect goroutine (if running) to exit on its next
+// iteration, closes the gRPC connection (after a short
+// ConnectionCloseDelay drain window), and stops the optional sidecar
+// HTTP server.
+//
+// Close is idempotent — calling it more than once on the same Client
+// is safe but only the first call has effect.
+//
+// Note: Close does NOT eagerly clear the notifierReconnectActive
+// flag (see P2-13). The reconnect goroutine clears that flag itself
+// from its own defer. A subsequent Dial on the same Client drains
+// any in-flight notifier work before flipping the closed flag back
+// to false to avoid spawning a second reconnect goroutine that races
+// with a still-running stale one.
 func (c *Client) Close() {
 	if c == nil {
 		log.Println("Close(): Client Object Nil")
