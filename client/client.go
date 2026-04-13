@@ -72,6 +72,11 @@ const (
 	maxTCPPort                        = 65535
 	defaultMaxDiscoveryResults        = 100
 	connectionCloseDelay              = 100 * time.Millisecond
+	// P2-13: max time Dial() will wait for a stale notifier reconnect
+	// goroutine from a prior lifecycle to drain. Should be longer than
+	// a single DoNotifierAlertService attempt (which has its own SDK
+	// timeout). 5s matches defaultNotifierReconnectDelay.
+	notifierReconnectDrainTimeout = 5 * time.Second
 	webServerShutdownTimeout          = 5 * time.Second
 	webServerStopChannelTimeout       = 6 * time.Second
 	deregisterInstanceCheckInterval   = 250 * time.Millisecond
@@ -189,8 +194,13 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 
 	// Issue #9: Close prior connection asynchronously with a small delay to allow in-flight RPCs to complete
 	if old != nil && old != conn {
-		go func(oldConn *grpc.ClientConn, logger *data.ZapLog) {
-			time.Sleep(connectionCloseDelay) // Allow in-flight RPCs to complete
+		// P2-14: prefer caller-configured drain window; fall back to default
+		closeDelay := c.ConnectionCloseDelay
+		if closeDelay <= 0 {
+			closeDelay = connectionCloseDelay
+		}
+		go func(oldConn *grpc.ClientConn, logger *data.ZapLog, d time.Duration) {
+			time.Sleep(d) // Allow in-flight RPCs to complete
 			if err := oldConn.Close(); err != nil {
 				if logger != nil {
 					logger.Warnf("Failed to close old connection: %v", err)
@@ -198,7 +208,7 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 					log.Printf("Failed to close old connection: %v", err)
 				}
 			}
-		}(old, c.ZLog())
+		}(old, c.ZLog(), closeDelay)
 	}
 }
 
@@ -295,6 +305,13 @@ type Client struct {
 
 	// indicate if after dial, client will wait for target service health probe success before continuing to allow rpc
 	WaitForServerReady bool
+
+	// P2-14: ConnectionCloseDelay controls how long setConnection waits
+	// before closing a replaced gRPC connection, allowing in-flight RPCs
+	// to drain. Zero or negative falls back to the 100ms default
+	// (connectionCloseDelay). Raise this for services with long-running
+	// unary calls; lower it for tight test loops.
+	ConnectionCloseDelay time.Duration
 
 	// define oauth2 token fetch handler - if client use oauth2 to authorize per rpc call
 	// once this handler is set, dial option will be configured for per rpc auth action
@@ -1165,6 +1182,31 @@ func (c *Client) Dial(ctx context.Context) error {
 			}
 		}
 	}()
+
+	// P2-13: drain any in-flight notifier reconnect goroutine from a prior
+	// lifecycle BEFORE flipping closed back to false. The reconnect loop
+	// captures closedCh once at spawn-time, so its select-loop is safe
+	// across re-dial -- but it can be mid-DoNotifierAlertService (an
+	// uncancellable SDK call). If we re-open the lifecycle while a stale
+	// goroutine is still in that call, a fresh ServiceAlertStoppedHandler
+	// could CAS notifierReconnectActive (false->true) and spawn a SECOND
+	// reconnect goroutine that races the stale one on _notifierClient.
+	// closed is still true here (Close() set it), so any stale goroutine
+	// reaching its for-loop top will exit on the next iteration; we just
+	// have to wait for in-flight DoNotifierAlertService calls to return.
+	if c.notifierReconnectActive.Load() {
+		drainDeadline := time.Now().Add(notifierReconnectDrainTimeout)
+		for c.notifierReconnectActive.Load() && time.Now().Before(drainDeadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if c.notifierReconnectActive.Load() {
+			if z := c.ZLog(); z != nil {
+				z.Warnf("Dial: stale notifier reconnect goroutine still active after %s drain; proceeding (may race with new lifecycle)", notifierReconnectDrainTimeout)
+			} else {
+				log.Printf("Dial: stale notifier reconnect goroutine still active after %s drain; proceeding (may race with new lifecycle)", notifierReconnectDrainTimeout)
+			}
+		}
+	}
 
 	// Issue #6: Reset both closed and closing flags at the start of Dial to allow re-dial
 	c.closed.Store(false)
@@ -2216,7 +2258,12 @@ func (c *Client) Close() {
 		nc.Close()
 		c.setNotifierClient(nil) // synchronized setter
 	}
-	c.notifierReconnectActive.Store(false)
+	// P2-13: Do NOT eagerly clear notifierReconnectActive here. The reconnect
+	// goroutine's own defer (client.go:588) sets it to false when it exits.
+	// Force-clearing it here used to allow a subsequent Dial() to spawn a
+	// fresh reconnect goroutine that races with a still-in-flight stale one
+	// (which is uncancellable mid-DoNotifierAlertService). The drain loop at
+	// the top of Dial() now waits for the stale goroutine's defer to fire.
 
 	c.connMu.Lock()
 	sqsLocal := c._sqs

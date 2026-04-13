@@ -889,8 +889,24 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 							}
 
 							if pubOk {
-								log.Println("+++ Service Discovery Push Notification: Publish Host Info OK +++")
-								s.publishToSNS(tArn, "Discovery Push Notification", s.getHostDiscoveryMessage(true), nil)
+								// P2-15: If shutdown was requested during the warmup/subscribe
+								// window, skip the startup publish. publishToSNS wraps an SDK
+								// call with only an internal timeout -- no context cancellation
+								// -- so a blocking publish here would delay shutdown by up to
+								// sdTimeout seconds. Re-signal the channel so any downstream
+								// waiter (the ticker loop below, the quit handler) still fires.
+								select {
+								case <-stopHealthReportService:
+									select {
+									case stopHealthReportService <- true:
+									default:
+									}
+									log.Println("### Service Discovery Push Notification: Skipped - Shutdown Requested ###")
+									return
+								default:
+									log.Println("+++ Service Discovery Push Notification: Publish Host Info OK +++")
+									s.publishToSNS(tArn, "Discovery Push Notification", s.getHostDiscoveryMessage(true), nil)
+								}
 							} else {
 								log.Println("!!! Service Discovery Push Notification: Nothing to Publish, Possible Error Encountered !!!")
 							}
