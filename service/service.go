@@ -55,11 +55,13 @@ import (
 	ws "github.com/aldelo/connector/webserver"
 	sns2 "github.com/aws/aws-sdk-go/service/sns"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/stats"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/tap"
 )
 
@@ -414,11 +416,41 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		if s.RateLimit != nil {
 			log.Println("Setup Rate Limiter - In Tap Handle")
 
+			// InTapHandle is invoked by gRPC BEFORE the server allocates a stream
+			// for the RPC. It is the cheapest place to throttle/reject excess
+			// traffic. The underlying RateLimit.Take() is a blocking leaky bucket
+			// (see adapters/ratelimiter/ratelimitplugin): it returns a time.Time
+			// after sleeping for the configured interval, and has no "denied"
+			// return. So the rate limit is enforced by *blocking* — not by
+			// rejecting — but we still surface saturation to the caller when
+			// the caller's deadline expired while we were waiting in the bucket.
+			// That gives callers a clear codes.ResourceExhausted rather than
+			// an eventual DeadlineExceeded from somewhere deeper in the stack.
+			//
+			// Per-RPC info-level logging was removed from here: at even modest
+			// QPS it generated two log lines per call, overwhelming stdout.
 			opts = append(opts, grpc.InTapHandle(func(ctx context.Context, info *tap.Info) (context.Context, error) {
-				log.Println("Rate Limit Take = " + info.FullMethodName + "...")
+				// Fast-path: if the context is already done before we even wait,
+				// the caller gave up. Surface it as ResourceExhausted because
+				// this is the rate-limit gate — callers should retry with
+				// backoff, not assume a transient network failure.
+				if err := ctx.Err(); err != nil {
+					return ctx, status.Errorf(codes.ResourceExhausted,
+						"rate limit gate: context done before take (%s): %v",
+						info.FullMethodName, err)
+				}
 
-				t := s.RateLimit.Take()
-				log.Println("... Rate Limit Take = " + t.String())
+				s.RateLimit.Take() // blocks for the configured per-RPC interval
+
+				// Post-wait check: if the caller's deadline expired while we
+				// blocked in the bucket, the system is saturated — reject
+				// with ResourceExhausted instead of letting the RPC proceed
+				// into a guaranteed DeadlineExceeded.
+				if err := ctx.Err(); err != nil {
+					return ctx, status.Errorf(codes.ResourceExhausted,
+						"rate limit exceeded: caller deadline elapsed during take (%s): %v",
+						info.FullMethodName, err)
+				}
 
 				return ctx, nil
 			}))
