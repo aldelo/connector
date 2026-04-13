@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -242,6 +243,18 @@ type Service struct {
 	// grpc serving status and mutex locking
 	_serving bool
 	_mu      sync.RWMutex
+
+	// SVC-F3: _started is a monotonic one-shot gate that enforces the
+	// "Service is single-use" contract documented on Serve(). Unlike
+	// _serving (which is true only while the gRPC server is actively
+	// accepting traffic and flips back to false during shutdown),
+	// _started flips true the first time Serve() is entered and never
+	// flips back. A second call to Serve() on the same Service
+	// instance observes the already-set flag and returns
+	// ErrServiceAlreadyStarted without side effects — no duplicate
+	// hook fires, no double listener bind, no competing
+	// awaitOsSigExit loops, no duplicate Cloud Map registration.
+	_started atomic.Bool
 
 	// P1-3: deregisterInstance is invoked from multiple shutdown paths
 	// (GracefulStop/ImmediateStop, the internal quit handler goroutine,
@@ -1538,6 +1551,17 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 	return true
 }
 
+// ErrServiceAlreadyStarted is returned by Serve() when it is invoked
+// more than once on the same Service instance. Serve is single-use by
+// contract; after the first call (whether still running, returned
+// normally, or returned with an error), subsequent calls are refused
+// without side effects. Callers who need to re-start a service should
+// construct a fresh Service instance. See SVC-F3 for the full
+// rationale and the hazards of double-Serve (duplicate hook fires,
+// competing signal handlers, leaked goroutines, double Cloud Map
+// registration).
+var ErrServiceAlreadyStarted = errors.New("connector/service: Service.Serve called more than once (Service is single-use; construct a new Service instance to re-start)")
+
 // Serve runs the full service lifecycle and blocks until the gRPC
 // server has shut down. The sequence is:
 //
@@ -1556,12 +1580,24 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 //  11. Run AfterServerShutdown hook.
 //
 // Returns the first error encountered along the way. A successful
-// shutdown returns nil. Serve is single-use: do not call it more than
-// once on the same Service instance.
+// shutdown returns nil. Serve is single-use: calling Serve more than
+// once on the same Service instance returns ErrServiceAlreadyStarted
+// without side effects. The single-use contract is enforced atomically
+// via a compare-and-swap on s._started, so concurrent Serve calls from
+// two goroutines are safe: exactly one proceeds, the other receives
+// the sentinel error (SVC-F3).
 //
 // All exported fields on Service must be set before calling Serve;
 // post-Serve mutation is not synchronized.
 func (s *Service) Serve() error {
+	// SVC-F3: one-shot re-entry guard. CAS returns false if _started
+	// was already true, meaning a prior (or concurrent) Serve call
+	// already claimed this Service. Refuse without touching any
+	// lifecycle state.
+	if !s._started.CompareAndSwap(false, true) {
+		return ErrServiceAlreadyStarted
+	}
+
 	s.setLocalAddress("")
 
 	if err := s.readConfig(); err != nil {

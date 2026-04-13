@@ -522,6 +522,119 @@ func TestStopGRPCServerBounded_NilServer(t *testing.T) {
 	}
 }
 
+// newServeGuardTestService builds a Service whose Serve() is guaranteed
+// to fail at the earliest possible point in readConfig() — the empty-
+// AppName check at config.Read() — without touching the filesystem,
+// binding a listener, or spawning any goroutines. This lets the
+// SVC-F3 tests exercise the one-shot CAS guard at the top of Serve()
+// deterministically and without hanging on real lifecycle work.
+//
+// We deliberately do NOT use NewService: NewService with a
+// nonexistent CustomConfigPath triggers viper's "save a default
+// config file" path and succeeds, which in turn lets Serve() proceed
+// to setupServer / listener bind and hang the test.
+func newServeGuardTestService() *Service {
+	return &Service{
+		// AppName intentionally empty — readConfig returns
+		// "App Name is Required" as the very first action after the
+		// _started CAS flips.
+		AppName:                 "",
+		RegisterServiceHandlers: func(*grpc.Server) {},
+	}
+}
+
+// -------- SVC-F3 Serve re-entry guard tests --------
+//
+// Serve is single-use by contract: the first call claims the Service
+// via CAS on s._started, and every subsequent call returns
+// ErrServiceAlreadyStarted without touching any lifecycle state.
+// These tests exercise the CAS path without needing a real gRPC
+// listener or CloudMap — Serve() past the CAS drops immediately into
+// readConfig(), which fails deterministically for a Service that has
+// no config file on disk. That is the "Serve started, then errored
+// out" case, and the subsequent re-entry attempt is exactly the
+// scenario the guard protects against.
+
+func TestService_Serve_RejectsReentryAfterFailure(t *testing.T) {
+	// Build a Service that will fail readConfig (no config file on disk
+	// under the default CustomConfigPath). The first Serve() call
+	// claims _started via CAS, then errors out of readConfig. The
+	// second Serve() call MUST observe _started=true and return
+	// ErrServiceAlreadyStarted without re-entering readConfig.
+	svc := newServeGuardTestService()
+
+	// First call: will fail at readConfig (config file missing), but
+	// the CAS flipped _started to true as the first line of Serve.
+	firstErr := svc.Serve()
+	if firstErr == nil {
+		t.Fatalf("expected first Serve to fail (no config file); got nil")
+	}
+	// Sanity: the first failure is NOT the re-entry sentinel.
+	if firstErr == ErrServiceAlreadyStarted {
+		t.Fatalf("first Serve returned re-entry sentinel, want a different error")
+	}
+
+	// Second call: must be refused via the CAS guard without re-running
+	// readConfig or touching any lifecycle state.
+	secondErr := svc.Serve()
+	if secondErr != ErrServiceAlreadyStarted {
+		t.Fatalf("second Serve: got %v, want ErrServiceAlreadyStarted", secondErr)
+	}
+}
+
+func TestService_Serve_RejectsReentryConcurrently(t *testing.T) {
+	// Two goroutines call Serve on the SAME Service concurrently.
+	// Exactly one must win the CAS (and proceed to fail readConfig
+	// deterministically), and exactly one must lose the CAS and
+	// return ErrServiceAlreadyStarted. Order is nondeterministic; we
+	// check the set of results rather than the ordering.
+	svc := newServeGuardTestService()
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = svc.Serve()
+		}(i)
+	}
+	wg.Wait()
+
+	// Count outcomes.
+	reentryCount := 0
+	otherCount := 0
+	for _, e := range errs {
+		if e == ErrServiceAlreadyStarted {
+			reentryCount++
+		} else if e != nil {
+			otherCount++
+		}
+	}
+	if reentryCount != 1 || otherCount != 1 {
+		t.Fatalf("concurrent Serve outcomes wrong: reentry=%d other=%d errs=%v",
+			reentryCount, otherCount, errs)
+	}
+}
+
+func TestService_Serve_FreshInstancesIndependent(t *testing.T) {
+	// Two separate Service instances must each get their own CAS token.
+	// Neither should observe the other's _started flag. Both Serve
+	// calls should fail readConfig (not the re-entry sentinel).
+	a := newServeGuardTestService()
+	b := newServeGuardTestService()
+
+	errA := a.Serve()
+	errB := b.Serve()
+
+	if errA == nil || errA == ErrServiceAlreadyStarted {
+		t.Errorf("instance A: got %v, want a readConfig-style error", errA)
+	}
+	if errB == nil || errB == ErrServiceAlreadyStarted {
+		t.Errorf("instance B: got %v, want a readConfig-style error", errB)
+	}
+}
+
 // TestStopGRPCServerBounded_ZeroTimeoutUsesDefault verifies that a zero
 // or negative timeout falls back to the 30-second default rather than
 // timing out immediately.
