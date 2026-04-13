@@ -29,6 +29,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -378,4 +379,176 @@ func TestRoute53DeleteRecordset(t *testing.T) {
 	}
 
 	log.Println("OK")
+}
+
+// ----------------------------------------------------------------------
+// SVC-F1 (P0) regression tests for stopGRPCServerBounded.
+//
+// Prior to SVC-F1 the default signal path called *grpc.Server.Stop
+// directly — contradicting the Service's lifecycle godoc and killing
+// in-flight RPCs. These tests pin the helper that now wraps the signal
+// path so the regression cannot silently re-land.
+// ----------------------------------------------------------------------
+
+// fakeGRPCServer implements gracefulStopper so the escalation logic can
+// be exercised without a real listener. GracefulStop blocks on
+// gracefulStopBlock until the test releases it (or Stop releases it, as
+// real *grpc.Server does). Stop records that it was called.
+type fakeGRPCServer struct {
+	gracefulStopCalled chan struct{}
+	gracefulStopBlock  chan struct{}
+	stopCalled         chan struct{}
+
+	releaseOnce sync.Once
+}
+
+func newFakeGRPCServer() *fakeGRPCServer {
+	return &fakeGRPCServer{
+		gracefulStopCalled: make(chan struct{}, 1),
+		gracefulStopBlock:  make(chan struct{}),
+		stopCalled:         make(chan struct{}, 1),
+	}
+}
+
+func (f *fakeGRPCServer) GracefulStop() {
+	select {
+	case f.gracefulStopCalled <- struct{}{}:
+	default:
+	}
+	<-f.gracefulStopBlock
+}
+
+func (f *fakeGRPCServer) Stop() {
+	select {
+	case f.stopCalled <- struct{}{}:
+	default:
+	}
+	// Real *grpc.Server.Stop unblocks any pending GracefulStop; mirror
+	// that so the helper's post-escalation `<-stopped` wait returns.
+	f.releaseOnce.Do(func() { close(f.gracefulStopBlock) })
+}
+
+// releaseGraceful unblocks a pending GracefulStop without escalating
+// to Stop (models the real gRPC happy path).
+func (f *fakeGRPCServer) releaseGraceful() {
+	f.releaseOnce.Do(func() { close(f.gracefulStopBlock) })
+}
+
+// TestStopGRPCServerBounded_FastPath verifies a GracefulStop that
+// returns quickly never escalates to Stop. This is the contract that
+// SVC-F1 restores on the default signal path.
+func TestStopGRPCServerBounded_FastPath(t *testing.T) {
+	f := newFakeGRPCServer()
+	f.releaseGraceful() // GracefulStop returns immediately
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopGRPCServerBounded(f, 5*time.Second)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("stopGRPCServerBounded did not return on fast path within 1s")
+	}
+
+	select {
+	case <-f.gracefulStopCalled:
+	default:
+		t.Error("GracefulStop was not called on fast path")
+	}
+
+	select {
+	case <-f.stopCalled:
+		t.Error("Stop was called on fast path — escalation triggered incorrectly")
+	default:
+	}
+}
+
+// TestStopGRPCServerBounded_EscalatesOnTimeout verifies a stuck
+// GracefulStop escalates to Stop before wall-clock blows — which is the
+// reason SVC-F1 adds a bounded wait rather than a plain GracefulStop.
+func TestStopGRPCServerBounded_EscalatesOnTimeout(t *testing.T) {
+	f := newFakeGRPCServer()
+	// Do not release gracefulStopBlock; force the timeout path.
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopGRPCServerBounded(f, 100*time.Millisecond)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stopGRPCServerBounded hung past timeout — escalation did not trigger")
+	}
+	elapsed := time.Since(start)
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("returned before timeout elapsed: %s", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("returned too late (>2s) after 100ms timeout: %s", elapsed)
+	}
+
+	select {
+	case <-f.gracefulStopCalled:
+	default:
+		t.Error("GracefulStop was not called — helper skipped the graceful attempt")
+	}
+
+	select {
+	case <-f.stopCalled:
+	default:
+		t.Error("Stop was not called on timeout path — escalation missing")
+	}
+}
+
+// TestStopGRPCServerBounded_NilServer verifies a nil server is a no-op
+// (should not panic; should return immediately).
+func TestStopGRPCServerBounded_NilServer(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopGRPCServerBounded(nil, 5*time.Second)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("nil gracefulStopper did not return immediately")
+	}
+}
+
+// TestStopGRPCServerBounded_ZeroTimeoutUsesDefault verifies that a zero
+// or negative timeout falls back to the 30-second default rather than
+// timing out immediately.
+func TestStopGRPCServerBounded_ZeroTimeoutUsesDefault(t *testing.T) {
+	f := newFakeGRPCServer()
+	// Release immediately so the call returns via the fast path —
+	// otherwise this test would block for 30s on the default timeout.
+	f.releaseGraceful()
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		defer close(done)
+		stopGRPCServerBounded(f, 0)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("zero-timeout call did not return via fast path")
+	}
+	// Confirms the helper didn't interpret 0 as "timeout immediately":
+	// if it had, Stop would have been called and the call would have
+	// returned before GracefulStop was observed.
+	select {
+	case <-f.stopCalled:
+		t.Error("zero-timeout path hit Stop escalation — should have used default 30s timeout")
+	default:
+	}
+	_ = start
 }

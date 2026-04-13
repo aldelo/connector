@@ -121,8 +121,14 @@ type healthreport struct {
 //	  Serve: readConfig -> (BeforeServerStart) -> startServer
 //	    startServer: bind -> register-with-cloudmap -> serve gRPC
 //	  -> (AfterServerStart) -> awaitOsSigExit
-//	  -> (BeforeServerShutdown) -> deregister-with-cloudmap -> grpc.GracefulStop
+//	  -> (BeforeServerShutdown) -> deregister-with-cloudmap ->
+//	     grpc.GracefulStop (bounded by GracefulStopTimeout;
+//	     falls back to grpc.Stop on timeout)
 //	  -> (AfterServerShutdown) -> Serve returns
+//
+// GracefulStopTimeout caps how long the default signal path will wait
+// for in-flight RPCs to drain before forcing termination — see that
+// field's godoc for details.
 type Service struct {
 	// AppName is the logical name used to discover this service's config
 	// file (service.yaml or {AppName}.yaml depending on layout). Required.
@@ -205,6 +211,21 @@ type Service struct {
 	// fully stopped and Cloud Map deregistration has completed. nil
 	// is a no-op. This is the last hook to fire before Serve returns.
 	AfterServerShutdown func(svc *Service)
+
+	// GracefulStopTimeout bounds how long the default signal-driven
+	// shutdown path will wait for in-flight RPCs to drain via
+	// grpc.Server.GracefulStop before escalating to grpc.Server.Stop
+	// (hard-close of all connections).
+	//
+	// Zero (the default) means 30 seconds. Set this to match your
+	// deployment's terminationGracePeriodSeconds (k8s) / task SIGKILL
+	// grace window (ECS) minus a safety margin, so the fallback Stop
+	// always runs before the orchestrator SIGKILLs the process.
+	//
+	// Fix: SVC-F1 (deep-review-2026-04-13-contrarian). Prior to this
+	// field, the default signal path called grpc.Server.Stop directly,
+	// contradicting the lifecycle godoc and killing in-flight RPCs.
+	GracefulStopTimeout time.Duration
 
 	// read or persist service config settings
 	_config *config
@@ -1137,13 +1158,52 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 		if snsC != nil {
 			snsC.Disconnect()
 		}
-		if gs != nil {
-			gs.Stop()
-		}
+		// SVC-F1 fix: honor the lifecycle godoc on the default signal
+		// path (GracefulStop with bounded fallback to Stop) instead of
+		// going straight to Stop.
+		stopGRPCServerBounded(gs, s.GracefulStopTimeout)
 		_ = lis.Close()
 	}()
 
 	return nil
+}
+
+// gracefulStopper is the subset of *grpc.Server used by
+// stopGRPCServerBounded. Extracted so the timeout/escalation logic can
+// be unit-tested without standing up a real gRPC listener (SVC-F1).
+type gracefulStopper interface {
+	GracefulStop()
+	Stop()
+}
+
+// stopGRPCServerBounded calls gs.GracefulStop, escalating to gs.Stop
+// if the graceful drain exceeds timeout. Returns only after the
+// GracefulStop goroutine has returned (so callers can safely close
+// listeners / release resources afterward). A nil gs is a no-op.
+// A zero or negative timeout defaults to 30 seconds.
+//
+// This replaces the pre-SVC-F1 behavior where the default signal path
+// called gs.Stop directly, silently contradicting the Service's
+// lifecycle godoc and killing in-flight RPCs.
+func stopGRPCServerBounded(gs gracefulStopper, timeout time.Duration) {
+	if gs == nil {
+		return
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		gs.GracefulStop()
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(timeout):
+		log.Printf("GracefulStop exceeded %s — escalating to Stop", timeout)
+		gs.Stop()
+		<-stopped // ensure the GracefulStop goroutine has returned
+	}
 }
 
 // getHostDiscoveryMessage returns json string formatted with online / offline status indicator along with host address info
