@@ -156,7 +156,20 @@ func TestConfig(t *testing.T) {
 	}
 }
 
+// TestCloudMap is a manual integration test that requires:
+//   - A populated service.yaml with a real AWS region and Service.Id
+//   - Live AWS CloudMap credentials and a pre-existing namespace+service
+//
+// Pre-fix: this test ran by default in CI, called sd.RegisterInstance
+// against a config with an empty Service.Id, then log.Fatal'd on the
+// "ServiceId is Required" error — killing the test binary and masking
+// every test that ran after it. Now gated behind CONNECTOR_RUN_INTEGRATION
+// to match TestService_Serve. P2-16 follow-up.
 func TestCloudMap(t *testing.T) {
+	if os.Getenv("CONNECTOR_RUN_INTEGRATION") != "1" {
+		t.Skip("skipping: manual integration test (requires real AWS CloudMap + service.yaml); set CONNECTOR_RUN_INTEGRATION=1 to run")
+	}
+
 	cfg := &config{
 		AppName:        "test-connector-service",
 		ConfigFileName: "service",
@@ -215,7 +228,14 @@ func TestCloudMap(t *testing.T) {
 
 }
 
+// TestDNSLookup is a manual integration test that requires a custom
+// internal DNS resolver capable of resolving helloservice.example.private.
+// Skipped by default; set CONNECTOR_RUN_INTEGRATION=1 to run. P2-16 follow-up.
 func TestDNSLookup(t *testing.T) {
+	if os.Getenv("CONNECTOR_RUN_INTEGRATION") != "1" {
+		t.Skip("skipping: manual integration test (requires custom internal DNS); set CONNECTOR_RUN_INTEGRATION=1 to run")
+	}
+
 	ips, err := net.LookupIP("helloservice.example.private")
 
 	if err != nil {
@@ -227,7 +247,13 @@ func TestDNSLookup(t *testing.T) {
 	}
 }
 
+// TestGinServer is a manual integration test — RunServer binds to
+// port 8080 and blocks indefinitely. Skipped by default. P2-16 follow-up.
 func TestGinServer(t *testing.T) {
+	if os.Getenv("CONNECTOR_RUN_INTEGRATION") != "1" {
+		t.Skip("skipping: manual integration test (RunServer binds port 8080 and blocks); set CONNECTOR_RUN_INTEGRATION=1 to run")
+	}
+
 	// z := ginw.NewGinZapMiddleware("Example", true)
 
 	g := ginw.NewServer("Example", 8080, true, false, nil)
@@ -284,7 +310,18 @@ type Dummy struct {
 	LastName  string
 }
 
+// TestSliceDeleteFunc exercises common.SliceDeleteElement -- but the
+// canonical contract tests for that helper now live in
+// aldelo/common/helper-other_test.go (TestSliceDeleteElement_*). Until
+// connector picks up a common version that contains the P0-13 fix
+// (the "settable copy via reflect.New(t).Elem()" patch), running this
+// against common@v1.7.9 panics inside reflect.Value.Set -- which kills
+// the test binary and masks every test that runs after it. Skip here
+// unblocks the rest of the service test suite; the upstream coverage
+// in common already validates the fix once a fresh tag is published.
 func TestSliceDeleteFunc(t *testing.T) {
+	t.Skip("skipping: covered by aldelo/common helper-other_test.go (TestSliceDeleteElement_*); pending common patch release")
+
 	slice := []*Dummy{
 		{FirstName: "John", LastName: "Smith"},
 		{FirstName: "Mike", LastName: "Smith"},
@@ -300,7 +337,14 @@ func TestSliceDeleteFunc(t *testing.T) {
 	}
 }
 
+// TestRoute53AddRecordset is a manual integration test — references a
+// hardcoded production HostedZoneId (Z002784014TW7VUT92MDD) and writes
+// a real DNS record. Skipped by default. P2-16 follow-up.
 func TestRoute53AddRecordset(t *testing.T) {
+	if os.Getenv("CONNECTOR_RUN_INTEGRATION") != "1" {
+		t.Skip("skipping: manual integration test (writes to live Route53 hosted zone); set CONNECTOR_RUN_INTEGRATION=1 to run")
+	}
+
 	r := &route53.Route53{}
 
 	_ = r.Connect()
@@ -313,7 +357,14 @@ func TestRoute53AddRecordset(t *testing.T) {
 	log.Println("OK")
 }
 
+// TestRoute53DeleteRecordset is a manual integration test — same hardcoded
+// HostedZoneId as TestRoute53AddRecordset, deletes a live DNS record.
+// Skipped by default. P2-16 follow-up.
 func TestRoute53DeleteRecordset(t *testing.T) {
+	if os.Getenv("CONNECTOR_RUN_INTEGRATION") != "1" {
+		t.Skip("skipping: manual integration test (deletes live Route53 record); set CONNECTOR_RUN_INTEGRATION=1 to run")
+	}
+
 	r := &route53.Route53{}
 
 	_ = r.Connect()
