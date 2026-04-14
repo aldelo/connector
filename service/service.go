@@ -74,6 +74,65 @@ const (
 	backoffFactor  = 2.0
 )
 
+// ShutdownPhase controls when Service.ShutdownCtx() fires during the
+// shutdown sequence. It is used with Service.ShutdownCancelPhase and
+// takes effect only when Service.ShutdownCancel is true.
+//
+// Design: SVC-F5 (see _src/docs/repos/connector/plans/
+// 2026-04-14__svc-f5-shutdown-ctx-design.md).
+//
+// The capability is strictly opt-in. Existing consumers that do not set
+// ShutdownCancel see ZERO behavior change — ShutdownCtx() returns nil,
+// no context is allocated, and no fire site is taken.
+type ShutdownPhase int
+
+const (
+	// ShutdownPhaseNone disables the ShutdownCtx capability. ShutdownCtx()
+	// returns nil. This is the zero value so the default Service has no
+	// shutdown-cancel behavior unless the consumer explicitly opts in.
+	ShutdownPhaseNone ShutdownPhase = iota
+
+	// ShutdownPhaseImmediate fires the cancel the instant the signal
+	// handler receives SIGTERM/SIGINT/SIGQUIT, before BeforeServerShutdown
+	// runs. Use for short-API services where handlers should abort
+	// immediately rather than consume any grace time. The fire happens
+	// inside the signal-demux goroutine, before it notifies Serve that a
+	// signal was received, so handlers observing ShutdownCtx.Done() see
+	// the cancel happens-before any subsequent Serve shutdown step.
+	ShutdownPhaseImmediate
+
+	// ShutdownPhasePreDrain fires the cancel after BeforeServerShutdown
+	// and after the Cloud Map deregister call, but before
+	// grpc.Server.GracefulStop is invoked. This gives the
+	// service-discovery layer time to stop routing to us while also
+	// letting handlers learn to stop cooperating before the grace window
+	// begins. Good middle-ground default for typical gRPC services.
+	ShutdownPhasePreDrain
+
+	// ShutdownPhasePostGraceExpiry fires the cancel only after
+	// grpc.Server.GracefulStop's own bounded timeout (GracefulStopTimeout)
+	// elapses, as a "last warning" before grpc.Server.Stop severs the
+	// transport. Gives handlers maximum grace; useful for long-running
+	// imports where interruption is expensive.
+	ShutdownPhasePostGraceExpiry
+)
+
+// String returns a human-readable name for the phase (used in log lines).
+func (p ShutdownPhase) String() string {
+	switch p {
+	case ShutdownPhaseNone:
+		return "None"
+	case ShutdownPhaseImmediate:
+		return "Immediate"
+	case ShutdownPhasePreDrain:
+		return "PreDrain"
+	case ShutdownPhasePostGraceExpiry:
+		return "PostGraceExpiry"
+	default:
+		return fmt.Sprintf("ShutdownPhase(%d)", int(p))
+	}
+}
+
 // healthreport struct info,
 // notifiergateway/notifiergateway.go also contains this struct as a mirror;
 //
@@ -231,6 +290,36 @@ type Service struct {
 	// contradicting the lifecycle godoc and killing in-flight RPCs.
 	GracefulStopTimeout time.Duration
 
+	// ShutdownCancel enables the opt-in ShutdownCtx capability. When
+	// false (the default), ShutdownCtx() returns nil and no shutdown
+	// context is allocated — existing consumers see ZERO behavior
+	// change. When true, Serve() allocates a dedicated context that is
+	// cancelled at the phase named by ShutdownCancelPhase (or
+	// ShutdownPhaseImmediate if the phase is ShutdownPhaseNone), giving
+	// cooperating handlers an in-band signal to stop new work and
+	// return early.
+	//
+	// Set this BEFORE calling Serve. Mutating it after Serve has been
+	// called has no effect and is racy with respect to the internal
+	// allocation path.
+	//
+	// Fix: SVC-F5 (2026-04-14). Resolves the gap where
+	// grpc.GracefulStop does not cancel the handler's ctx and
+	// long-running handlers have no way to learn the server is
+	// draining.
+	ShutdownCancel bool
+
+	// ShutdownCancelPhase names the shutdown phase at which
+	// ShutdownCtx() fires when ShutdownCancel is true. See
+	// ShutdownPhase for the per-phase semantics. When ShutdownCancel
+	// is true but this is the zero value (ShutdownPhaseNone), the
+	// phase defaults to ShutdownPhaseImmediate — enabling the
+	// capability without picking a phase gives the fastest-shutdown
+	// mental model.
+	//
+	// Ignored when ShutdownCancel is false.
+	ShutdownCancelPhase ShutdownPhase
+
 	// read or persist service config settings
 	_config *config
 
@@ -279,6 +368,17 @@ type Service struct {
 	// log-only — verified across all six deregisterInstance call
 	// sites — so no semantic regression.
 	_deregFired atomic.Bool
+
+	// SVC-F5: _shutdownCtx / _shutdownCancel hold the opt-in handler
+	// shutdown-signal context. Both are nil unless ShutdownCancel was
+	// true when Serve() ran. When non-nil, _shutdownCtx is a
+	// context.Background-derived WithCancel whose cancel fires at the
+	// configured ShutdownCancelPhase (and, as a safety net, once more
+	// from fireShutdownCancelFinal at the end of Serve regardless of
+	// phase). Guarded by _mu: Serve acquires the write lock to
+	// allocate, ShutdownCtx() acquires the read lock to return.
+	_shutdownCtx    context.Context
+	_shutdownCancel context.CancelFunc
 }
 
 // NewService constructs a Service ready for further configuration.
@@ -315,6 +415,95 @@ func (s *Service) setServing(v bool) {
 	s._mu.Lock()
 	defer s._mu.Unlock()
 	s._serving = v
+}
+
+// ShutdownCtx returns the opt-in handler shutdown-signal context, or
+// nil if the capability is disabled (ShutdownCancel is false, or
+// Serve() has not yet allocated it).
+//
+// Handlers that want to cooperate with graceful shutdown should
+// observe Done() on the returned context in addition to their normal
+// RPC ctx:
+//
+//	func (s *Handler) LongRunning(ctx context.Context, req *pb.Req) (*pb.Resp, error) {
+//	    shut := s.svc.ShutdownCtx()
+//	    for chunk := range work {
+//	        if shut != nil {
+//	            select {
+//	            case <-shut.Done():
+//	                return nil, status.Error(codes.Unavailable, "server draining")
+//	            case <-ctx.Done():
+//	                return nil, ctx.Err()
+//	            default:
+//	            }
+//	        }
+//	        processChunk(chunk)
+//	    }
+//	    return &pb.Resp{}, nil
+//	}
+//
+// Returning nil when the capability is disabled is intentional — it
+// lets handlers use a nil-check fast path that compiles away when the
+// consumer hasn't opted in, rather than always allocating a context
+// just to have something non-nil to return.
+//
+// The returned context is also cancelled as a safety net at the end
+// of Serve, so a handler observing ShutdownCtx.Done() is guaranteed
+// to see it fire before Serve returns — even if no configured phase
+// matched (e.g., a future phase constant is added and not all fire
+// sites are updated).
+//
+// Fix: SVC-F5 (2026-04-14).
+func (s *Service) ShutdownCtx() context.Context {
+	s._mu.RLock()
+	defer s._mu.RUnlock()
+	return s._shutdownCtx
+}
+
+// effectiveShutdownCancelPhase returns the phase at which ShutdownCtx
+// should fire when ShutdownCancel is enabled. The zero value
+// (ShutdownPhaseNone) is promoted to ShutdownPhaseImmediate so that
+// "just turn it on" works without also picking a phase. Callers must
+// check ShutdownCancel separately; this helper assumes enablement.
+func (s *Service) effectiveShutdownCancelPhase() ShutdownPhase {
+	if s.ShutdownCancelPhase == ShutdownPhaseNone {
+		return ShutdownPhaseImmediate
+	}
+	return s.ShutdownCancelPhase
+}
+
+// fireShutdownCancelIfPhase calls the internal shutdown cancel iff
+// ShutdownCancel is enabled and the effective phase matches `phase`.
+// Idempotent — context.CancelFunc is safe to call multiple times. No-op
+// when capability is disabled or when the ctx has not been allocated.
+func (s *Service) fireShutdownCancelIfPhase(phase ShutdownPhase) {
+	s._mu.RLock()
+	enabled := s.ShutdownCancel
+	effective := s.effectiveShutdownCancelPhase()
+	cancel := s._shutdownCancel
+	s._mu.RUnlock()
+	if !enabled || cancel == nil {
+		return
+	}
+	if effective != phase {
+		return
+	}
+	log.Printf("ShutdownCtx cancel fired (phase=%s)", phase)
+	cancel()
+}
+
+// fireShutdownCancelFinal unconditionally calls the internal shutdown
+// cancel if present. Called at the end of Serve() as a safety net so
+// handlers observing ShutdownCtx are guaranteed to see Done() before
+// Serve returns, even if no phase fire matched. Idempotent. No-op
+// when capability is disabled or ctx was never allocated.
+func (s *Service) fireShutdownCancelFinal() {
+	s._mu.RLock()
+	cancel := s._shutdownCancel
+	s._mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // readConfig will read in config data
@@ -1185,10 +1374,24 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 		if snsC != nil {
 			snsC.Disconnect()
 		}
+		// SVC-F5: fire PreDrain BEFORE entering the bounded graceful
+		// stop, so handlers that opted into ShutdownCtx learn to stop
+		// cooperating at the same lifecycle point where we stop
+		// routing new traffic. No-op unless ShutdownCancel is true
+		// and the configured phase is PreDrain.
+		s.fireShutdownCancelIfPhase(ShutdownPhasePreDrain)
+
 		// SVC-F1 fix: honor the lifecycle godoc on the default signal
 		// path (GracefulStop with bounded fallback to Stop) instead of
 		// going straight to Stop.
-		stopGRPCServerBounded(gs, s.GracefulStopTimeout)
+		//
+		// SVC-F5: the WithHook variant gives us a synchronous fire
+		// site at the moment the grace timeout expires and Stop() is
+		// about to be invoked. No-op unless ShutdownCancel is true
+		// and the configured phase is PostGraceExpiry.
+		stopGRPCServerBoundedWithHook(gs, s.GracefulStopTimeout, func() {
+			s.fireShutdownCancelIfPhase(ShutdownPhasePostGraceExpiry)
+		})
 		_ = lis.Close()
 	})
 
@@ -1212,7 +1415,27 @@ type gracefulStopper interface {
 // This replaces the pre-SVC-F1 behavior where the default signal path
 // called gs.Stop directly, silently contradicting the Service's
 // lifecycle godoc and killing in-flight RPCs.
+//
+// Call sites that need to observe the "grace exceeded, about to
+// escalate" boundary (for example, to fire a SVC-F5 ShutdownCtx
+// cancel) should use stopGRPCServerBoundedWithHook instead. This
+// function is a thin wrapper that passes a nil hook.
 func stopGRPCServerBounded(gs gracefulStopper, timeout time.Duration) {
+	stopGRPCServerBoundedWithHook(gs, timeout, nil)
+}
+
+// stopGRPCServerBoundedWithHook is the same as stopGRPCServerBounded
+// but invokes onEscalate exactly once, synchronously, immediately
+// before gs.Stop() is called when the graceful drain exceeds timeout.
+// If the graceful drain completes within the timeout, onEscalate is
+// NOT invoked. A nil hook is a no-op. A nil gs is a no-op
+// (onEscalate is not called).
+//
+// The hook is the SVC-F5 PostGraceExpiry fire site — it runs on the
+// caller's goroutine (NOT the graceful-stop-escalator goroutine), so
+// the cancel happens-before the subsequent Stop() call without any
+// cross-goroutine coordination.
+func stopGRPCServerBoundedWithHook(gs gracefulStopper, timeout time.Duration, onEscalate func()) {
 	if gs == nil {
 		return
 	}
@@ -1228,9 +1451,26 @@ func stopGRPCServerBounded(gs gracefulStopper, timeout time.Duration) {
 	case <-stopped:
 	case <-time.After(timeout):
 		log.Printf("GracefulStop exceeded %s — escalating to Stop", timeout)
+		if onEscalate != nil {
+			safeCallEscalateHook(onEscalate)
+		}
 		gs.Stop()
 		<-stopped // ensure the GracefulStop goroutine has returned
 	}
+}
+
+// safeCallEscalateHook calls fn inside a recover guard. The hook is
+// supplied by connector-internal code (fireShutdownCancelIfPhase), not
+// consumer code, so a panic here would be a bug — but we still recover
+// so the escalation path reliably falls through to gs.Stop() no matter
+// what the hook does.
+func safeCallEscalateHook(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("!!! stopGRPCServerBounded onEscalate panic recovered: %v\n%s !!!", r, debug.Stack())
+		}
+	}()
+	fn()
 }
 
 // getHostDiscoveryMessage returns json string formatted with online / offline status indicator along with host address info
@@ -1317,6 +1557,15 @@ func (s *Service) awaitOsSigExit() {
 	safeGo("sig-demux", func() {
 		sig := <-sigs
 		log.Println("OS Sig Exit Command: ", sig)
+		// SVC-F5: fire Immediate phase BEFORE notifying Serve that a
+		// signal arrived. Firing here (same goroutine, before the
+		// channel send) creates a happens-before edge with every step
+		// Serve takes after <-done returns — so handlers observing
+		// ShutdownCtx.Done() see the cancel strictly before
+		// BeforeServerShutdown and any subsequent shutdown step.
+		// No-op unless ShutdownCancel is true and the configured
+		// phase is Immediate.
+		s.fireShutdownCancelIfPhase(ShutdownPhaseImmediate)
 		done <- true
 	})
 
@@ -1675,6 +1924,21 @@ func (s *Service) Serve() error {
 	if !s._started.CompareAndSwap(false, true) {
 		return ErrServiceAlreadyStarted
 	}
+
+	// SVC-F5: allocate the opt-in shutdown-signal context BEFORE any
+	// lifecycle step that could fire a phase cancel. When
+	// ShutdownCancel is false (the default) this is a pure no-op,
+	// preserving byte-identical behavior for every existing consumer.
+	if s.ShutdownCancel {
+		s._mu.Lock()
+		s._shutdownCtx, s._shutdownCancel = context.WithCancel(context.Background())
+		s._mu.Unlock()
+	}
+
+	// Safety net: guarantee ShutdownCtx.Done() fires before Serve
+	// returns, regardless of phase. Idempotent — a prior phase fire
+	// is a no-op here. No-op when capability is disabled.
+	defer s.fireShutdownCancelFinal()
 
 	s.setLocalAddress("")
 

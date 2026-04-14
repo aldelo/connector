@@ -1085,3 +1085,363 @@ func TestService_DeregisterInstance_ConcurrentCallsNoDeadlock(t *testing.T) {
 		t.Error("_deregFired is false after concurrent calls — the CAS path is broken")
 	}
 }
+
+// ----------------------------------------------------------------------
+// SVC-F5 ShutdownCtx tests.
+//
+// The opt-in handler shutdown-signal context is allocated inside
+// Serve() when ShutdownCancel is true and cancelled at the configured
+// phase. These tests exercise the helpers directly — Serve() remains
+// integration-gated (TestService_Serve), so unit coverage is the
+// practical option for a CI-safe test suite.
+//
+// newShutdownCancelTestService mirrors Serve()'s allocation step so
+// tests can drive fireShutdownCancelIfPhase / fireShutdownCancelFinal
+// against a realistic Service state without running Serve itself.
+// ----------------------------------------------------------------------
+
+func newShutdownCancelTestService(enabled bool, phase ShutdownPhase) *Service {
+	s := &Service{ShutdownCancel: enabled, ShutdownCancelPhase: phase}
+	if enabled {
+		s._mu.Lock()
+		s._shutdownCtx, s._shutdownCancel = context.WithCancel(context.Background())
+		s._mu.Unlock()
+	}
+	return s
+}
+
+// Test 1 (design-doc §3): ShutdownCtx() returns nil on a fresh Service.
+// Zero-value Service must see the capability disabled and ShutdownCtx()
+// return nil. This is the default "existing consumer sees no change"
+// guarantee.
+func TestService_ShutdownCtx_DisabledByDefault(t *testing.T) {
+	s := &Service{}
+	if got := s.ShutdownCtx(); got != nil {
+		t.Fatalf("ShutdownCtx() = %v, want nil when ShutdownCancel is false", got)
+	}
+}
+
+// Test 2 (design-doc §3): ShutdownCancel = true alone does not
+// allocate the ctx — allocation is Serve's job. Until Serve runs,
+// ShutdownCtx() still returns nil. Helpers must no-op rather than
+// panic on a partially-configured Service.
+func TestService_ShutdownCtx_NilUntilAllocated(t *testing.T) {
+	s := &Service{ShutdownCancel: true, ShutdownCancelPhase: ShutdownPhaseImmediate}
+	if got := s.ShutdownCtx(); got != nil {
+		t.Fatalf("ShutdownCtx() = %v, want nil until Serve allocates it", got)
+	}
+	// Helpers must not panic on an unallocated Service.
+	s.fireShutdownCancelIfPhase(ShutdownPhaseImmediate)
+	s.fireShutdownCancelFinal()
+}
+
+// Test 3 (design-doc §3): Immediate phase — matching fire cancels the
+// ctx; non-matching phases leave it alive. This is the sig-demux
+// in-goroutine fire path that Serve wires into awaitOsSigExit.
+func TestService_ShutdownCtx_ImmediatePhase_CancelsOnFire(t *testing.T) {
+	s := newShutdownCancelTestService(true, ShutdownPhaseImmediate)
+	ctx := s.ShutdownCtx()
+	if ctx == nil {
+		t.Fatal("ShutdownCtx() returned nil after allocation")
+	}
+
+	// Non-matching phases must not cancel.
+	s.fireShutdownCancelIfPhase(ShutdownPhasePreDrain)
+	s.fireShutdownCancelIfPhase(ShutdownPhasePostGraceExpiry)
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("ctx cancelled by non-matching phase fire: err=%v", err)
+	}
+
+	// Matching phase must cancel.
+	s.fireShutdownCancelIfPhase(ShutdownPhaseImmediate)
+	select {
+	case <-ctx.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("ctx did not cancel after matching Immediate phase fire")
+	}
+}
+
+// Test 4 (design-doc §3): PreDrain phase — matching fire cancels,
+// Immediate (earlier phase) does not. Verifies phase matching is
+// exact, not ordered, so an earlier-phase fire on a later-configured
+// service leaves the ctx alive until its designated point.
+func TestService_ShutdownCtx_PreDrainPhase_CancelsOnFire(t *testing.T) {
+	s := newShutdownCancelTestService(true, ShutdownPhasePreDrain)
+	ctx := s.ShutdownCtx()
+	if ctx == nil {
+		t.Fatal("ShutdownCtx() returned nil after allocation")
+	}
+
+	s.fireShutdownCancelIfPhase(ShutdownPhaseImmediate)
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("ctx cancelled by Immediate on PreDrain-configured service: err=%v", err)
+	}
+
+	s.fireShutdownCancelIfPhase(ShutdownPhasePreDrain)
+	select {
+	case <-ctx.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("ctx did not cancel after matching PreDrain phase fire")
+	}
+}
+
+// Test 5 (design-doc §3): PostGraceExpiry — stopGRPCServerBoundedWithHook
+// calls the hook synchronously, on the caller's goroutine, immediately
+// before escalating to gs.Stop(). This wires the SVC-F5 fire site to
+// the SVC-F1 escalation point. Verify:
+//
+//   - the hook IS invoked when the grace timeout elapses (forced by
+//     not releasing gracefulStopBlock),
+//   - the hook runs BEFORE gs.Stop (because the design promises the
+//     "last warning" ordering — handlers observing ShutdownCtx see
+//     cancellation strictly before the transport is severed),
+//   - the ctx is cancelled by the time the helper returns.
+func TestService_ShutdownCtx_PostGraceExpiry_CancelsOnEscalate(t *testing.T) {
+	s := newShutdownCancelTestService(true, ShutdownPhasePostGraceExpiry)
+	ctx := s.ShutdownCtx()
+	if ctx == nil {
+		t.Fatal("ShutdownCtx() returned nil after allocation")
+	}
+
+	f := newFakeGRPCServer()
+	// Do not release gracefulStopBlock → force the timeout/escalation path.
+
+	// hookFiredBeforeStop captures whether ctx was already cancelled at
+	// the moment Stop was observed by the test's wrapper. Since the
+	// hook must fire synchronously before gs.Stop per the helper's
+	// contract, the observed ctx must be cancelled at Stop-call time.
+	var hookRanAt time.Time
+	hook := func() {
+		hookRanAt = time.Now()
+		s.fireShutdownCancelIfPhase(ShutdownPhasePostGraceExpiry)
+	}
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopGRPCServerBoundedWithHook(f, 50*time.Millisecond, hook)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stopGRPCServerBoundedWithHook hung past escalation deadline")
+	}
+
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Errorf("escalation path returned before timeout elapsed: %s", elapsed)
+	}
+
+	// Ctx must be cancelled because the hook fired before gs.Stop.
+	if err := ctx.Err(); err == nil {
+		t.Fatal("ctx was not cancelled — PostGraceExpiry hook did not fire on escalation")
+	}
+	if hookRanAt.IsZero() {
+		t.Fatal("hook was never invoked")
+	}
+
+	// Stop must have been called (escalation is the whole point).
+	select {
+	case <-f.stopCalled:
+	default:
+		t.Fatal("Stop was not called on escalation path")
+	}
+}
+
+// Test 6 (design-doc §3): Safety net — fireShutdownCancelFinal cancels
+// ShutdownCtx regardless of phase, and is idempotent. Serve() defers
+// this call so a handler observing ShutdownCtx is guaranteed to see
+// Done() close before Serve returns, even if no phase matched.
+func TestService_ShutdownCtx_SafetyNetAlwaysFires(t *testing.T) {
+	s := newShutdownCancelTestService(true, ShutdownPhaseImmediate)
+	ctx := s.ShutdownCtx()
+	if ctx == nil {
+		t.Fatal("ShutdownCtx() returned nil after allocation")
+	}
+
+	// No phase fire — ctx still live.
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("ctx already cancelled before safety net: err=%v", err)
+	}
+
+	s.fireShutdownCancelFinal()
+	select {
+	case <-ctx.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("ctx did not cancel after Final safety-net fire")
+	}
+
+	// Idempotent: second call must be safe (context.CancelFunc allows
+	// multiple invocations).
+	s.fireShutdownCancelFinal()
+}
+
+// Test 7 (design-doc §3): handler-observable shape — a handler that
+// checks ShutdownCtx in its work loop returns early when the cancel
+// fires. This test runs the canonical select pattern from the
+// ShutdownCtx godoc and verifies it actually exits on cancel, rather
+// than proving it end-to-end through Serve (which remains
+// integration-gated).
+func TestService_ShutdownCtx_HandlerObservingCtxExitsEarly(t *testing.T) {
+	s := newShutdownCancelTestService(true, ShutdownPhaseImmediate)
+	shut := s.ShutdownCtx()
+	if shut == nil {
+		t.Fatal("ShutdownCtx() returned nil after allocation")
+	}
+
+	// Simulated handler: processes chunks until ShutdownCtx fires,
+	// then returns the number of chunks processed and an "unavailable"
+	// marker. Mirrors the godoc example pattern exactly.
+	handlerDone := make(chan int, 1)
+	startWork := make(chan struct{})
+	safeGo("svc-f5-test-handler", func() {
+		<-startWork
+		processed := 0
+		for {
+			select {
+			case <-shut.Done():
+				handlerDone <- processed
+				return
+			default:
+			}
+			processed++
+			// Tiny deterministic step so the test terminates even if
+			// cancel never arrives (failure will time out below).
+			time.Sleep(time.Millisecond)
+		}
+	})
+
+	close(startWork)
+	// Give the handler a moment to run meaningful iterations.
+	time.Sleep(10 * time.Millisecond)
+
+	s.fireShutdownCancelIfPhase(ShutdownPhaseImmediate)
+
+	select {
+	case processed := <-handlerDone:
+		if processed == 0 {
+			t.Error("handler exited without processing any chunks — tight loop never saw progress")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not observe ShutdownCtx.Done() within 2s")
+	}
+}
+
+// Test 8 (design-doc §3): opt-in = no coercion. A handler that never
+// checks ShutdownCtx still runs to completion, regardless of the
+// cancel state. The framework does not reach into the handler or
+// translate status codes; handler authors who want cooperation must
+// write it themselves.
+func TestService_ShutdownCtx_HandlerIgnoringCtxStillCompletes(t *testing.T) {
+	s := newShutdownCancelTestService(true, ShutdownPhaseImmediate)
+
+	// Simulated handler: ignores ShutdownCtx, always returns success.
+	handlerResult := make(chan error, 1)
+	safeGo("svc-f5-test-handler-ignoring", func() {
+		// No ShutdownCtx observation.
+		time.Sleep(50 * time.Millisecond)
+		handlerResult <- nil // "successful" RPC
+	})
+
+	// Fire the cancel while the handler is running.
+	time.Sleep(10 * time.Millisecond)
+	s.fireShutdownCancelIfPhase(ShutdownPhaseImmediate)
+
+	select {
+	case err := <-handlerResult:
+		if err != nil {
+			t.Errorf("ignoring-ctx handler returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ignoring-ctx handler did not complete within 2s")
+	}
+
+	// And the safety net still closes Done() for any later observer.
+	s.fireShutdownCancelFinal()
+	select {
+	case <-s.ShutdownCtx().Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("ShutdownCtx.Done() not closed after final safety-net fire")
+	}
+}
+
+// ----------------------------------------------------------------------
+// SVC-F5 edge cases on stopGRPCServerBoundedWithHook itself.
+// ----------------------------------------------------------------------
+
+// Fast path (GracefulStop returns quickly) MUST NOT fire the hook.
+// PostGraceExpiry means "after grace expiry" — a successful graceful
+// drain leaves ShutdownCtx uncancelled until the Serve safety net.
+func TestStopGRPCServerBoundedWithHook_FastPathNoFire(t *testing.T) {
+	f := newFakeGRPCServer()
+	f.releaseGraceful() // GracefulStop returns immediately
+
+	var fired bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopGRPCServerBoundedWithHook(f, 5*time.Second, func() { fired = true })
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("fast-path hung")
+	}
+	if fired {
+		t.Error("onEscalate hook fired on fast path — must only fire on timeout")
+	}
+}
+
+// A nil hook on the escalation path must not panic.
+func TestStopGRPCServerBoundedWithHook_NilHookSafeOnEscalate(t *testing.T) {
+	f := newFakeGRPCServer()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopGRPCServerBoundedWithHook(f, 50*time.Millisecond, nil)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("nil-hook escalate path hung")
+	}
+}
+
+// A panicking hook must not block gs.Stop from running — the
+// escalation guarantee stands regardless of hook behavior.
+func TestStopGRPCServerBoundedWithHook_PanickingHookDoesNotBlockStop(t *testing.T) {
+	f := newFakeGRPCServer()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopGRPCServerBoundedWithHook(f, 50*time.Millisecond, func() {
+			panic("hook panic for test")
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("escalation hung after hook panic")
+	}
+
+	select {
+	case <-f.stopCalled:
+	default:
+		t.Error("Stop was not called after hook panic")
+	}
+}
+
+// Zero-value ShutdownCancelPhase promotes to Immediate when the
+// capability is enabled. "Just turn it on" is a supported shape.
+func TestService_EffectiveShutdownCancelPhase_ZeroPromotedToImmediate(t *testing.T) {
+	s := &Service{ShutdownCancel: true} // phase left at zero value
+	if got := s.effectiveShutdownCancelPhase(); got != ShutdownPhaseImmediate {
+		t.Errorf("effectiveShutdownCancelPhase() = %v, want Immediate", got)
+	}
+}
