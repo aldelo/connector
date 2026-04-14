@@ -2074,11 +2074,16 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	// _notificationServicesStarted), and re-entry into Client.Close()
 	// through this path is a no-op because Client.Close() already holds
 	// the single-shot CAS on c.closed.
+	// C3-001: wrap watchdog in safeGo so a panic inside nc.Close()
+	// (grpc.ClientConn.Close edge cases, see CL-F5 comment at line 203)
+	// cannot crash the process. Preserves CL-F5 invariant at line 803.
 	watchdogDone := make(chan struct{})
-	go closeOnClosed(c.getClosedCh(), watchdogDone, func() {
-		if nc != nil {
-			nc.Close()
-		}
+	safeGo("subscribe-close-on-closed-watchdog", func() {
+		closeOnClosed(c.getClosedCh(), watchdogDone, func() {
+			if nc != nil {
+				nc.Close()
+			}
+		})
 	})
 	defer close(watchdogDone)
 
@@ -3619,8 +3624,13 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 	// serve asynchronously so Dial can continue; capture error for logging
 	// FIX: Capture channel in local var so deferred close is not affected
 	// if shutdownWebServerLocked sets c.webServerStop = nil on timeout.
+	// C3-007: migrated from raw go+inline recover to safeGo for uniformity
+	// with CL-F5 invariant (line 803). The inner defer still needs to own
+	// panic-to-error surfacing (dial-path must see an error on panic), so
+	// the local recover is retained AHEAD of safeGo's outer recover. The
+	// outer safeGo recover acts as a belt-and-suspenders backstop.
 	stopCh := c.webServerStop
-	go func() {
+	safeGo("start-webserver-serve", func() {
 		defer close(stopCh) // signal completion/shutdown
 		defer func() {
 			if r := recover(); r != nil {
@@ -3652,12 +3662,18 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 		}
 
 		internalServeErr <- nil
-	}()
+	})
 
-	// guarantee the caller receives exactly one result, even with unbuffered channels.
-	go func(errCh <-chan error, out chan<- error) {
-		out <- <-errCh
-	}(internalServeErr, serveErr)
+	// C3-006: guarantee the caller receives exactly one result, even with
+	// unbuffered channels. Wrapped in safeGo so a concurrent close of
+	// serveErr (triggers "send on closed channel") is recovered instead
+	// of crashing the process. A nil serveErr will still block-leak this
+	// goroutine, but that is a caller-contract bug, not our concern here.
+	internalErrCh := internalServeErr
+	outCh := serveErr
+	safeGo("start-webserver-errch-forwarder", func() {
+		outCh <- <-internalErrCh
+	})
 
 	return nil
 }
