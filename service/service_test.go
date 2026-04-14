@@ -506,6 +506,134 @@ func TestStopGRPCServerBounded_EscalatesOnTimeout(t *testing.T) {
 	}
 }
 
+// TestStopGRPCServerBoundedWithHook_OrderingPostGraceExpiry verifies
+// the C2-008 claim: the onEscalate hook (the SVC-F5 PostGraceExpiry
+// fire site) runs strictly BEFORE gs.Stop() severs the transport when
+// the graceful drain exceeds its timeout. Handlers observing
+// ShutdownCtx on the PostGraceExpiry phase must see the cancel happen
+// before in-flight streams are force-closed, otherwise they learn of
+// the shutdown via a transport error instead of a cooperative signal.
+//
+// Mechanism: wrap fakeGRPCServer's Stop() with an order recorder that
+// writes "stop" to a shared slice, and pass an onEscalate hook that
+// writes "hook". Force the escalation path (no releaseGraceful) with a
+// short timeout, then assert the slice is ["hook", "stop"] in order.
+//
+// Without the ordering guarantee, a future refactor could invoke
+// gs.Stop() before the hook (e.g. by reordering the lines in
+// stopGRPCServerBoundedWithHook) and rule #13 on the PostGraceExpiry
+// phase would silently regress.
+func TestStopGRPCServerBoundedWithHook_OrderingPostGraceExpiry(t *testing.T) {
+	inner := newFakeGRPCServer()
+	// Do not release gracefulStopBlock — force the timeout/escalation path.
+
+	var mu sync.Mutex
+	var order []string
+	wrapped := &orderingRecorderGS{inner: inner, mu: &mu, order: &order}
+
+	hook := func() {
+		mu.Lock()
+		order = append(order, "hook")
+		mu.Unlock()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopGRPCServerBoundedWithHook(wrapped, 50*time.Millisecond, hook)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stopGRPCServerBoundedWithHook hung past deadline — escalation did not complete")
+	}
+
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+
+	if len(got) != 2 {
+		t.Fatalf("expected exactly 2 recorded events (hook, stop); got %d: %v", len(got), got)
+	}
+	if got[0] != "hook" || got[1] != "stop" {
+		t.Fatalf("ordering violation: expected [hook stop]; got %v — C2-008 regression: PostGraceExpiry fire site must happen-before gs.Stop()", got)
+	}
+
+	select {
+	case <-inner.gracefulStopCalled:
+	default:
+		t.Error("GracefulStop was not called — helper skipped the graceful attempt")
+	}
+	select {
+	case <-inner.stopCalled:
+	default:
+		t.Error("Stop was not called — escalation missing")
+	}
+}
+
+// orderingRecorderGS wraps a fakeGRPCServer and records Stop() calls
+// in the shared order slice so the test can assert hook-before-stop
+// ordering. The inner fake is reused because its GracefulStop/Stop
+// plumbing (blocking channel + releaseOnce) is already correct.
+type orderingRecorderGS struct {
+	inner *fakeGRPCServer
+	mu    *sync.Mutex
+	order *[]string
+}
+
+func (o *orderingRecorderGS) GracefulStop() { o.inner.GracefulStop() }
+
+func (o *orderingRecorderGS) Stop() {
+	o.mu.Lock()
+	*o.order = append(*o.order, "stop")
+	o.mu.Unlock()
+	o.inner.Stop()
+}
+
+// TestStopGRPCServerBoundedWithHook_FastPathSkipsHook verifies the
+// complementary C2-008 invariant: when the graceful drain completes
+// within the timeout, the onEscalate hook is NOT invoked. Consumers
+// choosing ShutdownPhasePostGraceExpiry explicitly opt out of early
+// cancellation, so firing the hook on the fast path would contradict
+// the phase contract.
+func TestStopGRPCServerBoundedWithHook_FastPathSkipsHook(t *testing.T) {
+	f := newFakeGRPCServer()
+	f.releaseGraceful() // GracefulStop returns immediately
+
+	var mu sync.Mutex
+	hookCalls := 0
+	hook := func() {
+		mu.Lock()
+		hookCalls++
+		mu.Unlock()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopGRPCServerBoundedWithHook(f, 5*time.Second, hook)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("stopGRPCServerBoundedWithHook did not return on fast path within 1s")
+	}
+
+	mu.Lock()
+	n := hookCalls
+	mu.Unlock()
+	if n != 0 {
+		t.Errorf("onEscalate hook fired on fast path (%d times) — PostGraceExpiry phase contract violated", n)
+	}
+	select {
+	case <-f.stopCalled:
+		t.Error("Stop was called on fast path — escalation triggered incorrectly")
+	default:
+	}
+}
+
 // TestStopGRPCServerBounded_NilServer verifies a nil server is a no-op
 // (should not panic; should return immediately).
 func TestStopGRPCServerBounded_NilServer(t *testing.T) {
