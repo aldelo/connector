@@ -139,12 +139,24 @@ type MemorySink struct {
 	labelLimit      int
 	overflowDropped atomic.Int64
 
-	// overflowLogLastNS holds the time.Time.UnixNano() of the most
-	// recent overflow audit log emission. Compared against time.Now()
-	// on every drop so the log fires at most once per
-	// overflowLogThrottle. Updated via CompareAndSwap so concurrent
-	// drops serialize on a single log emission — the winner logs, the
-	// losers silently increment overflowPendingDrops and move on.
+	// overflowLogLastNS holds the int64(time.Since(monoStart)) value
+	// captured on the most recent overflow audit log emission.
+	// Compared against a fresh int64(time.Since(monoStart)) on every
+	// drop so the log fires at most once per overflowLogThrottle.
+	// Updated via CompareAndSwap so concurrent drops serialize on a
+	// single log emission — the winner logs, the losers silently
+	// increment overflowPendingDrops and move on.
+	//
+	// F7 (pass-3 contrarian, 2026-04-14): this value is now a
+	// monotonic-since-monoStart delta, NOT a wall-clock UnixNano.
+	// Wall-clock readings are vulnerable to NTP jumps, daylight-
+	// saving transitions, and manual clock adjustments: a backward
+	// jump larger than overflowLogThrottle would re-open the log
+	// window prematurely and permit a second emission inside the
+	// throttle period; a forward jump could delay the next emission
+	// by the jump magnitude. time.Since(m.monoStart) uses the
+	// process-lifetime monotonic clock captured at construction,
+	// which is immune to both failure modes.
 	//
 	// overflowPendingDrops accumulates the number of drops that
 	// occurred since the last throttled log line; it is zeroed by the
@@ -152,6 +164,12 @@ type MemorySink struct {
 	// operators can see the true rate even while the log is throttled.
 	overflowLogLastNS    atomic.Int64
 	overflowPendingDrops atomic.Int64
+
+	// monoStart anchors the monotonic clock used by recordOverflowDrop.
+	// Captured in NewMemorySink via time.Now(); time.Since(monoStart)
+	// then yields a monotonic delta independent of any wall-clock
+	// adjustment. Never written after construction.
+	monoStart time.Time
 
 	// overflowLogger is the destination for the throttled audit log.
 	// Defaults to the standard library "log" package's Printf; tests
@@ -180,6 +198,11 @@ func NewMemorySink() *MemorySink {
 		counters:       make(map[string]*atomic.Int64),
 		histograms:     make(map[string]*histogramState),
 		overflowLogger: log.Printf,
+		// F7: capture monoStart so recordOverflowDrop can use a
+		// process-lifetime monotonic delta for throttle accounting
+		// instead of wall-clock time.Now().UnixNano(). See the
+		// overflowLogLastNS godoc for the full rationale.
+		monoStart: time.Now(),
 	}
 }
 
@@ -240,7 +263,11 @@ func (m *MemorySink) recordOverflowDrop() {
 	m.overflowDropped.Add(1)
 	m.overflowPendingDrops.Add(1)
 
-	now := time.Now().UnixNano()
+	// F7: use the monotonic clock anchored at construction. Wall-clock
+	// time.Now().UnixNano() is vulnerable to NTP adjustments and manual
+	// clock changes; time.Since(m.monoStart) is a pure nanosecond delta
+	// from the Go runtime's monotonic clock and never moves backward.
+	now := int64(time.Since(m.monoStart))
 	last := m.overflowLogLastNS.Load()
 
 	// First drop ever: seed the timestamp without logging. Otherwise

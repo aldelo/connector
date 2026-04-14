@@ -22,6 +22,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -405,8 +406,14 @@ func TestMemorySink_OverflowLogThrottle_LogsAfterWindowExpiry(t *testing.T) {
 	// Rewind the window by more than overflowLogThrottle so the
 	// next drop is eligible to log. This is the test equivalent of
 	// "60s have passed" without actually sleeping.
+	// F7: rewind the monotonic-anchored value to "one throttle ago".
+	// int64(time.Since(m.monoStart)) is the current monotonic delta;
+	// subtracting 2*overflowLogThrottle yields a value in the past
+	// (possibly negative if the sink was just constructed, which is
+	// still a legal value — the throttle predicate (now-last) will
+	// then be >= overflowLogThrottle and permit an immediate log).
 	m.overflowLogLastNS.Store(
-		time.Now().Add(-2 * overflowLogThrottle).UnixNano(),
+		int64(time.Since(m.monoStart)) - 2*int64(overflowLogThrottle),
 	)
 
 	// Burst B: drops 101..200. The FIRST drop in this burst should
@@ -449,8 +456,14 @@ func TestMemorySink_OverflowLogThrottle_LogsAfterWindowExpiry(t *testing.T) {
 	// across throttle boundaries). We pin two invariants: a second
 	// log line exists, and the cumulative OverflowDropped total on
 	// the log line equals the cumulative count we drove through.
+	// F7: rewind the monotonic-anchored value to "one throttle ago".
+	// int64(time.Since(m.monoStart)) is the current monotonic delta;
+	// subtracting 2*overflowLogThrottle yields a value in the past
+	// (possibly negative if the sink was just constructed, which is
+	// still a legal value — the throttle predicate (now-last) will
+	// then be >= overflowLogThrottle and permit an immediate log).
 	m.overflowLogLastNS.Store(
-		time.Now().Add(-2 * overflowLogThrottle).UnixNano(),
+		int64(time.Since(m.monoStart)) - 2*int64(overflowLogThrottle),
 	)
 	for i := 0; i < 10; i++ {
 		m.Counter("rpc", map[string]string{"id": fmt.Sprintf("c-%d", i)}, 1)
@@ -486,8 +499,14 @@ func TestMemorySink_OverflowLogThrottle_ConcurrentBurstSingleWinner(t *testing.T
 	m.Counter("rpc", map[string]string{"id": "seed"}, 1)
 	// Pre-expire the window so the upcoming drops are ALL eligible
 	// to log; the CAS must ensure only one wins.
+	// F7: rewind the monotonic-anchored value to "one throttle ago".
+	// int64(time.Since(m.monoStart)) is the current monotonic delta;
+	// subtracting 2*overflowLogThrottle yields a value in the past
+	// (possibly negative if the sink was just constructed, which is
+	// still a legal value — the throttle predicate (now-last) will
+	// then be >= overflowLogThrottle and permit an immediate log).
 	m.overflowLogLastNS.Store(
-		time.Now().Add(-2 * overflowLogThrottle).UnixNano(),
+		int64(time.Since(m.monoStart)) - 2*int64(overflowLogThrottle),
 	)
 
 	const workers = 32
@@ -528,8 +547,14 @@ func TestMemorySink_OverflowLogThrottle_ObserveDropPath(t *testing.T) {
 	m.overflowLogger = cap.Printf
 
 	m.Observe("lat", map[string]string{"id": "seed"}, 0.1)
+	// F7: rewind the monotonic-anchored value to "one throttle ago".
+	// int64(time.Since(m.monoStart)) is the current monotonic delta;
+	// subtracting 2*overflowLogThrottle yields a value in the past
+	// (possibly negative if the sink was just constructed, which is
+	// still a legal value — the throttle predicate (now-last) will
+	// then be >= overflowLogThrottle and permit an immediate log).
 	m.overflowLogLastNS.Store(
-		time.Now().Add(-2 * overflowLogThrottle).UnixNano(),
+		int64(time.Since(m.monoStart)) - 2*int64(overflowLogThrottle),
 	)
 
 	for i := 0; i < 50; i++ {
@@ -542,6 +567,107 @@ func TestMemorySink_OverflowLogThrottle_ObserveDropPath(t *testing.T) {
 	if n := cap.Count(); n != 1 {
 		t.Errorf("expected 1 log line from Observe drop path, got %d", n)
 	}
+}
+
+// TestMemorySink_OverflowDrop_UsesMonotonicClock is a source-contract
+// regression guard for F7 (pass-3 contrarian, 2026-04-14). It parses
+// metrics.go and asserts that recordOverflowDrop does NOT reach for
+// time.Now().UnixNano() (wall-clock — vulnerable to NTP / DST / manual
+// adjustments) and DOES reach for time.Since(m.monoStart) (monotonic
+// delta — immune to all clock adjustments).
+//
+// Without this test, a future refactor could "simplify" the function
+// back to wall-clock time and silently reopen the throttle window on
+// backward clock jumps. The failure mode is invisible in normal CI
+// because the tests rewind the counter value directly instead of
+// advancing a clock, so only a source-level pin catches the drift.
+func TestMemorySink_OverflowDrop_UsesMonotonicClock(t *testing.T) {
+	src, err := readMetricsSource(t)
+	if err != nil {
+		t.Fatalf("read metrics.go: %v", err)
+	}
+
+	body := extractFunctionBody(src, "recordOverflowDrop")
+	if body == "" {
+		t.Fatal("recordOverflowDrop not found in metrics.go")
+	}
+	// Strip line comments — the F7 rationale comment inside the
+	// function body literally quotes the banned pattern, which would
+	// false-positive a naive substring check. Only the compiled code
+	// path is what we care about.
+	body = stripLineComments(body)
+
+	if strings.Contains(body, "time.Now().UnixNano()") {
+		t.Errorf("recordOverflowDrop must not use time.Now().UnixNano() — " +
+			"wall-clock is vulnerable to NTP / DST / manual adjustments " +
+			"that reopen the throttle window. Use time.Since(m.monoStart).")
+	}
+	if !strings.Contains(body, "time.Since(m.monoStart)") {
+		t.Errorf("recordOverflowDrop must use time.Since(m.monoStart) " +
+			"so throttle accounting is immune to clock adjustments. " +
+			"See overflowLogLastNS godoc for the F7 rationale.")
+	}
+}
+
+// readMetricsSource returns the content of metrics.go as a string.
+// Extracted so the source-contract test can live alongside the
+// behavioral tests without duplicating file I/O boilerplate.
+func readMetricsSource(t *testing.T) (string, error) {
+	t.Helper()
+	b, err := os.ReadFile("metrics.go")
+	return string(b), err
+}
+
+// stripLineComments removes Go // line comments from a source string.
+// Does NOT handle block comments or comment markers inside string
+// literals — sufficient for the targeted source-contract test where
+// we know the function body has no /* */ blocks and no "//" runs
+// appearing inside string literals.
+func stripLineComments(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+	for _, line := range strings.Split(src, "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// extractFunctionBody returns the body of the named method (including
+// braces) from a Go source string, or "" if the function is not found.
+// Uses a brace-balance walk starting from the "func ... name(" line.
+// Not a full parser — sufficient for source-contract regression tests
+// where the target function is known and unambiguous.
+func extractFunctionBody(src, name string) string {
+	// Match the method declaration line. recordOverflowDrop is a
+	// method, so the signature begins with "func (m *MemorySink) ".
+	needle := ") " + name + "("
+	idx := strings.Index(src, needle)
+	if idx < 0 {
+		return ""
+	}
+	// Walk forward to the opening brace of the function body.
+	open := strings.Index(src[idx:], "{")
+	if open < 0 {
+		return ""
+	}
+	start := idx + open
+	depth := 0
+	for i := start; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[start : i+1]
+			}
+		}
+	}
+	return ""
 }
 
 // -----------------------------------------------------------------------
