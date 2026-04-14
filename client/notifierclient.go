@@ -267,10 +267,19 @@ func (n *NotifierClient) PurgeEndpointCache() {
 		return
 	}
 
+	// C3-002: check _grpcClient nil BEFORE calling getConfig() — the
+	// previous order (cfg := n._grpcClient.getConfig(); if n._grpcClient == nil ...)
+	// only worked because getConfig has a nil-receiver guard. Evaluating
+	// the nil test first removes the implicit dependency on that guard.
+	if n._grpcClient == nil {
+		ClearEndpointCache()
+		return
+	}
+
 	// CL-F4: snapshot _config via atomic.Pointer so the nil check and
 	// field deref cannot race against a Dial error path storing nil.
 	cfg := n._grpcClient.getConfig()
-	if n._grpcClient == nil || cfg == nil {
+	if cfg == nil {
 		ClearEndpointCache()
 		return
 	}
