@@ -1524,9 +1524,15 @@ func stopGRPCServerBoundedWithHook(gs gracefulStopper, timeout time.Duration, on
 		defer close(stopped)
 		gs.GracefulStop()
 	})
+	// FIX #14: use time.NewTimer + explicit Stop() instead of time.After,
+	// so the timer goroutine does not leak when the graceful drain
+	// completes before the timeout elapses (time.After cannot be GC'd
+	// until it fires).
+	t := time.NewTimer(timeout)
+	defer t.Stop()
 	select {
 	case <-stopped:
-	case <-time.After(timeout):
+	case <-t.C:
 		log.Printf("GracefulStop exceeded %s — escalating to Stop", timeout)
 		if onEscalate != nil {
 			safeCallEscalateHook(onEscalate)
