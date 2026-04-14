@@ -101,12 +101,32 @@ const (
 	// the cancel happens-before any subsequent Serve shutdown step.
 	ShutdownPhaseImmediate
 
-	// ShutdownPhasePreDrain fires the cancel after BeforeServerShutdown
-	// and after the Cloud Map deregister call, but before
-	// grpc.Server.GracefulStop is invoked. This gives the
-	// service-discovery layer time to stop routing to us while also
-	// letting handlers learn to stop cooperating before the grace window
-	// begins. Good middle-ground default for typical gRPC services.
+	// ShutdownPhasePreDrain fires the cancel inside the unified quit
+	// handler, AFTER all non-gRPC teardown has completed and
+	// IMMEDIATELY BEFORE the bounded graceful-stop attempt (or the
+	// ImmediateStop bypass) hands control to the gRPC server. By the
+	// time handlers observe ShutdownCtx.Done() on this phase, the
+	// following have already run in the quit handler, in order:
+	// SNS offline-discovery publish, SNS topic unsubscribe, health
+	// report data-store delete, stopHealthReportService tick,
+	// WebServerConfig.CleanUp, clear local address, setServing(false),
+	// Cloud Map deregisterInstance (one-shot CAS), and Disconnect on
+	// the SD/SQS/SNS AWS clients. What has NOT yet run: the bounded
+	// grpc.GracefulStop drain (or, on the ImmediateStop bypass, the
+	// direct grpc.Server.Stop call) and the listener close. The
+	// service-discovery layer has already stopped routing to us —
+	// handlers use this phase to stop cooperating before the grace
+	// window begins, which is the good middle-ground default for
+	// typical gRPC services.
+	//
+	// Note: BeforeServerShutdown runs BEFORE this fire site only on
+	// the signal path (Serve owns that hook and calls it after
+	// awaitOsSigExit unblocks, before sending on the quit channel).
+	// On the programmatic GracefulStop/ImmediateStop path the
+	// BeforeServerShutdown hook is not re-invoked from the quit
+	// handler — Serve owns BeforeServerShutdown — so handlers should
+	// not assume BeforeServerShutdown has executed when PreDrain
+	// fires via a programmatic stop.
 	ShutdownPhasePreDrain
 
 	// ShutdownPhasePostGraceExpiry fires the cancel only after
