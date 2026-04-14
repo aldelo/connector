@@ -379,6 +379,45 @@ type Service struct {
 	// allocate, ShutdownCtx() acquires the read lock to return.
 	_shutdownCtx    context.Context
 	_shutdownCancel context.CancelFunc
+
+	// SVC-F7: _quit / _quitDone are the unified quit-routing primitives
+	// used by Serve()'s quit-handler goroutine. Promoted from local
+	// variables in Serve to Service fields so exported stop methods
+	// (GracefulStop, ImmediateStop) can route through the same
+	// single-source-of-truth quit handler that the signal path uses,
+	// instead of duplicating the teardown body. Both fields are nil
+	// until Serve allocates them under _mu (one-shot per-instance) and
+	// the quit-handler goroutine closes _quitDone when teardown
+	// completes. Exported stop methods that observe non-nil _quit do a
+	// non-blocking send on _quit (buffer 1; idempotent — if already
+	// signaled, the send drops via select default) and then block on
+	// _quitDone until the quit handler finishes. When _quit is nil
+	// (call before Serve, or after the quit-handler already nil-ed the
+	// field at end of teardown — currently the field is left intact
+	// post-teardown so this branch primarily covers pre-Serve calls)
+	// the exported stop method falls through to its legacy idempotent
+	// teardown body as a safety net.
+	//
+	// _immediateStopRequested is the side-channel that lets
+	// ImmediateStop() request the "skip drain, go straight to gs.Stop()"
+	// behavior through the same quit handler. The quit handler reads
+	// this atomic AFTER it wins the quit signal but BEFORE invoking
+	// stopGRPCServerBoundedWithHook; if true, it bypasses the bounded
+	// graceful path and calls gs.Stop() directly (still firing the
+	// PostGraceExpiry SVC-F5 hook synchronously beforehand to honor
+	// the rule #13 contract on the immediate path). The flag is set
+	// once and never cleared — single-use per Service, like _started.
+	//
+	// Concurrency contract: signal path and programmatic path may race
+	// on the send; whichever wins the buffer-1 send wakes the handler,
+	// the loser's send drops via the select default and the loser
+	// blocks on _quitDone alongside the winner. Both observe the same
+	// teardown completion. Concurrent GracefulStop+ImmediateStop sets
+	// _immediateStopRequested via atomic.Bool.Store — if either path
+	// sets it before the handler reads it, the immediate semantics win.
+	_quit                   chan bool
+	_quitDone               chan struct{}
+	_immediateStopRequested atomic.Bool
 }
 
 // NewService constructs a Service ready for further configuration.
@@ -453,7 +492,17 @@ func (s *Service) setServing(v bool) {
 // matched (e.g., a future phase constant is added and not all fire
 // sites are updated).
 //
-// Fix: SVC-F5 (2026-04-14).
+// SVC-F7 (2026-04-14): the safety net applies symmetrically on the
+// programmatic shutdown path. GracefulStop() and ImmediateStop()
+// route through the same unified quit handler the signal path
+// wakes, so every fireShutdownCancelIfPhase site (Immediate,
+// PreDrain, PostGraceExpiry) AND the deferred Final fire run
+// before the exported stop method returns to the caller. Prior to
+// SVC-F7 these methods bypassed every phase fire and Serve()
+// remained blocked waiting on an OS signal; project rule #13
+// programmatic-stop semantics are now enforceable end to end.
+//
+// Fix: SVC-F5 (2026-04-14), extended by SVC-F7 (2026-04-14).
 func (s *Service) ShutdownCtx() context.Context {
 	s._mu.RLock()
 	defer s._mu.RUnlock()
@@ -1381,17 +1430,33 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 		// and the configured phase is PreDrain.
 		s.fireShutdownCancelIfPhase(ShutdownPhasePreDrain)
 
-		// SVC-F1 fix: honor the lifecycle godoc on the default signal
-		// path (GracefulStop with bounded fallback to Stop) instead of
-		// going straight to Stop.
-		//
-		// SVC-F5: the WithHook variant gives us a synchronous fire
-		// site at the moment the grace timeout expires and Stop() is
-		// about to be invoked. No-op unless ShutdownCancel is true
-		// and the configured phase is PostGraceExpiry.
-		stopGRPCServerBoundedWithHook(gs, s.GracefulStopTimeout, func() {
-			s.fireShutdownCancelIfPhase(ShutdownPhasePostGraceExpiry)
-		})
+		// SVC-F7: if an exported caller invoked ImmediateStop() — even
+		// concurrently with the signal path — bypass the bounded
+		// graceful drain entirely and call gs.Stop() directly. The
+		// PostGraceExpiry SVC-F5 hook still fires synchronously
+		// beforehand so handlers observing ShutdownCtx see the cancel
+		// strictly before the transport is severed (rule #13). This
+		// preserves ImmediateStop's break-glass semantics on the
+		// unified routing path.
+		if s._immediateStopRequested.Load() {
+			if gs != nil {
+				log.Println("ImmediateStop requested — bypassing graceful drain")
+				s.fireShutdownCancelIfPhase(ShutdownPhasePostGraceExpiry)
+				gs.Stop()
+			}
+		} else {
+			// SVC-F1 fix: honor the lifecycle godoc on the default signal
+			// path (GracefulStop with bounded fallback to Stop) instead of
+			// going straight to Stop.
+			//
+			// SVC-F5: the WithHook variant gives us a synchronous fire
+			// site at the moment the grace timeout expires and Stop() is
+			// about to be invoked. No-op unless ShutdownCancel is true
+			// and the configured phase is PostGraceExpiry.
+			stopGRPCServerBoundedWithHook(gs, s.GracefulStopTimeout, func() {
+				s.fireShutdownCancelIfPhase(ShutdownPhasePostGraceExpiry)
+			})
+		}
 		_ = lis.Close()
 	})
 
@@ -1964,8 +2029,18 @@ func (s *Service) Serve() error {
 		return err
 	}
 
-	quit := make(chan bool, 1)     // buffered to prevent deadlock if handler goroutine exits early
-	quitDone := make(chan struct{}) // closed by quit handler when all cleanup is complete
+	// SVC-F7: promote quit/quitDone to Service fields under _mu so
+	// exported stop methods (GracefulStop / ImmediateStop) can route
+	// through the same single-source-of-truth quit handler that the
+	// signal path uses. Buffer 1 on _quit so a non-blocking send from
+	// the exported path is idempotent; close-only on _quitDone so
+	// every concurrent waiter unblocks.
+	s._mu.Lock()
+	s._quit = make(chan bool, 1)
+	s._quitDone = make(chan struct{})
+	quit := s._quit
+	quitDone := s._quitDone
+	s._mu.Unlock()
 
 	if err = s.startServer(lis, quit, quitDone); err != nil {
 		_ = lis.Close()
@@ -1976,7 +2051,13 @@ func (s *Service) Serve() error {
 	// already running. Signal quit to trigger cleanup (stop gRPC, close listener)
 	// instead of leaking goroutines and the listener.
 	if err = s.registerSd(ip, port); err != nil {
-		quit <- true
+		// Non-blocking send: a concurrent exported stop may already
+		// have signaled. The quit handler runs exactly once regardless.
+		select {
+		case quit <- true:
+		default:
+		}
+		<-quitDone
 		return err
 	}
 
@@ -1988,7 +2069,16 @@ func (s *Service) Serve() error {
 		log.Println("... Before gRPC Server Shutdown End")
 	}
 
-	quit <- true
+	// Non-blocking send: an exported stop call (GracefulStop /
+	// ImmediateStop) may have raced ahead and already filled the
+	// buffer. The quit handler is one-shot — it doesn't matter who
+	// wins the send, only that the handler runs exactly once. The
+	// drop branch here means "someone else already woke the handler;
+	// just wait for it to finish".
+	select {
+	case quit <- true:
+	default:
+	}
 	<-quitDone // wait for quit handler to complete full cleanup before proceeding
 
 	if s.AfterServerShutdown != nil {
@@ -2360,23 +2450,83 @@ func (s *Service) unsubscribeSNS() {
 	}
 }
 
-// GracefulStop initiates an orderly shutdown of the Service: it
-// publishes a final discovery notification, unsubscribes from SNS,
-// removes the health report from the shared data store, deregisters
-// from Cloud Map, and finally calls grpc.Server.GracefulStop which
-// allows in-flight RPCs to complete before tearing down connections.
+// GracefulStop initiates an orderly shutdown of the Service.
+//
+// Behavior depends on whether Serve() has been called yet:
+//
+//   - In the normal "Serve is running" case, GracefulStop signals
+//     the unified quit handler (the same one the OS-signal path
+//     wakes) and BLOCKS until that handler completes the full
+//     teardown: BeforeServerShutdown is NOT re-invoked from this
+//     path (Serve owns BeforeServerShutdown), but the quit handler
+//     publishes the offline notification, unsubscribes from SNS,
+//     deletes the health report, runs WebServerConfig.CleanUp,
+//     deregisters from Cloud Map, fires the SVC-F5 PreDrain /
+//     PostGraceExpiry phases, and runs the bounded
+//     grpc.Server.GracefulStop -> Stop escalation. By the time
+//     GracefulStop returns, the gRPC server has fully stopped and
+//     Serve()'s blocking awaitOsSigExit + quit-wait have unblocked
+//     (Serve will run AfterServerShutdown next and then return nil).
+//
+//   - In the rare pre-Serve case (the Service was constructed but
+//     Serve was never called), GracefulStop falls through to a
+//     legacy idempotent teardown body that publishes the offline
+//     notification, runs CleanUp, deregisters, and calls
+//     grpc.Server.GracefulStop directly. This path is provided as
+//     a safety net for callers that perform partial setup outside
+//     Serve. Most callers will never hit it.
 //
 // GracefulStop is safe to call concurrently with the internal
-// signal-driven shutdown path and with ImmediateStop. The Cloud Map
-// deregister step is guarded by a one-shot atomic.Bool CAS
-// (_deregFired, see SVC-F4): the first concurrent caller wins and
-// runs the AWS dereg; every other caller CAS-fails and returns
-// immediately without blocking on the first caller's AWS poll loop.
+// signal-driven shutdown path and with ImmediateStop. The unified
+// quit channel (SVC-F7) routes both paths into one quit-handler
+// invocation; the buffer-1 send on _quit is idempotent (a second
+// concurrent caller's send drops via select default but the caller
+// still blocks on _quitDone alongside the winner). The Cloud Map
+// deregister step inside the quit handler is additionally guarded by
+// a one-shot atomic.Bool CAS (_deregFired, see SVC-F4) so concurrent
+// programmatic + signal callers cannot double-fire the AWS API.
 //
-// This method does not wait for the gRPC server to fully drain — that
-// is grpc.Server.GracefulStop's responsibility. The Serve goroutine
-// will return after the server has stopped.
+// SVC-F5 / rule #13: this routing makes the ShutdownCtx() promise
+// (every fire-site phase runs before Serve returns) hold on the
+// programmatic-stop path, not just the signal path. A consumer that
+// opted in to ShutdownCancel=true and triggers shutdown via
+// GracefulStop() will see the configured phase fire before this
+// method returns (and the safety-net Final fire from the Serve()
+// defer fires before Serve unblocks).
+//
+// Fix: SVC-F7 (C2-001 + C2-002, deep-review-2026-04-14-contrarian).
+// Prior to this fix GracefulStop duplicated the teardown body but
+// bypassed every fireShutdownCancel* site, and the Serve() main
+// goroutine was left blocked in awaitOsSigExit until a real OS signal
+// arrived.
 func (s *Service) GracefulStop() {
+	// SVC-F7: take the unified routing path if Serve has allocated
+	// the quit primitives; otherwise fall through to the legacy
+	// pre-Serve teardown.
+	s._mu.RLock()
+	quit := s._quit
+	quitDone := s._quitDone
+	s._mu.RUnlock()
+	if quit != nil && quitDone != nil {
+		log.Println("GracefulStop invoked — routing through unified quit handler")
+		// Non-blocking send: another path (signal demux / a prior
+		// concurrent stop call) may have already filled the buffer.
+		// In either case the quit handler runs exactly once and
+		// closes _quitDone when teardown completes, so blocking
+		// here on _quitDone is the source-of-truth wait.
+		select {
+		case quit <- true:
+		default:
+		}
+		<-quitDone
+		return
+	}
+
+	// ---- Legacy pre-Serve safety net -----------------------------
+	// Serve was never called (or quit primitives were never
+	// allocated). Run the original idempotent teardown body so
+	// callers that performed partial setup outside Serve can still
+	// release whatever resources are live.
 	s._mu.RLock()
 	cfg := s._config
 	s._mu.RUnlock()
@@ -2397,7 +2547,7 @@ func (s *Service) GracefulStop() {
 
 	s.setLocalAddress("")
 
-	log.Println("Stopping gRPC Server (Graceful)")
+	log.Println("Stopping gRPC Server (Graceful, pre-Serve fallback)")
 
 	s._mu.RLock()
 	hasSd := s._sd != nil
@@ -2437,22 +2587,70 @@ func (s *Service) GracefulStop() {
 }
 
 // ImmediateStop forcibly tears down the Service without waiting for
-// in-flight RPCs to complete: it goes through the same SNS/Cloud Map
-// cleanup as GracefulStop but ends with grpc.Server.Stop instead of
-// GracefulStop, immediately closing all open connections.
+// in-flight RPCs to complete.
 //
-// Use this for hard shutdown paths (panic recovery, fatal config error,
-// shutdown deadline exceeded). Prefer GracefulStop in the normal case.
+// Behavior depends on whether Serve() has been called yet:
+//
+//   - In the normal "Serve is running" case, ImmediateStop sets the
+//     internal "_immediateStopRequested" atomic, signals the unified
+//     quit handler, and BLOCKS until the handler completes teardown.
+//     The quit handler observes _immediateStopRequested and bypasses
+//     the bounded grpc.GracefulStop drain entirely, calling
+//     grpc.Server.Stop directly. The SVC-F5 PostGraceExpiry hook
+//     still fires synchronously before gs.Stop, so handlers
+//     observing ShutdownCtx see the cancel happens-before the
+//     transport is severed.
+//
+//   - In the rare pre-Serve case, ImmediateStop falls through to a
+//     legacy idempotent teardown body that ends with
+//     grpc.Server.Stop directly. As with GracefulStop, this is a
+//     safety net for callers that performed partial setup outside
+//     Serve.
+//
+// Use this for hard shutdown paths (panic recovery, fatal config
+// error, shutdown deadline exceeded). Prefer GracefulStop in the
+// normal case.
 //
 // Like GracefulStop, this method is safe to invoke concurrently with
-// the signal-driven shutdown path; the Cloud Map deregister is
-// guarded by a one-shot atomic.Bool CAS (_deregFired, see SVC-F4).
-// ImmediateStop's "immediate" semantics are PRESERVED under concurrent
-// shutdown: if another path has already claimed the dereg CAS and is
-// mid-AWS-poll, this call CAS-fails and falls through to gs.Stop()
-// without waiting. Operators can rely on ImmediateStop as a break-glass
-// kill switch even while the signal path is stuck on AWS.
+// the signal-driven shutdown path; the unified quit channel (SVC-F7)
+// guarantees the quit handler runs exactly once regardless of how
+// many call sites raced. ImmediateStop's "immediate" semantics are
+// PRESERVED under concurrent shutdown: setting _immediateStopRequested
+// before the quit handler reads it forces the handler down the
+// gs.Stop()-direct path even if a concurrent GracefulStop call won
+// the buffer-1 send. The Cloud Map deregister inside the quit
+// handler is guarded by a one-shot atomic.Bool CAS (_deregFired,
+// see SVC-F4) so concurrent callers cannot stall on each other's
+// AWS poll loop.
+//
+// SVC-F5 / rule #13: this routing makes the ShutdownCtx() promise
+// hold on the programmatic ImmediateStop path — the configured fire
+// site runs before this method returns even when shutdown is
+// triggered without an OS signal.
+//
+// Fix: SVC-F7 (C2-001 + C2-002, deep-review-2026-04-14-contrarian).
 func (s *Service) ImmediateStop() {
+	// SVC-F7: declare the immediate intent BEFORE signaling the quit
+	// channel. The quit handler reads this atomic between waking and
+	// invoking the gRPC stop step, so setting it first guarantees
+	// the immediate semantics regardless of concurrent send races.
+	s._immediateStopRequested.Store(true)
+
+	s._mu.RLock()
+	quit := s._quit
+	quitDone := s._quitDone
+	s._mu.RUnlock()
+	if quit != nil && quitDone != nil {
+		log.Println("ImmediateStop invoked — routing through unified quit handler")
+		select {
+		case quit <- true:
+		default:
+		}
+		<-quitDone
+		return
+	}
+
+	// ---- Legacy pre-Serve safety net -----------------------------
 	s._mu.RLock()
 	cfg := s._config
 	s._mu.RUnlock()
@@ -2473,7 +2671,7 @@ func (s *Service) ImmediateStop() {
 
 	s.setLocalAddress("")
 
-	log.Println("Stopping gRPC Server (Immediate)")
+	log.Println("Stopping gRPC Server (Immediate, pre-Serve fallback)")
 
 	s._mu.RLock()
 	hasSd := s._sd != nil
