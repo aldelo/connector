@@ -438,6 +438,26 @@ type Service struct {
 	_quit                   chan bool
 	_quitDone               chan struct{}
 	_immediateStopRequested atomic.Bool
+
+	// SVC-F8 (F1 deep-review-2026-04-14-contrarian-pass3):
+	// _sigHandlerReady gates the self-SIGTERM that GracefulStop and
+	// ImmediateStop use to wake Serve()'s awaitOsSigExit. The self-
+	// signal is only safe AFTER awaitOsSigExit has called
+	// signal.Notify — before that, SIGTERM hits the Go runtime's
+	// default handler and terminates the process. awaitOsSigExit
+	// sets this atomic to true immediately after registering the
+	// signal handler, and the exported stop methods check it before
+	// calling p.Signal(syscall.SIGTERM). If the flag is not set
+	// (pre-Serve call, mid-Serve before signal.Notify, or
+	// programmatic unit test that manually allocates the quit
+	// primitives without running Serve), the stop methods skip the
+	// self-signal; in those paths Serve() isn't actually blocked on
+	// awaitOsSigExit so there's nothing to wake. The flag is cleared
+	// in awaitOsSigExit immediately after signal.Stop so any late
+	// programmatic stop after the handler is unregistered does NOT
+	// self-signal into a no-op handler — defence-in-depth even
+	// though SVC-F3's single-use gate prevents Service re-use.
+	_sigHandlerReady atomic.Bool
 }
 
 // NewService constructs a Service ready for further configuration.
@@ -1668,6 +1688,17 @@ func (s *Service) awaitOsSigExit() {
 
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
+	// SVC-F8 (F1 fix): mark the handler as ready so exported stop
+	// methods know it's safe to self-deliver SIGTERM. Must be set
+	// AFTER signal.Notify so a concurrent GracefulStop observing
+	// the flag sees a handler that actually catches the signal;
+	// otherwise the self-signal hits the Go runtime default handler
+	// and terminates the process. Clear (via Store(false)) during
+	// signal.Stop at function exit to keep the contract honest if
+	// the Service were ever re-used — though SVC-F3's single-use
+	// gate prevents re-use in practice.
+	s._sigHandlerReady.Store(true)
+
 	safeGo("sig-demux", func() {
 		sig := <-sigs
 		log.Println("OS Sig Exit Command: ", sig)
@@ -1693,6 +1724,11 @@ func (s *Service) awaitOsSigExit() {
 
 	// FIX #29: Stop signal delivery so the channel does not leak
 	signal.Stop(sigs)
+
+	// SVC-F8 (F1 fix): clear readiness so any late programmatic stop
+	// after signal.Stop does NOT self-signal into a no-op handler.
+	// Single-use Service per SVC-F3 means this is defence-in-depth.
+	s._sigHandlerReady.Store(false)
 
 	log.Println("*** Shutdown Invoked ***")
 }
@@ -2590,6 +2626,15 @@ func (s *Service) unsubscribeSNS() {
 //     Serve()'s blocking awaitOsSigExit + quit-wait have unblocked
 //     (Serve will run AfterServerShutdown next and then return nil).
 //
+//     Serve()'s awaitOsSigExit only wakes on an OS signal delivered
+//     via signal.Notify, so this method first sends SIGTERM to its
+//     own pid (SVC-F8) to unblock the sig-demux goroutine; the Go
+//     runtime routes that signal to awaitOsSigExit's local channel
+//     rather than the process default handler, so the process is
+//     NOT terminated by the signal itself. This mirrors the
+//     self-SIGTERM pattern already used on the grpc-server error
+//     path (FIX #13, service.go:1138-1149).
+//
 //   - In the rare pre-Serve case (the Service was constructed but
 //     Serve was never called), GracefulStop falls through to a
 //     legacy idempotent teardown body that publishes the offline
@@ -2608,6 +2653,28 @@ func (s *Service) unsubscribeSNS() {
 // a one-shot atomic.Bool CAS (_deregFired, see SVC-F4) so concurrent
 // programmatic + signal callers cannot double-fire the AWS API.
 //
+// Re-entry from a gRPC handler: calling GracefulStop from inside a
+// gRPC unary/stream handler (e.g. an admin RPC that triggers
+// shutdown) STALLS for up to GracefulStopTimeout (default 30s) and
+// then returns. The reason is that the quit handler's teardown
+// invokes grpc.Server.GracefulStop, which blocks on ALL in-flight
+// RPCs — including the handler that called this method, which is
+// parked inside GracefulStop waiting on _quitDone. The bounded
+// drain helper escalates to grpc.Server.Stop after
+// GracefulStopTimeout, severing the transport; the handler's
+// response is not delivered and its client observes an
+// Unavailable / Canceled error.
+//
+// If you must trigger shutdown from a gRPC handler, spawn a
+// goroutine so the handler can return normally before teardown
+// begins:
+//
+//	go s.GracefulStop()
+//	return &AdminResponse{Ok: true}, nil
+//
+// GracefulStop is safe to call from a goroutine — the unified quit
+// channel (SVC-F7) serializes all shutdown callers.
+//
 // SVC-F5 / rule #13: this routing makes the ShutdownCtx() promise
 // (every fire-site phase runs before Serve returns) hold on the
 // programmatic-stop path, not just the signal path. A consumer that
@@ -2616,11 +2683,13 @@ func (s *Service) unsubscribeSNS() {
 // method returns (and the safety-net Final fire from the Serve()
 // defer fires before Serve unblocks).
 //
-// Fix: SVC-F7 (C2-001 + C2-002, deep-review-2026-04-14-contrarian).
-// Prior to this fix GracefulStop duplicated the teardown body but
-// bypassed every fireShutdownCancel* site, and the Serve() main
-// goroutine was left blocked in awaitOsSigExit until a real OS signal
-// arrived.
+// Fix: SVC-F7 (C2-001 + C2-002) established the unified quit
+// routing. SVC-F8 (F1, deep-review-2026-04-14-contrarian-pass3)
+// added the self-SIGTERM so the unified routing actually wakes
+// Serve()'s awaitOsSigExit. Prior to SVC-F8 the unified routing
+// completed teardown correctly but Serve()'s main goroutine stayed
+// parked in awaitOsSigExit until a real OS signal arrived — a
+// zombie-process hazard on programmatic-only stop paths.
 func (s *Service) GracefulStop() {
 	// SVC-F7: take the unified routing path if Serve has allocated
 	// the quit primitives; otherwise fall through to the legacy
@@ -2631,6 +2700,39 @@ func (s *Service) GracefulStop() {
 	s._mu.RUnlock()
 	if quit != nil && quitDone != nil {
 		log.Println("GracefulStop invoked — routing through unified quit handler")
+		// SVC-F8 (F1 fix): wake Serve()'s awaitOsSigExit so the
+		// main Serve goroutine returns after the unified quit
+		// handler completes teardown. awaitOsSigExit reads from a
+		// function-local done channel whose only writer is a
+		// sig-demux goroutine consuming from signal.Notify; the
+		// only way to unblock it is to deliver a registered signal
+		// to our own pid. signal.Notify routes the signal to the
+		// Go channel rather than the process default handler, so
+		// this self-signal does NOT terminate the process — it
+		// just releases the awaitOsSigExit wait.
+		//
+		// Placement matters: send BEFORE the quit-send so the
+		// unified quit handler and awaitOsSigExit both get a chance
+		// to complete in parallel. The quit handler drives the
+		// teardown (Cloud Map deregister, gRPC stop, etc.) while
+		// awaitOsSigExit returns and lets Serve() fall through to
+		// its post-teardown hooks (AfterServerShutdown).
+		//
+		// Readiness gate (_sigHandlerReady): only self-signal if
+		// awaitOsSigExit has actually registered its signal.Notify
+		// handler. Before that point (or after it has called
+		// signal.Stop at the end of Serve), SIGTERM would hit the
+		// Go runtime default handler and TERMINATE the process.
+		// Unit tests that manually allocate the quit primitives
+		// without calling Serve() hit this branch — no handler is
+		// registered, so we skip the self-signal; the unified quit
+		// handler still runs correctly for those callers since
+		// they are not actually parked in awaitOsSigExit.
+		if s._sigHandlerReady.Load() {
+			if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
+				_ = p.Signal(syscall.SIGTERM)
+			}
+		}
 		// Non-blocking send: another path (signal demux / a prior
 		// concurrent stop call) may have already filled the buffer.
 		// In either case the quit handler runs exactly once and
@@ -2725,6 +2827,12 @@ func (s *Service) GracefulStop() {
 //     observing ShutdownCtx see the cancel happens-before the
 //     transport is severed.
 //
+//     As with GracefulStop, ImmediateStop sends SIGTERM to its own
+//     pid (SVC-F8) so Serve()'s awaitOsSigExit releases; the Go
+//     runtime routes the signal to the signal.Notify channel
+//     rather than the process default handler, so this self-signal
+//     does NOT terminate the process.
+//
 //   - In the rare pre-Serve case, ImmediateStop falls through to a
 //     legacy idempotent teardown body that ends with
 //     grpc.Server.Stop directly. As with GracefulStop, this is a
@@ -2747,6 +2855,23 @@ func (s *Service) GracefulStop() {
 // see SVC-F4) so concurrent callers cannot stall on each other's
 // AWS poll loop.
 //
+// Re-entry from a gRPC handler: calling ImmediateStop from inside a
+// gRPC handler does NOT stall 30s the way GracefulStop does — the
+// quit handler observes _immediateStopRequested and skips the
+// bounded grpc.GracefulStop drain entirely, calling gs.Stop()
+// directly, which severs the transport without waiting for
+// in-flight RPCs. The calling handler's response is not delivered
+// and its client observes an Unavailable / Canceled error
+// immediately. If the handler must return a response to its
+// client before shutdown severs the transport, spawn a goroutine:
+//
+//	go s.ImmediateStop()
+//	return &AdminResponse{Ok: true}, nil
+//
+// ImmediateStop is safe to call from a goroutine — the unified
+// quit channel (SVC-F7) serializes all shutdown callers and
+// _immediateStopRequested is a one-way latch.
+//
 // SVC-F5 / rule #13: this routing makes the ShutdownCtx() promise
 // hold on the programmatic ImmediateStop path — the configured fire
 // site runs before this method returns even when shutdown is
@@ -2758,8 +2883,11 @@ func (s *Service) GracefulStop() {
 // ShutdownCancelPhase, which is the expected contract for any
 // consumer opting in via ShutdownCancel=true.
 //
-// Fix: SVC-F7 (C2-001 + C2-002, deep-review-2026-04-14-contrarian).
-// Godoc precision: C2-007 (same review).
+// Fix: SVC-F7 (C2-001 + C2-002) established the unified quit
+// routing. SVC-F8 (F1, deep-review-2026-04-14-contrarian-pass3)
+// added the self-SIGTERM so the unified routing actually wakes
+// Serve()'s awaitOsSigExit. Godoc precision: C2-007 (pass-2), F3
+// re-entry contract (pass-3).
 func (s *Service) ImmediateStop() {
 	// SVC-F7: declare the immediate intent BEFORE signaling the quit
 	// channel. The quit handler reads this atomic between waking and
@@ -2773,6 +2901,17 @@ func (s *Service) ImmediateStop() {
 	s._mu.RUnlock()
 	if quit != nil && quitDone != nil {
 		log.Println("ImmediateStop invoked — routing through unified quit handler")
+		// SVC-F8 (F1 fix): wake Serve()'s awaitOsSigExit. See
+		// GracefulStop for the full rationale — same mechanism,
+		// same safety (signal.Notify routes to Go channel), same
+		// readiness gate (_sigHandlerReady) so unit tests that
+		// allocate the quit primitives without running Serve do
+		// not terminate the test process.
+		if s._sigHandlerReady.Load() {
+			if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
+				_ = p.Signal(syscall.SIGTERM)
+			}
+		}
 		select {
 		case quit <- true:
 		default:

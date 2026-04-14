@@ -180,10 +180,11 @@ func TestService_GracefulStop_FiresShutdownCtxPreDrain(t *testing.T) {
 	}
 }
 
-// TestService_GracefulStop_ReleasesServe is the C2-002 regression
-// test. Models Serve()'s post-awaitOsSigExit + quit-send + quitDone-wait
-// path as a goroutine, then calls GracefulStop() programmatically and
-// asserts the goroutine returns within a bounded deadline.
+// TestService_GracefulStop_ReleasesFakeServe is the C2-002 regression
+// test for SVC-F7 unified routing. It models Serve()'s
+// post-awaitOsSigExit + quit-send + quitDone-wait path as a goroutine,
+// then calls GracefulStop() programmatically and asserts the goroutine
+// returns within a bounded deadline.
 //
 // Without the SVC-F7 fix, GracefulStop runs the legacy teardown body
 // but never writes to _quit, so the simulated Serve goroutine remains
@@ -194,7 +195,32 @@ func TestService_GracefulStop_FiresShutdownCtxPreDrain(t *testing.T) {
 //
 // Closes C2-002 (and validates C2-001's routing is correct
 // end-to-end on the programmatic path).
-func TestService_GracefulStop_ReleasesServe(t *testing.T) {
+//
+// ⚠️  SCOPE LIMITATION — pass-3 F1 (SVC-F8) contrarian finding:
+// This test does NOT prove F1 is fixed. It replaces the real
+// awaitOsSigExit wait with a `time.Sleep(50ms)` and a cooperative
+// send-to-_quit from the simulated Serve goroutine. In production,
+// Serve()'s main goroutine is parked inside awaitOsSigExit reading
+// from a function-local done channel whose only writer is a
+// sig-demux goroutine consuming signal.Notify — the
+// `s._quit <- true; <-s._quitDone` sequence models the WRONG wait,
+// so this test passes whether or not the self-SIGTERM fix
+// (SVC-F8) is present. The real F1 regression test is
+// `TestService_GracefulStop_ReleasesRealServe` in service_test.go,
+// which invokes the real Serve() and is gated by
+// CONNECTOR_RUN_INTEGRATION=1 because Serve requires real AWS
+// CloudMap + service.yaml. A green run of THIS test without a
+// corresponding green run of the real-Serve test is NOT closure
+// of F1.
+//
+// The test is kept running (not t.Skip'd) because it remains a
+// valid regression for SVC-F7 unified routing — separate concern
+// from F1. The name was changed from `ReleasesServe` to
+// `ReleasesFakeServe` in pass-3 so nobody misreads passing status
+// as F1 closure. See F1 ticket at
+// _src/docs/repos/connector/findings/2026-04-14-contrarian-pass3/
+// F1-awaitossigexit-not-woken-by-programmatic-stop.md.
+func TestService_GracefulStop_ReleasesFakeServe(t *testing.T) {
 	s := newSVCF7TestService(true, ShutdownPhaseImmediate)
 	shut := s.ShutdownCtx()
 	if shut == nil {

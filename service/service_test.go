@@ -140,6 +140,115 @@ func TestService_Serve(t *testing.T) {
 	}
 }
 
+// TestService_GracefulStop_ReleasesRealServe is the F1 / SVC-F8
+// regression test. Unlike TestService_GracefulStop_ReleasesFakeServe
+// in service_svc_f7_test.go (which models awaitOsSigExit with a
+// time.Sleep), this test invokes the REAL Serve() and the REAL
+// programmatic GracefulStop() path, and asserts Serve() returns within
+// a bounded wall-clock window.
+//
+// Before SVC-F8, Serve()'s main goroutine was parked in awaitOsSigExit
+// reading from a function-local done channel fed by a sig-demux
+// goroutine consuming from signal.Notify. The SVC-F7 unified quit
+// routing correctly drove teardown but never unblocked awaitOsSigExit,
+// so Serve()'s main goroutine stayed parked until a real OS signal
+// arrived — a zombie-process hazard on programmatic-only stop paths.
+// SVC-F8 fixes this by self-delivering SIGTERM from GracefulStop /
+// ImmediateStop before the unified quit-send; signal.Notify routes
+// the signal to the Go channel rather than the process default
+// handler, so the self-signal wakes awaitOsSigExit without killing
+// the process.
+//
+// Regression check:
+//   - Without SVC-F8: this test hangs at svc.Serve() forever (watchdog
+//     fires at `stopDelay + serveDeadline` and fails the test).
+//   - With SVC-F8: Serve() returns nil shortly after GracefulStop()
+//     completes.
+//
+// CI safety: gated by CONNECTOR_RUN_INTEGRATION=1 because Serve()
+// requires real AWS CloudMap + service.yaml to pass its startup
+// validation. Watchdog sends a real SIGTERM if the test blows its
+// deadline, so the test CANNOT hang CI even on regression.
+//
+// Companion to F1 ticket at
+// _src/docs/repos/connector/findings/2026-04-14-contrarian-pass3/
+// F1-awaitossigexit-not-woken-by-programmatic-stop.md.
+func TestService_GracefulStop_ReleasesRealServe(t *testing.T) {
+	if os.Getenv("CONNECTOR_RUN_INTEGRATION") != "1" {
+		t.Skip("skipping: F1/SVC-F8 real-Serve regression test (requires real AWS CloudMap + service.yaml); set CONNECTOR_RUN_INTEGRATION=1 to run")
+	}
+
+	const (
+		stopDelay     = 2 * time.Second  // give Serve() time to register signal handlers + start the grpc listener
+		serveDeadline = 15 * time.Second // hard upper bound — SVC-F8 should return within ~1s of GracefulStop
+	)
+
+	svc := NewService("testservice", "service", "", func(grpcServer *grpc.Server) {
+		testpb.RegisterAnswerServiceServer(grpcServer, &AnswerServiceImpl{})
+	})
+
+	// Trigger GracefulStop from a separate goroutine after Serve has
+	// had a chance to register its signal handlers. If SVC-F8 works,
+	// Serve() will return nil promptly after GracefulStop returns.
+	// If SVC-F8 is reverted, Serve() stays parked in awaitOsSigExit
+	// forever — so we also arm a hard SIGTERM watchdog that fires
+	// after the full serveDeadline to guarantee CI never hangs.
+	var stopWg sync.WaitGroup
+	stopWg.Add(1)
+	go func() {
+		defer stopWg.Done()
+		time.Sleep(stopDelay)
+		// This call must unblock Serve()'s awaitOsSigExit on its own
+		// (via the SVC-F8 self-SIGTERM). We deliberately do NOT send
+		// SIGTERM ourselves here — that would defeat the test.
+		svc.GracefulStop()
+	}()
+
+	// Fail-safe watchdog: if Serve() is still blocked after
+	// serveDeadline, send a real SIGTERM so the test process doesn't
+	// hang forever. A regression will be visible as a test failure
+	// message ("Serve() did not return ...") AND the watchdog will
+	// still let the suite complete.
+	watchdogFired := make(chan struct{})
+	cancelWatchdog := make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(stopDelay + serveDeadline):
+			close(watchdogFired)
+			if p, err := os.FindProcess(os.Getpid()); err == nil {
+				_ = p.Signal(syscall.SIGTERM)
+			}
+		case <-cancelWatchdog:
+			return
+		}
+	}()
+
+	serveStart := time.Now()
+	serveErr := svc.Serve()
+	serveElapsed := time.Since(serveStart)
+	close(cancelWatchdog)
+	stopWg.Wait()
+
+	if serveErr != nil {
+		t.Fatalf("Serve() returned error: %v", serveErr)
+	}
+
+	select {
+	case <-watchdogFired:
+		t.Fatalf("F1/SVC-F8 regression: Serve() hung past stopDelay+serveDeadline (%s) and only unblocked via watchdog SIGTERM — programmatic GracefulStop did not wake awaitOsSigExit", stopDelay+serveDeadline)
+	default:
+	}
+
+	// Expect Serve to return very shortly after GracefulStop: the
+	// delay is stopDelay (the wait before calling GracefulStop) plus
+	// a small teardown window. We assert Serve did NOT take the full
+	// watchdog deadline as a loose sanity check.
+	if serveElapsed >= stopDelay+serveDeadline {
+		t.Fatalf("Serve() took %s (>= watchdog deadline %s) — likely SVC-F8 regression", serveElapsed, stopDelay+serveDeadline)
+	}
+	t.Logf("Serve() released in %s after GracefulStop (SVC-F8 working)", serveElapsed)
+}
+
 func TestConfig(t *testing.T) {
 	cfg := &config{
 		AppName:        "test-connector-service",
