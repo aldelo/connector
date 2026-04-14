@@ -514,235 +514,250 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 	recvMap := make(map[string]time.Time)
 	cleanupCounter := 0
 
+	// C3-004: flatten the recv loop. Previously this body sat under
+	// `for { select { case <-ctxDone.Done(): ...; default: ...Recv()... } }`.
+	// The `default` arm fired on every iteration after the first wakeup
+	// because Go's select picks `default` whenever no other case is
+	// immediately ready — and ctxDone was only ready once, on cancel.
+	// Worse, `Recv()` is itself a blocking call on the stream ctx, so
+	// the outer non-blocking select added nothing: when ctxDone fires,
+	// Recv() returns promptly with context.Canceled / status.Canceled
+	// via the stream's own ctx. The flattened loop calls Recv() directly
+	// and inspects ctxDone.Err() inside the error branch to preserve the
+	// original "### Notifier Client Received Context Done Signal ###"
+	// log message and the distinct "Notifier Client Context Done" error
+	// string when cancellation is the cause (observable contract intact).
 	for {
-		select {
-		case <-ctxDone.Done():
-			// CL-F5: panic-safe dispatch to user callback.
-			n.callAlertStopped("Notification Alert Services Stopped")
+		// process notification receive event
+		n._grpcClient.ZLog().Printf("~~~ Notifier Client Awaits Notifier Server's Notification Data Arrival ~~~")
 
-			atomic.StoreInt32(&n._notificationServicesStarted, 0)
-			n._subMu.Lock()
-			if n._subscribeCancel != nil {
-				n._subscribeCancel()
-				n._subscribeCancel = nil
-			}
-			n._subscriberID = ""
-			n._subscriberTopicArn = ""
-			n._subMu.Unlock()
+		var data *notifierpb.NotificationData
+		data, err = nsClient.Recv()
+		if err == nil {
+			n._grpcClient.ZLog().Printf("$$$ Notifier Client Received Notification Data From Server Stream, Ready to Process $$$")
 
-			n._grpcClient.ZLog().Printf("### Notifier Client Received Context Done Signal ###")
+			if data != nil {
+				// notification data received from host stream provider
+				n._grpcClient.ZLog().Printf("$$$ Received Server Stream Notification Data Not Nil $$$")
 
-			recvMap = nil
-			err = fmt.Errorf("Notifier Client Context Done")
-			return err
+				if data.Topic != topicArn {
+					n._grpcClient.ZLog().Printf("!!! Notifier Client Received Notification Data's TopicArn Mismatch: Received " + data.Topic + ", Expected " + topicArn + ", Recv Loop Skips to Next Cycle !!!")
 
-		default:
-			// process notification receive event
-			n._grpcClient.ZLog().Printf("~~~ Notifier Client Awaits Notifier Server's Notification Data Arrival ~~~")
+					// CL-F5: panic-safe dispatch to user callback.
+					n.callAlertSkipped("Received Topic " + data.Topic + ", Expected Topic " + topicArn)
 
-			var data *notifierpb.NotificationData
-			data, err = nsClient.Recv()
-			if err == nil {
-				n._grpcClient.ZLog().Printf("$$$ Notifier Client Received Notification Data From Server Stream, Ready to Process $$$")
+					continue
+				}
 
-				if data != nil {
-					// notification data received from host stream provider
-					n._grpcClient.ZLog().Printf("$$$ Received Server Stream Notification Data Not Nil $$$")
+				if util.LenTrim(data.Message) == 0 {
+					n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data's Message is Blank, Recv Loop Skips to Next Cycle !!!")
 
-					if data.Topic != topicArn {
-						n._grpcClient.ZLog().Printf("!!! Notifier Client Received Notification Data's TopicArn Mismatch: Received " + data.Topic + ", Expected " + topicArn + ", Recv Loop Skips to Next Cycle !!!")
+					// CL-F5: panic-safe dispatch to user callback.
+					n.callAlertSkipped("Notification Message is Blank")
+
+					continue
+				}
+
+				// ensure message was within the last 15 minutes
+				var t1 time.Time
+				var parseErr error
+				t1, parseErr = time.Parse(time.RFC3339, data.Timestamp)
+				if parseErr != nil {
+					n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Parser Not Valid: " + parseErr.Error() + "， Recv Loop Skips to Next Cycle !!!")
+
+					// CL-F5: panic-safe dispatch to user callback.
+					n.callAlertSkipped("Notification Timestamp Parse Error: " + parseErr.Error())
+
+					continue
+				}
+
+				t2 := time.Now().UTC()
+
+				if util.AbsDuration(t2.Sub(t1)).Minutes() > 15 {
+					n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Exceeded 15 Minute Limit: Message Timestamp " + util.FormatDateTime(t1) + ", Current Timestamp " + util.FormatDateTime(t2) + ", Recv Loop Skips to Next Cycle !!!")
+
+					// CL-F5: panic-safe dispatch to user callback.
+					n.callAlertSkipped("Notification Expired (Exceeded 15 Minutes): Received " + util.FormatDateTime(t1) + ", Current " + util.FormatDateTime(t2))
+
+					continue
+				}
+
+				// unmarshal message to host discovery notification object
+				hostDiscNotification := new(HostDiscoveryNotification)
+
+				var unmarshalErr error
+				unmarshalErr = hostDiscNotification.Unmarshal(data.Message)
+				if unmarshalErr != nil {
+					n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Unmarshal Json Failed: " + unmarshalErr.Error() + ", Recv Loop Skips to Next Cycle !!!")
+
+					// CL-F5: panic-safe dispatch to user callback.
+					n.callAlertSkipped("Notification Message Unmarshal Failed: " + unmarshalErr.Error())
+
+					continue
+				}
+
+				// received host discovery notification, push out for event alert
+				if strings.ToUpper(hostDiscNotification.MsgType) == "HOST-DISCOVERY" {
+					host, portStr, splitErr := net.SplitHostPort(hostDiscNotification.Host)
+					if splitErr != nil {
+						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "', Recv Loop Skips to Next Cycle !!!")
 
 						// CL-F5: panic-safe dispatch to user callback.
-						n.callAlertSkipped("Received Topic " + data.Topic + ", Expected Topic " + topicArn)
+						n.callAlertSkipped("Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "'")
 
 						continue
 					}
 
-					if util.LenTrim(data.Message) == 0 {
-						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data's Message is Blank, Recv Loop Skips to Next Cycle !!!")
+					{
+						ip := host
+						port := util.StrToUint(portStr)
 
-						// CL-F5: panic-safe dispatch to user callback.
-						n.callAlertSkipped("Notification Message is Blank")
-
-						continue
-					}
-
-					// ensure message was within the last 15 minutes
-					var t1 time.Time
-					var parseErr error
-					t1, parseErr = time.Parse(time.RFC3339, data.Timestamp)
-					if parseErr != nil {
-						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Parser Not Valid: " + parseErr.Error() + "， Recv Loop Skips to Next Cycle !!!")
-
-						// CL-F5: panic-safe dispatch to user callback.
-						n.callAlertSkipped("Notification Timestamp Parse Error: " + parseErr.Error())
-
-						continue
-					}
-
-					t2 := time.Now().UTC()
-
-					if util.AbsDuration(t2.Sub(t1)).Minutes() > 15 {
-						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Timestamp Exceeded 15 Minute Limit: Message Timestamp " + util.FormatDateTime(t1) + ", Current Timestamp " + util.FormatDateTime(t2) + ", Recv Loop Skips to Next Cycle !!!")
-
-						// CL-F5: panic-safe dispatch to user callback.
-						n.callAlertSkipped("Notification Expired (Exceeded 15 Minutes): Received " + util.FormatDateTime(t1) + ", Current " + util.FormatDateTime(t2))
-
-						continue
-					}
-
-					// unmarshal message to host discovery notification object
-					hostDiscNotification := new(HostDiscoveryNotification)
-
-					var unmarshalErr error
-					unmarshalErr = hostDiscNotification.Unmarshal(data.Message)
-					if unmarshalErr != nil {
-						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Unmarshal Json Failed: " + unmarshalErr.Error() + ", Recv Loop Skips to Next Cycle !!!")
-
-						// CL-F5: panic-safe dispatch to user callback.
-						n.callAlertSkipped("Notification Message Unmarshal Failed: " + unmarshalErr.Error())
-
-						continue
-					}
-
-					// received host discovery notification, push out for event alert
-					if strings.ToUpper(hostDiscNotification.MsgType) == "HOST-DISCOVERY" {
-						host, portStr, splitErr := net.SplitHostPort(hostDiscNotification.Host)
-						if splitErr != nil {
-							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "', Recv Loop Skips to Next Cycle !!!")
+						if net.ParseIP(ip) == nil {
+							n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host IP Not Valid: Received '" + ip + "', Recv Loop Skips to Next Cycle !!!")
 
 							// CL-F5: panic-safe dispatch to user callback.
-							n.callAlertSkipped("Notification Host Not in IP:Port Format: Received '" + hostDiscNotification.Host + "'")
+							n.callAlertSkipped("Notification Host IP Not Valid: Received '" + ip + "'")
 
 							continue
 						}
 
-						{
-							ip := host
-							port := util.StrToUint(portStr)
+						if port == 0 || port > 65535 {
+							n._grpcClient.ZLog().Warnf("!!! Notification Client Received Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "', Recv Loop Skips to Next Cycle !!!")
 
-							if net.ParseIP(ip) == nil {
-								n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Host IP Not Valid: Received '" + ip + "', Recv Loop Skips to Next Cycle !!!")
+							// CL-F5: panic-safe dispatch to user callback.
+							n.callAlertSkipped("Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "'")
 
-								// CL-F5: panic-safe dispatch to user callback.
-								n.callAlertSkipped("Notification Host IP Not Valid: Received '" + ip + "'")
-
-								continue
-							}
-
-							if port == 0 || port > 65535 {
-								n._grpcClient.ZLog().Warnf("!!! Notification Client Received Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "', Recv Loop Skips to Next Cycle !!!")
-
-								// CL-F5: panic-safe dispatch to user callback.
-								n.callAlertSkipped("Notification Host Port Not Valid: Received '" + util.UintToStr(port) + "'")
-
-								continue
-							}
-
-							// check if already received within the last 10 seconds (deduplication)
-							// Include action in key so ONLINE and OFFLINE for the same host are not deduplicated
-							recvKey := fmt.Sprintf("%s:%d:%s", ip, port, strings.ToUpper(hostDiscNotification.Action))
-							now := time.Now()
-							if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(now, t)) <= 10 {
-								// already in map within dedup window, skip
-								n._grpcClient.ZLog().Warnf("*** Notification Client Received Repeated Notification Same Data '" + recvKey + "' Within 10 Seconds Duration, Alert Bypassed ***")
-								continue
-							}
-
-							// FIX #3: Single write to recvMap (was written twice in original code)
-							recvMap[recvKey] = now
-
-							// FIX #4: Unified cleanup with single threshold
-							cleanupCounter++
-							if cleanupCounter >= recvMapCleanupInterval || len(recvMap) > recvMapMaxSize {
-								cleanupCounter = 0
-								for k, v := range recvMap {
-									if now.Sub(v) > recvMapEntryTTL {
-										delete(recvMap, k)
-									}
-								}
-								// If still over capacity after TTL cleanup, hard reset
-								if len(recvMap) > recvMapMaxSize {
-									recvMap = make(map[string]time.Time)
-								}
-							}
-
-							isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
-
-							// notify the discovered host
-							// CL-F5: wrap in safeCall so a panic in a
-							// user-supplied handler does not propagate
-							// back up through Subscribe into the
-							// reconnect goroutine and crash the process.
-							if isOnline {
-								if n.ServiceHostOnlineHandler != nil {
-									safeCall("ServiceHostOnlineHandler", func() { n.ServiceHostOnlineHandler(ip, port) })
-								}
-							} else {
-								if n.ServiceHostOfflineHandler != nil {
-									safeCall("ServiceHostOfflineHandler", func() { n.ServiceHostOfflineHandler(ip, port) })
-								}
-							}
-
-							n._grpcClient.ZLog().Printf("### Notifier Client Received Notification Data Exposed to Handler, Now Ready for Next Recv Event ###")
+							continue
 						}
-					} else {
-						n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Message Type Not Expected: Received '" + hostDiscNotification.MsgType + "', Expected 'host-discovery', Recv Loop Skips to Next Cycle !!!")
 
-						// CL-F5: panic-safe dispatch to user callback.
-						n.callAlertSkipped("Notification Message Type Not Expected: 'Received " + hostDiscNotification.MsgType + "', Expected 'host-discovery'")
+						// check if already received within the last 10 seconds (deduplication)
+						// Include action in key so ONLINE and OFFLINE for the same host are not deduplicated
+						recvKey := fmt.Sprintf("%s:%d:%s", ip, port, strings.ToUpper(hostDiscNotification.Action))
+						now := time.Now()
+						if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(now, t)) <= 10 {
+							// already in map within dedup window, skip
+							n._grpcClient.ZLog().Warnf("*** Notification Client Received Repeated Notification Same Data '" + recvKey + "' Within 10 Seconds Duration, Alert Bypassed ***")
+							continue
+						}
 
-						continue
+						// FIX #3: Single write to recvMap (was written twice in original code)
+						recvMap[recvKey] = now
+
+						// FIX #4: Unified cleanup with single threshold
+						cleanupCounter++
+						if cleanupCounter >= recvMapCleanupInterval || len(recvMap) > recvMapMaxSize {
+							cleanupCounter = 0
+							for k, v := range recvMap {
+								if now.Sub(v) > recvMapEntryTTL {
+									delete(recvMap, k)
+								}
+							}
+							// If still over capacity after TTL cleanup, hard reset
+							if len(recvMap) > recvMapMaxSize {
+								recvMap = make(map[string]time.Time)
+							}
+						}
+
+						isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
+
+						// notify the discovered host
+						// CL-F5: wrap in safeCall so a panic in a
+						// user-supplied handler does not propagate
+						// back up through Subscribe into the
+						// reconnect goroutine and crash the process.
+						if isOnline {
+							if n.ServiceHostOnlineHandler != nil {
+								safeCall("ServiceHostOnlineHandler", func() { n.ServiceHostOnlineHandler(ip, port) })
+							}
+						} else {
+							if n.ServiceHostOfflineHandler != nil {
+								safeCall("ServiceHostOfflineHandler", func() { n.ServiceHostOfflineHandler(ip, port) })
+							}
+						}
+
+						n._grpcClient.ZLog().Printf("### Notifier Client Received Notification Data Exposed to Handler, Now Ready for Next Recv Event ###")
 					}
 				} else {
-					// notify nil data received
-					n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data is Nil, Recv Loop Skips to Next Cycle !!!")
+					n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Message Type Not Expected: Received '" + hostDiscNotification.MsgType + "', Expected 'host-discovery', Recv Loop Skips to Next Cycle !!!")
 
 					// CL-F5: panic-safe dispatch to user callback.
-					n.callAlertSkipped("Notification Data Nil")
+					n.callAlertSkipped("Notification Message Type Not Expected: 'Received " + hostDiscNotification.MsgType + "', Expected 'host-discovery'")
 
 					continue
 				}
 			} else {
-				// on error exit stream client loop
-				if err == io.EOF {
-					n._grpcClient.ZLog().Printf("!!! Notifier Client Stream Receive Action Encountered EOF, Recv Loop Ending !!!")
+				// notify nil data received
+				n._grpcClient.ZLog().Warnf("!!! Notifier Client Received Notification Data is Nil, Recv Loop Skips to Next Cycle !!!")
 
-					// CL-F5: panic-safe dispatch to user callback.
-					n.callAlertStopped("Alert Service Stopped Due To Notifier Server Stream EOF")
+				// CL-F5: panic-safe dispatch to user callback.
+				n.callAlertSkipped("Notification Data Nil")
 
-					atomic.StoreInt32(&n._notificationServicesStarted, 0)
-					n._subMu.Lock()
-					if n._subscribeCancel != nil {
-						n._subscribeCancel()
-						n._subscribeCancel = nil
-					}
-					n._subscriberID = ""
-					n._subscriberTopicArn = ""
-					n._subMu.Unlock()
-					err = fmt.Errorf("Notifier Client Received EOF, Recv Loop Ending")
-					return err
+				continue
+			}
+		} else {
+			// on error exit stream client loop.
+			// C3-004: if the stream ctx was cancelled, route through the
+			// ctx-done cleanup path to preserve the original log message
+			// and error string that the previous non-blocking select arm
+			// used to emit.
+			if ctxDone.Err() != nil {
+				// CL-F5: panic-safe dispatch to user callback.
+				n.callAlertStopped("Notification Alert Services Stopped")
 
-				} else {
-					// other error, continue
-					n._grpcClient.ZLog().Errorf("!!! Notifier Client Stream Receive Action Encountered Error: " + err.Error() + ", Recv Loop Ending !!!")
-
-					// CL-F5: panic-safe dispatch to user callback.
-					n.callAlertStopped("Alert Service Stopped Due To Notifier Server Stream Error: " + err.Error())
-
-					atomic.StoreInt32(&n._notificationServicesStarted, 0)
-					n._subMu.Lock()
-					if n._subscribeCancel != nil {
-						n._subscribeCancel()
-						n._subscribeCancel = nil
-					}
-					n._subscriberID = ""
-					n._subscriberTopicArn = ""
-					n._subMu.Unlock()
-					err = fmt.Errorf("notifier client received error: %w, recv loop ending", err)
-					return err
-
+				atomic.StoreInt32(&n._notificationServicesStarted, 0)
+				n._subMu.Lock()
+				if n._subscribeCancel != nil {
+					n._subscribeCancel()
+					n._subscribeCancel = nil
 				}
+				n._subscriberID = ""
+				n._subscriberTopicArn = ""
+				n._subMu.Unlock()
+
+				n._grpcClient.ZLog().Printf("### Notifier Client Received Context Done Signal ###")
+
+				recvMap = nil
+				err = fmt.Errorf("Notifier Client Context Done")
+				return err
+			}
+
+			if err == io.EOF {
+				n._grpcClient.ZLog().Printf("!!! Notifier Client Stream Receive Action Encountered EOF, Recv Loop Ending !!!")
+
+				// CL-F5: panic-safe dispatch to user callback.
+				n.callAlertStopped("Alert Service Stopped Due To Notifier Server Stream EOF")
+
+				atomic.StoreInt32(&n._notificationServicesStarted, 0)
+				n._subMu.Lock()
+				if n._subscribeCancel != nil {
+					n._subscribeCancel()
+					n._subscribeCancel = nil
+				}
+				n._subscriberID = ""
+				n._subscriberTopicArn = ""
+				n._subMu.Unlock()
+				err = fmt.Errorf("Notifier Client Received EOF, Recv Loop Ending")
+				return err
+
+			} else {
+				// other error, continue
+				n._grpcClient.ZLog().Errorf("!!! Notifier Client Stream Receive Action Encountered Error: " + err.Error() + ", Recv Loop Ending !!!")
+
+				// CL-F5: panic-safe dispatch to user callback.
+				n.callAlertStopped("Alert Service Stopped Due To Notifier Server Stream Error: " + err.Error())
+
+				atomic.StoreInt32(&n._notificationServicesStarted, 0)
+				n._subMu.Lock()
+				if n._subscribeCancel != nil {
+					n._subscribeCancel()
+					n._subscribeCancel = nil
+				}
+				n._subscriberID = ""
+				n._subscriberTopicArn = ""
+				n._subMu.Unlock()
+				err = fmt.Errorf("notifier client received error: %w, recv loop ending", err)
+				return err
+
 			}
 		}
 	}
