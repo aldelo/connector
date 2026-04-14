@@ -1401,17 +1401,24 @@ func (c *Client) Dial(ctx context.Context) error {
 		}
 	}()
 
-	// P2-13: drain any in-flight notifier reconnect goroutine from a prior
-	// lifecycle BEFORE flipping closed back to false. The reconnect loop
-	// captures closedCh once at spawn-time, so its select-loop is safe
-	// across re-dial -- but it can be mid-DoNotifierAlertService (an
-	// uncancellable SDK call). If we re-open the lifecycle while a stale
-	// goroutine is still in that call, a fresh ServiceAlertStoppedHandler
-	// could CAS notifierReconnectActive (false->true) and spawn a SECOND
-	// reconnect goroutine that races the stale one on _notifierClient.
-	// closed is still true here (Close() set it), so any stale goroutine
-	// reaching its for-loop top will exit on the next iteration; we just
-	// have to wait for in-flight DoNotifierAlertService calls to return.
+	// P2-13 / C3-005: drain any in-flight notifier reconnect goroutine from
+	// a prior lifecycle BEFORE flipping closed back to false. The reconnect
+	// loop captures closedCh once at spawn-time (the OLD lifecycle's
+	// channel, already closed by Close() via markClosedCh); the new
+	// lifecycle will allocate a FRESH closedCh a few lines below via
+	// resetClosedCh(). Because the stale goroutine holds its own pointer to
+	// the already-closed channel, it cannot observe the new lifecycle's
+	// closedCh -- that isolation is what makes it self-terminating: every
+	// iteration of its select hits the <-closedCh case and returns cleanly.
+	//
+	// Why we still drain: the stale goroutine can be parked inside
+	// DoNotifierAlertService, which is an uncancellable SDK call that must
+	// run to completion before the goroutine loops back to its select and
+	// observes the closed channel. We wait (bounded) so the new lifecycle
+	// does not begin its own Subscribe while a stale Subscribe is still
+	// mid-call on the old _notifierClient. The warning below is a
+	// diagnostic -- if it trips, an SDK call is taking longer than the
+	// drain budget, not a correctness bug in the closedCh handoff.
 	if c.notifierReconnectActive.Load() {
 		drainDeadline := time.Now().Add(notifierReconnectDrainTimeout)
 		for c.notifierReconnectActive.Load() && time.Now().Before(drainDeadline) {
@@ -1419,9 +1426,9 @@ func (c *Client) Dial(ctx context.Context) error {
 		}
 		if c.notifierReconnectActive.Load() {
 			if z := c.ZLog(); z != nil {
-				z.Warnf("Dial: stale notifier reconnect goroutine still active after %s drain; proceeding (may race with new lifecycle)", notifierReconnectDrainTimeout)
+				z.Warnf("Dial: stale notifier reconnect goroutine still active after %s drain; proceeding (stale goroutine will self-terminate on its captured closedCh)", notifierReconnectDrainTimeout)
 			} else {
-				log.Printf("Dial: stale notifier reconnect goroutine still active after %s drain; proceeding (may race with new lifecycle)", notifierReconnectDrainTimeout)
+				log.Printf("Dial: stale notifier reconnect goroutine still active after %s drain; proceeding (stale goroutine will self-terminate on its captured closedCh)", notifierReconnectDrainTimeout)
 			}
 		}
 	}
