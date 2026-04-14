@@ -1412,8 +1412,19 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 		}
 
 		// clean up web server dns recordset if any
-		if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
-			s.WebServerConfig.CleanUp()
+		//
+		// F2 (deep-review-2026-04-14-contrarian-pass3): MUST use
+		// runCleanup, not a raw call. The surrounding quit-handler
+		// body is wrapped in safeGo which recovers panics to keep
+		// the PROCESS alive, but a raw panic here still unwinds the
+		// quit-handler frame through the panic path — skipping every
+		// subsequent step (setLocalAddress, setServing(false), Cloud
+		// Map deregister, SD/SNS/SQS Disconnect, fireShutdownCancel
+		// PreDrain/PostGraceExpiry, gs.GracefulStop/gs.Stop,
+		// lis.Close). safeGo keeps the process up; runCleanup keeps
+		// the per-step teardown invariants. Both are needed.
+		if s.WebServerConfig != nil {
+			runCleanup("WebServerConfig.CleanUp(quit-handler)", s.WebServerConfig.CleanUp)
 		}
 
 		// clear local address
@@ -1995,13 +2006,18 @@ func (s *Service) runRegisterHandlers(reg func(*grpc.Server)) (err error) {
 // running and leaves the Service in a fully torn-down state instead
 // of half-disconnected.
 //
-// Fix: SVC-F2 coverage extension (C2-003, deep-review-2026-04-14-contrarian).
-// Two of the three CleanUp call sites (in GracefulStop and ImmediateStop
-// pre-Serve fallback paths) were not under any panic recovery; only
-// the in-quit-handler call was covered, indirectly, via safeGo. The
-// SVC-F7 unified routing path runs CleanUp from inside the
-// safeGo-wrapped quit handler via a separate (existing) call site, so
-// the in-Serve hot path is also covered. nil cleanup is a no-op.
+// Fix: SVC-F2 coverage extension (C2-003, deep-review-2026-04-14-contrarian)
+// wrapped the two CleanUp call sites in the GracefulStop and
+// ImmediateStop pre-Serve fallback paths. Pass-3 F2 extended the
+// wrap to the in-Serve quit-handler call site as well — safeGo
+// recovers panics to keep the PROCESS alive but does NOT preserve
+// the per-step teardown invariants; a raw panic inside the quit
+// handler unwinds through every remaining teardown step (set
+// local address, deregister, transport close) and leaves the
+// Service in a half-torn-down state even though the process
+// stays up. runCleanup isolates the panic to the CleanUp call
+// itself so the remaining teardown steps execute normally. nil
+// cleanup is a no-op.
 func runCleanup(name string, cleanup func()) {
 	if cleanup == nil {
 		return

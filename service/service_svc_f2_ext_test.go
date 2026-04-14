@@ -35,6 +35,7 @@ package service
 // runCleanup) close the gap.
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -188,4 +189,103 @@ func TestRunCleanup_PanicRecovered(t *testing.T) {
 	runCleanup("panic-test", func() {
 		panic("boom")
 	})
+}
+
+// TestRunCleanup_QuitHandlerLabelIsolatesPanic pins the F2 pass-3
+// contract: the in-Serve quit handler's WebServerConfig.CleanUp call
+// must be routed through runCleanup so a panic in user-supplied
+// CleanUp code does NOT unwind the quit-handler frame. Before the F2
+// pass-3 fix, the quit-handler call site at service.go:1415 invoked
+// s.WebServerConfig.CleanUp() directly; a panic there propagated
+// through the safeGo recovery boundary and skipped every subsequent
+// teardown step (setLocalAddress, setServing(false), Cloud Map
+// deregister, SD/SNS/SQS Disconnect, fireShutdownCancel
+// PreDrain/PostGraceExpiry, gs.GracefulStop/gs.Stop, lis.Close).
+// safeGo kept the process alive but the per-step teardown invariants
+// were silently violated.
+//
+// Behavioral pin: invoke runCleanup with the exact label string the
+// F2 fix uses at the quit-handler call site, assert a panic recovers
+// cleanly, and assert a post-cleanup sentinel still runs. If a future
+// refactor extracts or renames this label, update this test AND the
+// source-contract test below together.
+func TestRunCleanup_QuitHandlerLabelIsolatesPanic(t *testing.T) {
+	const quitHandlerLabel = "WebServerConfig.CleanUp(quit-handler)"
+
+	cleanupEntered := false
+	postCleanupRan := false
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("runCleanup propagated panic past its frame: %v", r)
+			}
+		}()
+		runCleanup(quitHandlerLabel, func() {
+			cleanupEntered = true
+			panic("simulated WebServerConfig.CleanUp panic inside quit handler")
+		})
+		// Sentinel: this line represents the "next teardown step"
+		// in the quit handler (setLocalAddress, setServing(false),
+		// deregister, etc.). If runCleanup did its job, this runs.
+		postCleanupRan = true
+	}()
+
+	if !cleanupEntered {
+		t.Error("CleanUp callback did not run — runCleanup did not invoke it")
+	}
+	if !postCleanupRan {
+		t.Fatal("code after runCleanup did not execute — F2 pass-3 regression: panic unwound the quit-handler frame")
+	}
+}
+
+// TestService_QuitHandler_CleanUpWrapSourceContract is a source-file
+// assertion that pins the F2 pass-3 fix in service.go. The real quit
+// handler lives inside startServer() and is impractical to exercise
+// in a unit test (requires full Service setup, real listener, Cloud
+// Map, etc.), so we assert the source contains the expected
+// runCleanup wrap at the quit-handler call site. If someone reverts
+// the fix to a raw `s.WebServerConfig.CleanUp()` call, this test
+// fires.
+//
+// This is not a substitute for the behavioral test above — it
+// catches structural regressions that behavioral tests would miss
+// because the regression replaces the wrap with a syntactically
+// similar raw call that still compiles but bypasses the panic
+// recovery.
+func TestService_QuitHandler_CleanUpWrapSourceContract(t *testing.T) {
+	data, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatalf("cannot read service.go for source-contract check: %v", err)
+	}
+	src := string(data)
+
+	// Must contain the exact runCleanup wrap with the quit-handler
+	// label. This is the F2 pass-3 fix. Matching on the label
+	// ensures we're pinned to the *quit-handler* call site, not the
+	// pre-Serve fallback path which uses a different label.
+	const expected = `runCleanup("WebServerConfig.CleanUp(quit-handler)", s.WebServerConfig.CleanUp)`
+	if !strings.Contains(src, expected) {
+		t.Fatalf("F2 pass-3 regression: service.go does not contain the expected quit-handler runCleanup wrap.\nExpected substring: %q\n"+
+			"This means the quit handler's WebServerConfig.CleanUp call is NOT routed through runCleanup, and a panic in user-supplied CleanUp code will unwind the quit-handler frame through safeGo — skipping every subsequent teardown step (setLocalAddress, setServing(false), deregister, disconnect, gs.Stop, lis.Close).\nSee _src/docs/repos/connector/findings/2026-04-14-contrarian-pass3/F2-quit-handler-cleanup-not-wrapped-in-runcleanup.md",
+			expected)
+	}
+
+	// Must NOT contain the raw pre-fix call form in the same
+	// region. We scan for the specific unwrapped pattern that was
+	// the bug. This is a best-effort belt-and-suspenders check;
+	// false positives are possible if a future unrelated site adds
+	// a similar call, but that would surface as a fix-required
+	// decision rather than a silent regression.
+	const forbidden = "s.WebServerConfig.CleanUp()"
+	if strings.Contains(src, forbidden) {
+		// Only fail if the forbidden raw call appears OUTSIDE a
+		// runCleanup wrap. Since runCleanup's 2nd argument IS
+		// s.WebServerConfig.CleanUp (not CleanUp()), the wrapped
+		// form reads `s.WebServerConfig.CleanUp` without parens.
+		// Any occurrence of `s.WebServerConfig.CleanUp()` (with
+		// parens) is a raw call.
+		t.Fatalf("F2 pass-3 regression: service.go contains a raw call %q. Raw CleanUp calls must be replaced with runCleanup(\"<label>\", s.WebServerConfig.CleanUp) so panics are recovered.",
+			forbidden)
+	}
 }
