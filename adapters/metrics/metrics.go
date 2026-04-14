@@ -50,11 +50,29 @@ package metrics
 // contention is bounded by the number of distinct (name, label-set) pairs.
 
 import (
+	"log"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// overflowLogThrottle bounds the rate at which MemorySink emits the
+// cardinality-cap audit log line. A steady cardinality explosion would
+// otherwise fire the log once per dropped sample — thousands of lines
+// per second in pathological cases — drowning out every other signal
+// and costing CloudWatch ingest. The throttle window ensures the log
+// acts as a *notification* that drops are happening, not as a per-event
+// record. Operators wanting an exact rate read OverflowDropped() from a
+// dashboard; the log line is the wake-up.
+//
+// 60s is chosen as a compromise: short enough that an incident is
+// visible in under a minute, long enough that even a burst of millions
+// of drops produces at most a handful of log lines. Count-based
+// throttling was considered and rejected — a 1-in-N strategy still
+// spams under burst because N drops happen in microseconds.
+const overflowLogThrottle = 60 * time.Second
 
 // Sink is the pluggable metrics backend interface. Every connector
 // instrumentation point goes through this.
@@ -120,6 +138,27 @@ type MemorySink struct {
 	// IS the signal you want to see.
 	labelLimit      int
 	overflowDropped atomic.Int64
+
+	// overflowLogLastNS holds the time.Time.UnixNano() of the most
+	// recent overflow audit log emission. Compared against time.Now()
+	// on every drop so the log fires at most once per
+	// overflowLogThrottle. Updated via CompareAndSwap so concurrent
+	// drops serialize on a single log emission — the winner logs, the
+	// losers silently increment overflowPendingDrops and move on.
+	//
+	// overflowPendingDrops accumulates the number of drops that
+	// occurred since the last throttled log line; it is zeroed by the
+	// goroutine that wins the CAS and is reported in the log body so
+	// operators can see the true rate even while the log is throttled.
+	overflowLogLastNS    atomic.Int64
+	overflowPendingDrops atomic.Int64
+
+	// overflowLogger is the destination for the throttled audit log.
+	// Defaults to the standard library "log" package's Printf; tests
+	// swap it for a captor to observe emissions deterministically
+	// without racing against log.Default() global state. Never nil
+	// after construction.
+	overflowLogger func(format string, args ...interface{})
 }
 
 // histogramState tracks min/max/sum/count for a single histogram series.
@@ -138,8 +177,9 @@ type histogramState struct {
 // new series. For bounded-memory behavior, use NewMemorySinkWithLimit.
 func NewMemorySink() *MemorySink {
 	return &MemorySink{
-		counters:   make(map[string]*atomic.Int64),
-		histograms: make(map[string]*histogramState),
+		counters:       make(map[string]*atomic.Int64),
+		histograms:     make(map[string]*histogramState),
+		overflowLogger: log.Printf,
 	}
 }
 
@@ -172,6 +212,70 @@ func (m *MemorySink) OverflowDropped() int64 {
 	return m.overflowDropped.Load()
 }
 
+// recordOverflowDrop is called from the Counter and Observe drop paths
+// whenever a new (name, labels) series is rejected by the cardinality
+// cap. It increments both the authoritative OverflowDropped counter
+// AND a per-window pending counter, then emits a single throttled
+// audit log line if and only if the current caller wins the
+// CompareAndSwap race on overflowLogLastNS for this window.
+//
+// Throttling rationale (M1-001):
+// A cardinality-explosion incident can fire this path thousands of
+// times per second. A per-drop log line would drown out every other
+// signal in the same stream and impose nontrivial CloudWatch ingest
+// cost. The OverflowDropped counter remains exact (it is the signal
+// dashboards scrape); the log line is a low-frequency notification
+// that drops are in progress, along with the true rate observed since
+// the previous notification.
+//
+// The primitive is a pair of atomic.Int64 values — no channels, no
+// tickers, no dependency on a background goroutine. This keeps the
+// sink "a passive data structure" with the same lifecycle as before.
+// Concurrency correctness: every caller attempts a single CAS. At most
+// one caller per throttle window can succeed (the CAS compares against
+// the *old* timestamp). The winner captures the pending count via
+// atomic.Swap(0) and logs it. Losers silently increment the pending
+// counter and return.
+func (m *MemorySink) recordOverflowDrop() {
+	m.overflowDropped.Add(1)
+	m.overflowPendingDrops.Add(1)
+
+	now := time.Now().UnixNano()
+	last := m.overflowLogLastNS.Load()
+
+	// First drop ever: seed the timestamp without logging. Otherwise
+	// the first drop in a long-running process would always log
+	// regardless of the throttle, defeating the "notification, not
+	// per-event" intent.
+	if last == 0 {
+		if m.overflowLogLastNS.CompareAndSwap(0, now) {
+			return
+		}
+		// Another goroutine won the seeding race; reload and fall
+		// through to the normal throttle check below.
+		last = m.overflowLogLastNS.Load()
+	}
+
+	if now-last < int64(overflowLogThrottle) {
+		return
+	}
+	if !m.overflowLogLastNS.CompareAndSwap(last, now) {
+		// Another goroutine has already emitted the log line for
+		// this window; we become a silent drop.
+		return
+	}
+
+	// We won the window. Capture every drop that accumulated since
+	// the previous window closed and report the real rate.
+	pending := m.overflowPendingDrops.Swap(0)
+	m.overflowLogger(
+		"metrics: MemorySink overflow — %d drops since last report (throttled to 1/%s); OverflowDropped total=%d",
+		pending,
+		overflowLogThrottle,
+		m.overflowDropped.Load(),
+	)
+}
+
 // Counter increments the named counter by delta. Negative deltas are
 // silently dropped to preserve monotonicity. If the sink was
 // constructed with a cardinality cap and this call would create a new
@@ -201,7 +305,7 @@ func (m *MemorySink) Counter(name string, labels map[string]string, delta int64)
 		// second observes the incremented len. The cap is strict.
 		if m.labelLimit > 0 && len(m.counters)+len(m.histograms) >= m.labelLimit {
 			m.mu.Unlock()
-			m.overflowDropped.Add(1)
+			m.recordOverflowDrop()
 			return
 		}
 		c = &atomic.Int64{}
@@ -220,12 +324,16 @@ func (m *MemorySink) Observe(name string, labels map[string]string, value float6
 	key := seriesKey(name, labels)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	h, ok := m.histograms[key]
 	if !ok {
 		if m.labelLimit > 0 && len(m.counters)+len(m.histograms) >= m.labelLimit {
-			m.overflowDropped.Add(1)
+			// Release the write lock before invoking the throttled
+			// audit-log helper — the configured overflowLogger may
+			// block on I/O (stdlib log goes through a mutex + write
+			// syscall) and we do not want that serialized behind
+			// every other Observe/Counter call.
+			m.mu.Unlock()
+			m.recordOverflowDrop()
 			return
 		}
 		h = &histogramState{min: value, max: value}
@@ -239,6 +347,7 @@ func (m *MemorySink) Observe(name string, labels map[string]string, value float6
 	if value > h.max {
 		h.max = value
 	}
+	m.mu.Unlock()
 }
 
 // CounterSnapshot is a point-in-time copy of one counter series.

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -302,6 +303,244 @@ func TestMemorySink_CardinalityCap_OverflowDroppedNoLimit(t *testing.T) {
 	}
 	if got := m.OverflowDropped(); got != 0 {
 		t.Errorf("unbounded sink should never drop, got %d", got)
+	}
+}
+
+// -----------------------------------------------------------------------
+// MemorySink — overflow audit log throttling (M1-001)
+// -----------------------------------------------------------------------
+//
+// The cardinality-cap drop path emits a single "drops since last
+// report" audit log line at most once per overflowLogThrottle. These
+// tests pin the primitive so the log cannot regress to a per-drop
+// firehose under a cardinality-explosion incident.
+//
+// Test strategy:
+//   - Swap overflowLogger for a captor that records calls without
+//     touching the stdlib log package's global state (deterministic
+//     under -race, no interleave with other tests).
+//   - Drive thousands of drops in a tight loop and assert the log
+//     fired at most ONCE (the first drop seeds the timestamp and
+//     does NOT log; subsequent drops within the window are silent).
+//   - Drive drops from many goroutines concurrently and assert the
+//     CAS primitive admits exactly one log per window.
+//   - Force-expire the window by rewinding overflowLogLastNS and
+//     assert the next drop DOES log, and that the reported pending
+//     count equals the number of drops since the last report.
+//   - Verify OverflowDropped() remains exact regardless of how many
+//     log lines were suppressed.
+
+// overflowLogCaptor is a minimal thread-safe log sink used by the
+// M1-001 throttling tests. We avoid the stdlib log package's global
+// state so -race can observe ordering deterministically.
+type overflowLogCaptor struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (c *overflowLogCaptor) Printf(format string, args ...interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lines = append(c.lines, fmt.Sprintf(format, args...))
+}
+
+func (c *overflowLogCaptor) Count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.lines)
+}
+
+func (c *overflowLogCaptor) Snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.lines))
+	copy(out, c.lines)
+	return out
+}
+
+func TestMemorySink_OverflowLogThrottle_SingleEmissionUnderBurst(t *testing.T) {
+	cap := &overflowLogCaptor{}
+	m := NewMemorySinkWithLimit(1)
+	m.overflowLogger = cap.Printf
+
+	// First distinct series is accepted; every subsequent distinct
+	// series is dropped and feeds the throttle primitive.
+	m.Counter("rpc", map[string]string{"id": "seed"}, 1)
+	for i := 0; i < 5000; i++ {
+		m.Counter("rpc", map[string]string{"id": fmt.Sprintf("drop-%d", i)}, 1)
+	}
+
+	// OverflowDropped MUST equal the total number of drops — the
+	// authoritative counter is independent of the log throttle.
+	if got := m.OverflowDropped(); got != 5000 {
+		t.Errorf("OverflowDropped: want 5000, got %d", got)
+	}
+
+	// The FIRST drop seeds overflowLogLastNS and does not log; every
+	// subsequent drop within overflowLogThrottle is suppressed. So
+	// the captor should hold ZERO lines for a burst that completes
+	// in microseconds.
+	if n := cap.Count(); n != 0 {
+		t.Errorf("expected 0 throttled log lines in first-window burst, got %d: %v",
+			n, cap.Snapshot())
+	}
+}
+
+func TestMemorySink_OverflowLogThrottle_LogsAfterWindowExpiry(t *testing.T) {
+	cap := &overflowLogCaptor{}
+	m := NewMemorySinkWithLimit(1)
+	m.overflowLogger = cap.Printf
+
+	m.Counter("rpc", map[string]string{"id": "seed"}, 1)
+
+	// Burst A: drops 1..100, all within the seeding window. Zero
+	// logs expected — the first drop seeds, the rest are silenced.
+	for i := 0; i < 100; i++ {
+		m.Counter("rpc", map[string]string{"id": fmt.Sprintf("a-%d", i)}, 1)
+	}
+	if n := cap.Count(); n != 0 {
+		t.Fatalf("burst A should not have logged, got %d", n)
+	}
+
+	// Rewind the window by more than overflowLogThrottle so the
+	// next drop is eligible to log. This is the test equivalent of
+	// "60s have passed" without actually sleeping.
+	m.overflowLogLastNS.Store(
+		time.Now().Add(-2 * overflowLogThrottle).UnixNano(),
+	)
+
+	// Burst B: drops 101..200. The FIRST drop in this burst should
+	// win the CAS and log once; every subsequent drop is silenced
+	// again because the window has been reset to "now".
+	for i := 0; i < 100; i++ {
+		m.Counter("rpc", map[string]string{"id": fmt.Sprintf("b-%d", i)}, 1)
+	}
+
+	lines := cap.Snapshot()
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly 1 log line after window expiry, got %d: %v",
+			len(lines), lines)
+	}
+
+	// The log line must carry the pending-drops count so operators
+	// can see the real rate. The exact value depends on how many
+	// drops happened before and after the winning CAS, but it must
+	// be > 0 and it must mention the throttle window.
+	if !strings.Contains(lines[0], "MemorySink overflow") {
+		t.Errorf("log line missing MemorySink overflow marker: %q", lines[0])
+	}
+	if !strings.Contains(lines[0], "drops since last report") {
+		t.Errorf("log line missing drops-since-last-report text: %q", lines[0])
+	}
+	if !strings.Contains(lines[0], overflowLogThrottle.String()) {
+		t.Errorf("log line missing throttle window: %q", lines[0])
+	}
+
+	// OverflowDropped must still equal the true total (200 drops
+	// across bursts A and B).
+	if got := m.OverflowDropped(); got != 200 {
+		t.Errorf("OverflowDropped: want 200, got %d", got)
+	}
+
+	// Force another window and assert a second log line emits. The
+	// exact pending-count value carries the leftover drops from
+	// silenced drops in the previous window (which is correct and
+	// desirable — operators must see every drop accounted for even
+	// across throttle boundaries). We pin two invariants: a second
+	// log line exists, and the cumulative OverflowDropped total on
+	// the log line equals the cumulative count we drove through.
+	m.overflowLogLastNS.Store(
+		time.Now().Add(-2 * overflowLogThrottle).UnixNano(),
+	)
+	for i := 0; i < 10; i++ {
+		m.Counter("rpc", map[string]string{"id": fmt.Sprintf("c-%d", i)}, 1)
+	}
+	lines = cap.Snapshot()
+	if len(lines) != 2 {
+		t.Fatalf("expected exactly 2 log lines after second window, got %d: %v",
+			len(lines), lines)
+	}
+	// Line 2 must carry the audit-log marker — exact counts depend
+	// on the instant the winning CAS fires (the emitter snapshots
+	// overflowDropped at emission time, not at test-assert time),
+	// so we pin the marker text and verify OverflowDropped below
+	// instead.
+	if !strings.Contains(lines[1], "MemorySink overflow") ||
+		!strings.Contains(lines[1], "drops since last report") {
+		t.Errorf("second log line missing expected markers: %q", lines[1])
+	}
+
+	// The authoritative counter must reflect EVERY drop even
+	// though we only logged twice across 210 drops — this is the
+	// "counter is always exact regardless of throttle" contract.
+	if got := m.OverflowDropped(); got != 210 {
+		t.Errorf("OverflowDropped after burst C: want 210, got %d", got)
+	}
+}
+
+func TestMemorySink_OverflowLogThrottle_ConcurrentBurstSingleWinner(t *testing.T) {
+	cap := &overflowLogCaptor{}
+	m := NewMemorySinkWithLimit(1)
+	m.overflowLogger = cap.Printf
+
+	m.Counter("rpc", map[string]string{"id": "seed"}, 1)
+	// Pre-expire the window so the upcoming drops are ALL eligible
+	// to log; the CAS must ensure only one wins.
+	m.overflowLogLastNS.Store(
+		time.Now().Add(-2 * overflowLogThrottle).UnixNano(),
+	)
+
+	const workers = 32
+	const perWorker = 200
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				m.Counter("rpc",
+					map[string]string{"id": fmt.Sprintf("w%d-%d", w, i)},
+					1)
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	// At most ONE log line may be emitted per throttle window,
+	// even though ~6400 drops raced for it.
+	if n := cap.Count(); n != 1 {
+		t.Errorf("expected exactly 1 log line under concurrent burst, got %d: %v",
+			n, cap.Snapshot())
+	}
+	if got := m.OverflowDropped(); got != workers*perWorker {
+		t.Errorf("OverflowDropped: want %d, got %d", workers*perWorker, got)
+	}
+}
+
+func TestMemorySink_OverflowLogThrottle_ObserveDropPath(t *testing.T) {
+	// Both Counter and Observe feed the same recordOverflowDrop
+	// helper; Observe has historically been under a write lock so
+	// this test guards against re-introducing the log call inside
+	// the critical section (which would deadlock the tests via
+	// lock-order inversion with any log sink that takes a mutex).
+	cap := &overflowLogCaptor{}
+	m := NewMemorySinkWithLimit(1)
+	m.overflowLogger = cap.Printf
+
+	m.Observe("lat", map[string]string{"id": "seed"}, 0.1)
+	m.overflowLogLastNS.Store(
+		time.Now().Add(-2 * overflowLogThrottle).UnixNano(),
+	)
+
+	for i := 0; i < 50; i++ {
+		m.Observe("lat", map[string]string{"id": fmt.Sprintf("drop-%d", i)}, float64(i))
+	}
+
+	if got := m.OverflowDropped(); got != 50 {
+		t.Errorf("OverflowDropped on Observe path: want 50, got %d", got)
+	}
+	if n := cap.Count(); n != 1 {
+		t.Errorf("expected 1 log line from Observe drop path, got %d", n)
 	}
 }
 
