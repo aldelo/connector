@@ -850,7 +850,19 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		// create server with options if any
 		//
 		s._grpcServer = grpc.NewServer(opts...)
-		s.RegisterServiceHandlers(s._grpcServer)
+		// SVC-F2 coverage extension (C2-003): wrap the caller-supplied
+		// RegisterServiceHandlers in panic recovery so a buggy
+		// registrar fails Serve cleanly instead of crashing the
+		// startup goroutine. A typed-nil generated registrar that
+		// panics on first method dispatch is a realistic failure
+		// mode; without this wrapper it crashes the test binary.
+		// Close the listener on the error path so the bind doesn't
+		// leak — pre-SVC-F2-extension siblings (FavorPublicIP error
+		// returns) leak too, but new code should not.
+		if regErr := s.runRegisterHandlers(s.RegisterServiceHandlers); regErr != nil {
+			_ = lis.Close()
+			return nil, "", 0, regErr
+		}
 
 		ip = util.GetLocalIP()
 
@@ -1920,6 +1932,62 @@ func (s *Service) runHook(name string, hook func(*Service)) {
 	hook(s)
 }
 
+// runRegisterHandlers invokes the caller-supplied
+// RegisterServiceHandlers callback with panic recovery. Unlike runHook,
+// it returns an error on panic so setupServer / Serve can fail cleanly
+// (returning the wrapped panic as a normal Go error) instead of
+// crashing the startup goroutine and leaking listener / Cloud Map state
+// from earlier setup steps.
+//
+// Fix: SVC-F2 coverage extension (C2-003, deep-review-2026-04-14-contrarian).
+// SVC-F2's original scope was the four named Before*/After* lifecycle
+// hooks; RegisterServiceHandlers escaped that enumeration because of
+// its constructor-shaped name, even though it is semantically the same
+// thing — caller-supplied code that must not crash the Service.
+//
+// reg is the RegisterServiceHandlers callback. If reg is nil the
+// helper returns nil without error (the caller's nil check at
+// setupServer is the canonical place to fail on a nil registrar).
+func (s *Service) runRegisterHandlers(reg func(*grpc.Server)) (err error) {
+	if reg == nil {
+		return nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("!!! RegisterServiceHandlers panic recovered: %v\n%s !!!", r, debug.Stack())
+			err = fmt.Errorf("RegisterServiceHandlers panic: %v", r)
+		}
+	}()
+	reg(s._grpcServer)
+	return nil
+}
+
+// runCleanup invokes a WebServerConfig.CleanUp callback with panic
+// recovery. Mirrors runHook's log-and-continue contract: a panicking
+// CleanUp is logged with full stack but does NOT propagate, so the
+// surrounding teardown sequence (SD / SNS / SQS dereg, gs.Stop) keeps
+// running and leaves the Service in a fully torn-down state instead
+// of half-disconnected.
+//
+// Fix: SVC-F2 coverage extension (C2-003, deep-review-2026-04-14-contrarian).
+// Two of the three CleanUp call sites (in GracefulStop and ImmediateStop
+// pre-Serve fallback paths) were not under any panic recovery; only
+// the in-quit-handler call was covered, indirectly, via safeGo. The
+// SVC-F7 unified routing path runs CleanUp from inside the
+// safeGo-wrapped quit handler via a separate (existing) call site, so
+// the in-Serve hot path is also covered. nil cleanup is a no-op.
+func runCleanup(name string, cleanup func()) {
+	if cleanup == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("!!! %s cleanup panic recovered: %v\n%s !!!", name, r, debug.Stack())
+		}
+	}()
+	cleanup()
+}
+
 // safeGo runs fn in a new goroutine with panic recovery. If fn panics,
 // the panic is logged with its value and full stack trace, and the
 // goroutine exits cleanly — the process keeps running.
@@ -2541,8 +2609,10 @@ func (s *Service) GracefulStop() {
 		_ = s.deleteServiceHealthReportFromDataStore(cfg.Instance.Id)
 	}
 
-	if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
-		s.WebServerConfig.CleanUp()
+	// SVC-F2 coverage extension (C2-003): user-supplied CleanUp must
+	// not crash the rest of teardown.
+	if s.WebServerConfig != nil {
+		runCleanup("WebServerConfig.CleanUp(GracefulStop)", s.WebServerConfig.CleanUp)
 	}
 
 	s.setLocalAddress("")
@@ -2665,8 +2735,10 @@ func (s *Service) ImmediateStop() {
 		_ = s.deleteServiceHealthReportFromDataStore(cfg.Instance.Id)
 	}
 
-	if s.WebServerConfig != nil && s.WebServerConfig.CleanUp != nil {
-		s.WebServerConfig.CleanUp()
+	// SVC-F2 coverage extension (C2-003): user-supplied CleanUp must
+	// not crash the rest of teardown.
+	if s.WebServerConfig != nil {
+		runCleanup("WebServerConfig.CleanUp(ImmediateStop)", s.WebServerConfig.CleanUp)
 	}
 
 	s.setLocalAddress("")
