@@ -55,10 +55,23 @@ func main() {
 // startServiceHandler is to be called by ServiceProgram
 func startServiceHandler(port int) {
 	// setup grpc service server
-	grpcServer = service.NewService("ExampleServer", "service", "", func(grpcServer *grpc.Server) {
-		testpb.RegisterAnswerServiceServer(grpcServer, &impl.TestServiceImpl{})
-		testpb.RegisterAnswerServerStreamServiceServer(grpcServer, &impl.TestStreamServiceImpl{})
+	//
+	// The register callback captures the package-level grpcServer
+	// variable so the streaming handler can hold a *service.Service
+	// reference and observe svc.ShutdownCtx() per rule #13. grpcServer
+	// is assigned by NewService before Serve() runs, so by the time
+	// the callback is invoked the reference is valid.
+	grpcServer = service.NewService("ExampleServer", "service", "", func(gs *grpc.Server) {
+		testpb.RegisterAnswerServiceServer(gs, &impl.TestServiceImpl{})
+		testpb.RegisterAnswerServerStreamServiceServer(gs, impl.NewTestStreamServiceImpl(grpcServer))
 	})
+
+	// Enable rule #13 ShutdownCtx capability so StreamGreeting's
+	// dual-ctx select is actually exercised on SIGTERM. Without this,
+	// svc.ShutdownCtx() returns nil and the shutdown arm of the
+	// select becomes a no-op — the example would demonstrate the
+	// pattern but not actually activate it.
+	grpcServer.ShutdownCancel = true
 
 	// code to execute before server starts
 	grpcServer.BeforeServerStart = func(svc *service.Service) {
