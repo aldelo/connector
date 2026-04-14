@@ -94,10 +94,11 @@ func NewTestStreamServiceImpl(svc *service.Service) *TestStreamServiceImpl {
 // must observe a SECOND ctx — Service.ShutdownCtx() — in the same
 // select alongside the RPC ctx.
 //
-// NOTE: until C2-001 is fixed, the dual-ctx pattern only activates on
-// the signal-driven shutdown path. Programmatic svc.GracefulStop() does
-// not currently fire ShutdownCtx fire sites. See connector
-// findings/2026-04-14-contrarian/C2-001.
+// Both shutdown paths fire ShutdownCtx as of SVC-F7 (2026-04-14):
+// signal-driven exit via awaitOsSigExit AND programmatic GracefulStop /
+// ImmediateStop all route through the unified quit channel, so this
+// dual-ctx pattern is reliable regardless of which path the consumer
+// takes.
 func (s *TestStreamServiceImpl) StreamGreeting(in *testpb.Question, stream testpb.AnswerServerStreamService_StreamGreetingServer) error {
 	rpcCtx := stream.Context()
 
