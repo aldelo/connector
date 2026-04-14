@@ -2734,9 +2734,16 @@ func (s *Service) GracefulStop() {
 // SVC-F5 / rule #13: this routing makes the ShutdownCtx() promise
 // hold on the programmatic ImmediateStop path — the configured fire
 // site runs before this method returns even when shutdown is
-// triggered without an OS signal.
+// triggered without an OS signal. This promise applies ONLY to the
+// normal "Serve is running" case. In the pre-Serve fallback no
+// ShutdownCancelPhase fire runs, because Serve() is the only site
+// that allocates _shutdownCtx; consumers observing ShutdownCtx()
+// before Serve() is entered will see a nil context regardless of
+// ShutdownCancelPhase, which is the expected contract for any
+// consumer opting in via ShutdownCancel=true.
 //
 // Fix: SVC-F7 (C2-001 + C2-002, deep-review-2026-04-14-contrarian).
+// Godoc precision: C2-007 (same review).
 func (s *Service) ImmediateStop() {
 	// SVC-F7: declare the immediate intent BEFORE signaling the quit
 	// channel. The quit handler reads this atomic between waking and
