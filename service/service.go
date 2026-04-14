@@ -2053,6 +2053,18 @@ func safeGo(name string, fn func()) {
 // two goroutines are safe: exactly one proceeds, the other receives
 // the sentinel error (SVC-F3).
 //
+// Terminal-failure contract: any error returned by Serve — including
+// readConfig / setupServer failures that occur BEFORE the gRPC server
+// binds a port — puts this *Service into a terminal state. The CAS
+// guard on s._started has already claimed the instance, so a second
+// Serve() call on the same value returns ErrServiceAlreadyStarted
+// even though no gRPC work ever ran. Consumers MUST construct a new
+// *Service via NewService(...) to retry; they CANNOT reuse this one.
+// The single-use CAS (SVC-F3) exists to protect one-shot resources
+// (shutdown signal context, sync.Once-guarded hooks, Cloud Map
+// registration ledger) from re-entry, and that protection is exactly
+// what makes the instance unrecoverable after an early failure.
+//
 // All exported fields on Service must be set before calling Serve;
 // post-Serve mutation is not synchronized.
 func (s *Service) Serve() error {
