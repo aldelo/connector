@@ -46,7 +46,6 @@ import (
 	"github.com/aldelo/connector/adapters/loadbalancer"
 	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/registry"
-	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	res "github.com/aldelo/connector/adapters/resolver"
 	"github.com/aldelo/connector/adapters/tracer"
 	ws "github.com/aldelo/connector/webserver"
@@ -78,10 +77,8 @@ const (
 	// a single DoNotifierAlertService attempt (which has its own SDK
 	// timeout). 5s matches defaultNotifierReconnectDelay.
 	notifierReconnectDrainTimeout   = 5 * time.Second
-	webServerShutdownTimeout        = 5 * time.Second
-	webServerStopChannelTimeout     = 6 * time.Second
-	deregisterInstanceCheckInterval = 250 * time.Millisecond
-	deregisterInstanceMaxRetries    = 20
+	webServerShutdownTimeout    = 5 * time.Second
+	webServerStopChannelTimeout = 6 * time.Second
 )
 
 // client side cache
@@ -951,8 +948,15 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	// set with block option,
 	// with block will halt code execution until after dial completes
+	//
+	// P1-CONN-CL-A (2026-04-15): SA1019 deferred to connector v2.0.0 per
+	// rule #10 — grpc.NewClient uses lazy-dial semantics where Dial
+	// returns before the connection is established. Switching would
+	// break every consumer that relies on "Dial returns means the
+	// connection is up" and must be done in a coordinated v2.0.0 batch.
+	// See: _src/docs/repos/connector/findings/2026-04-15-contrarian-pass4/P1-CONN-CL-A.md
 	if cfg.Grpc.DialBlockingMode {
-		opts = append(opts, grpc.WithBlock())
+		opts = append(opts, grpc.WithBlock()) //nolint:staticcheck // SA1019 deferred to v2.0.0
 	}
 
 	// set default server config for load balancer and/or health check
@@ -1019,7 +1023,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 
 	if xray.XRayServiceOn() {
 		logPrintf("Setup Unary XRay Tracer Interceptor")
-		//c.UnaryClientInterceptors = append(c.UnaryClientInterceptors, c.unaryXRayTracerHandler)
+		// P1-CONN-CL-A (2026-04-15): the old c.unaryXRayTracerHandler
+		// was superseded by tracer.TracerUnaryClientInterceptor; the
+		// dead method has been removed.
 		unaryInts = append(unaryInts, tracer.TracerUnaryClientInterceptor(cfg.Target.AppName+"-Client"))
 	}
 
@@ -1057,7 +1063,12 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	}
 
 	// verbose dial error
-	opts = append(opts, grpc.FailOnNonTempDialError(true))
+	//
+	// P1-CONN-CL-A (2026-04-15): SA1019 deferred to connector v2.0.0
+	// along with the grpc.WithBlock / grpc.DialContext migration — the
+	// three deprecations are coupled to the eager-dial → lazy-dial
+	// semantic flip and must migrate together. See ~L953.
+	opts = append(opts, grpc.FailOnNonTempDialError(true)) //nolint:staticcheck // SA1019 deferred to v2.0.0
 
 	//
 	// complete
@@ -1744,7 +1755,14 @@ func muxDialContext(ctx context.Context, target string, opts ...grpc.DialOption)
 	_mux.Lock()
 	defer _mux.Unlock()
 
-	return grpc.DialContext(ctx, target, opts...)
+	// P1-CONN-CL-A (2026-04-15): SA1019 deferred to connector v2.0.0.
+	// grpc.NewClient uses lazy-dial semantics — it returns before the
+	// connection is established — while grpc.DialContext with
+	// WithBlock is eager. Switching here without migrating
+	// grpc.WithBlock / FailOnNonTempDialError at the same time would
+	// break every consumer that expects "Dial returns means
+	// connection is up". Coordinated v2.0.0 migration required.
+	return grpc.DialContext(ctx, target, opts...) //nolint:staticcheck // SA1019 deferred to v2.0.0
 }
 
 // GetLiveEndpointsCount queries cloudmap to retrieve live endpoints count,
@@ -2999,165 +3017,6 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	return nil
 }
 
-// findUnhealthyInstances will call cloud map sd to discover unhealthy instances, a slice of unhealthy instances is returned
-func (c *Client) findUnhealthyEndpoints(serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint) (unhealthyList []*serviceEndpoint, err error) {
-	if c == nil {
-		return []*serviceEndpoint{}, fmt.Errorf("Client Object Nil")
-	}
-
-	c.connMu.RLock()
-	sd := c._sd
-	c.connMu.RUnlock()
-
-	if sd == nil {
-		return []*serviceEndpoint{}, fmt.Errorf("Service Discovery Client Not Connected")
-	}
-
-	if util.LenTrim(serviceName) == 0 {
-		return []*serviceEndpoint{}, fmt.Errorf("Service Name Not Defined in Config (API SD)")
-	}
-
-	if util.LenTrim(namespaceName) == 0 {
-		return []*serviceEndpoint{}, fmt.Errorf("Namespace Name Not Defined in Config (API SD)")
-	}
-
-	if maxCount <= 0 {
-		maxCount = 100
-	}
-
-	var timeoutDuration []time.Duration
-
-	if timeoutSeconds > 0 {
-		timeoutDuration = append(timeoutDuration, time.Duration(timeoutSeconds)*time.Second)
-	}
-
-	customAttr := map[string]string{}
-
-	if util.LenTrim(version) > 0 {
-		customAttr["INSTANCE_VERSION"] = version
-	} else {
-		customAttr = nil
-	}
-
-	instanceList, err := registry.DiscoverInstances(sd, serviceName, namespaceName, false, customAttr, &maxCount, timeoutDuration...)
-	if err != nil {
-		return []*serviceEndpoint{}, fmt.Errorf("service discovery by API failed: %w", err)
-	}
-
-	for _, v := range instanceList {
-		// validate IP and port
-		if util.LenTrim(v.InstanceIP) == 0 || net.ParseIP(v.InstanceIP) == nil {
-			continue
-		}
-		if v.InstancePort == 0 || v.InstancePort > 65535 {
-			continue
-		}
-
-		unhealthyList = append(unhealthyList, &serviceEndpoint{
-			SdType:      "api",
-			Host:        v.InstanceIP,
-			Port:        v.InstancePort,
-			InstanceId:  v.InstanceId,
-			ServiceId:   v.ServiceId,
-			Version:     v.InstanceVersion,
-			CacheExpire: time.Time{},
-		})
-	}
-
-	return unhealthyList, nil
-}
-
-// updateHealth will update instance health
-func (c *Client) updateHealth(p *serviceEndpoint, healthy bool) error {
-	if c == nil {
-		return fmt.Errorf("Client Object Nil")
-	}
-
-	// Snapshot _sd under connMu to prevent race with Close()/connectSd()
-	c.connMu.RLock()
-	sd := c._sd
-	c.connMu.RUnlock()
-	// CL-F4: snapshot _config via atomic.Pointer before nil-check.
-	cfg := c.getConfig()
-
-	if sd != nil && cfg != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
-		return registry.UpdateHealthStatus(sd, p.InstanceId, p.ServiceId, healthy)
-	} else {
-		return nil
-	}
-}
-
-// deregisterInstance will remove instance from cloudmap and route 53
-func (c *Client) deregisterInstance(p *serviceEndpoint) error {
-	if c == nil {
-		return fmt.Errorf("Client Object Nil")
-	}
-
-	logprintf := func(msg string, args ...interface{}) {
-		if z := c.ZLog(); z != nil {
-			z.Printf(msg, args...)
-		} else {
-			log.Printf(msg, args...)
-		}
-	}
-	errorf := func(msg string, args ...interface{}) {
-		if z := c.ZLog(); z != nil {
-			z.Errorf(msg, args...)
-		} else {
-			log.Printf(msg, args...)
-		}
-	}
-
-	// Snapshot _sd under connMu; snapshot _config via atomic.Pointer (CL-F4).
-	c.connMu.RLock()
-	sd := c._sd
-	c.connMu.RUnlock()
-	cfg := c.getConfig()
-
-	if sd != nil && cfg != nil && p != nil && p.SdType == "api" && util.LenTrim(p.ServiceId) > 0 && util.LenTrim(p.InstanceId) > 0 {
-		logprintf("De-Register Instance '%s:%s-%s' Begin...", p.Host, util.UintToStr(p.Port), p.InstanceId)
-
-		var timeoutDuration []time.Duration
-		if cfg.Target.SdTimeout > 0 {
-			timeoutDuration = append(timeoutDuration, time.Duration(cfg.Target.SdTimeout)*time.Second)
-		}
-
-		operationId, err := registry.DeregisterInstance(sd, p.InstanceId, p.ServiceId, timeoutDuration...)
-		if err != nil {
-			errorf("... De-Register Instance '%s:%s-%s' Failed: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, err.Error())
-			return fmt.Errorf("De-Register Instance '%s:%s-%s' Fail: %w", p.Host, util.UintToStr(p.Port), p.InstanceId, err)
-		}
-
-		tryCount := 0
-		time.Sleep(deregisterInstanceCheckInterval)
-
-		for {
-			status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration...)
-			if e != nil {
-				errorf("... De-Register Instance '%s:%s-%s' Failed: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, e.Error())
-				return fmt.Errorf("De-Register Instance '%s:%s-%s' Fail: %s", p.Host, util.UintToStr(p.Port), p.InstanceId, e.Error())
-			}
-
-			if status == sdoperationstatus.Success {
-				logprintf("... De-Register Instance '%s:%s-%s' OK", p.Host, util.UintToStr(p.Port), p.InstanceId)
-				return nil
-			}
-
-			if tryCount < deregisterInstanceMaxRetries {
-				tryCount++
-				logprintf("... Checking De-Register Instance '%s:%s-%s' Completion Status, Attempt %d (100ms)", p.Host, util.UintToStr(p.Port), p.InstanceId, tryCount)
-				time.Sleep(deregisterInstanceCheckInterval)
-				continue
-			}
-
-			errorf("... De-Register Instance '%s:%s-%s' Failed: Operation Timeout After 5 Seconds", p.Host, util.UintToStr(p.Port), p.InstanceId)
-			return fmt.Errorf("De-Register Instance '%s:%s-%s'Fail When Operation Timed Out After 5 Seconds", p.Host, util.UintToStr(p.Port), p.InstanceId)
-		}
-	}
-
-	return nil
-}
-
 func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
@@ -3346,65 +3205,9 @@ func (c *Client) streamCircuitBreakerHandler(
 	return nil, gerr
 }
 
-func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
-	if c == nil {
-		return fmt.Errorf("Client Object Nil")
-	}
-
-	if xray.XRayServiceOn() {
-		parentSegID := ""
-		parentTraceID := ""
-
-		// use outgoing metadata on the client side
-		if md, ok := metadata.FromOutgoingContext(ctx); ok {
-			if v, ok2 := md["x-amzn-seg-id"]; ok2 && len(v) > 0 {
-				parentSegID = v[0]
-			}
-			if v, ok2 := md["x-amzn-tr-id"]; ok2 && len(v) > 0 {
-				parentTraceID = v[0]
-			}
-		}
-
-		var seg *xray.XSegment
-		if util.LenTrim(parentSegID) > 0 && util.LenTrim(parentTraceID) > 0 {
-			seg = xray.NewSegment("GrpcClient-UnaryRPC-"+method, &xray.XRayParentSegment{
-				SegmentID: parentSegID,
-				TraceID:   parentTraceID,
-			})
-		} else {
-			seg = xray.NewSegment("GrpcClient-UnaryRPC-" + method)
-		}
-
-		if seg == nil || seg.Seg == nil { // guard against nil segment to prevent panic
-			return invoker(ctx, method, req, reply, cc, opts...)
-		}
-
-		defer seg.Close()
-		defer func() {
-			if err != nil {
-				_ = seg.SafeAddError(err)
-			}
-		}()
-
-		md, ok := metadata.FromOutgoingContext(ctx) // preserve existing outgoing metadata
-		if !ok {
-			md = metadata.New(nil) // initialize if absent
-		} else {
-			md = md.Copy() // avoid mutating shared maps
-		}
-		md.Set("x-amzn-seg-id", seg.Seg.ID) // keep existing keys while adding tracing
-		md.Set("x-amzn-tr-id", seg.Seg.TraceID)
-
-		// attach tracing headers to outgoing context
-		ctx = metadata.NewOutgoingContext(ctx, md)
-
-		err = invoker(ctx, method, req, reply, cc, opts...)
-		return err
-	}
-
-	return invoker(ctx, method, req, reply, cc, opts...)
-}
-
+// P1-CONN-CL-A (2026-04-15): unaryXRayTracerHandler was deleted —
+// superseded by tracer.TracerUnaryClientInterceptor and no longer
+// referenced. streamXRayTracerHandler is still in use and remains.
 func (c *Client) streamXRayTracerHandler(
 	ctx context.Context,
 	desc *grpc.StreamDesc,
