@@ -452,12 +452,12 @@ func TestConvertToRpcError_AllDetailTypes_RoundTrip(t *testing.T) {
 	// Create an error that populates as many detail types as possible,
 	// then verify they survive the NewRpcError -> ConvertToRpcError round-trip.
 	original := NewRpcError(codes.Internal, "full details", RpcErrorDetails{
-		RequestInfo:       []*epb.RequestInfo{{RequestId: "r1", ServingData: "s1"}},
-		LocalizedMessage:  []*epb.LocalizedMessage{{Locale: "en", Message: "localized"}},
-		ResourceInfo:      []*epb.ResourceInfo{{ResourceType: "bucket", ResourceName: "my-bucket"}},
-		RetryInfo:         []*epb.RetryInfo{{}},
-		DebugInfo:         []*epb.DebugInfo{{Detail: "debug detail"}},
-		ErrorInfo:         []*epb.ErrorInfo{{Reason: "QUOTA", Domain: "example.com"}},
+		RequestInfo:      []*epb.RequestInfo{{RequestId: "r1", ServingData: "s1"}},
+		LocalizedMessage: []*epb.LocalizedMessage{{Locale: "en", Message: "localized"}},
+		ResourceInfo:     []*epb.ResourceInfo{{ResourceType: "bucket", ResourceName: "my-bucket"}},
+		RetryInfo:        []*epb.RetryInfo{{}},
+		DebugInfo:        []*epb.DebugInfo{{Detail: "debug detail"}},
+		ErrorInfo:        []*epb.ErrorInfo{{Reason: "QUOTA", Domain: "example.com"}},
 		PreconditionFailure: []*epb.PreconditionFailure{
 			{Violations: []*epb.PreconditionFailure_Violation{{Type: "TOS", Subject: "user"}}},
 		},

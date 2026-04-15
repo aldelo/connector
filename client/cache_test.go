@@ -132,7 +132,7 @@ func TestAddServiceEndpoints_SkipsNilAndInvalid(t *testing.T) {
 	c := newCache()
 	c.AddServiceEndpoints("svc-a", []*serviceEndpoint{
 		nil,
-		ep("", 8080, "v1", live()),  // empty host
+		ep("", 8080, "v1", live()),   // empty host
 		ep("host1", 0, "v1", live()), // zero port
 		ep("host1", 8080, "v1", live()),
 	})

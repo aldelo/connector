@@ -124,7 +124,7 @@ func (w *WebServer) SetRouteGroupCustomMiddleware(routeGroupName string, routerF
 	if w == nil {
 		return false
 	}
-	
+
 	if w._ginwebserver == nil {
 		return false
 	}
@@ -160,7 +160,7 @@ func (w *WebServer) ExtractJwtClaims(c *gin.Context) map[string]interface{} {
 	if w == nil {
 		return nil
 	}
-	
+
 	if w._ginwebserver != nil {
 		return w._ginwebserver.ExtractJwtClaims(c)
 	} else {
@@ -173,7 +173,7 @@ func (w *WebServer) Port() uint {
 	if w == nil {
 		return 0
 	}
-	
+
 	if w._config != nil {
 		return w._config.WebServer.Port
 	} else {
@@ -186,7 +186,7 @@ func (w *WebServer) UseTls() bool {
 	if w == nil {
 		return false
 	}
-	
+
 	if w._config == nil {
 		return false
 	} else {
@@ -200,7 +200,7 @@ func (w *WebServer) GetHostAddress() string {
 	if w == nil {
 		return util.GetLocalIP()
 	}
-	
+
 	// remove prior dns registration if any
 	w.RemoveDNSRecordset()
 
@@ -256,7 +256,7 @@ func (w *WebServer) RemoveDNSRecordset() {
 	if w == nil {
 		return
 	}
-	
+
 	w._dnsMu.RLock()
 	hzId := w._dnsHostZoneId
 	dnsIp := w._dnsIp
@@ -280,7 +280,7 @@ func (w *WebServer) Serve() error {
 	if w == nil {
 		return fmt.Errorf("WebServer Object Nil")
 	}
-	
+
 	if w._config == nil {
 		return fmt.Errorf("Config Object Not Initialized, Use NewWebServer(...) First")
 	}

@@ -31,7 +31,7 @@ import (
 )
 
 type HealthServer struct {
-	grpc_health_v1.UnimplementedHealthServer // embed for forward compatibility
+	grpc_health_v1.UnimplementedHealthServer                                                                            // embed for forward compatibility
 	defaultHealthCheck                       func(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus // unexported: no external consumers access this directly
 
 	mu           sync.RWMutex
