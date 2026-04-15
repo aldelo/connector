@@ -283,3 +283,152 @@ func TestService_AwaitOsSigExit_WokenByImmediateStopSelfSignal(t *testing.T) {
 // the signal under test and lets a future maintainer grep for
 // `syscall.SIGTERM` and land in this file.
 var _ = syscall.SIGTERM
+
+// -----------------------------------------------------------------------
+// SP-010 pass-5 A2-F-2A — sender-side readiness gate regression tests
+// -----------------------------------------------------------------------
+//
+// Motivation: the two tests above (WokenByGracefulStopSelfSignal /
+// WokenByImmediateStopSelfSignal) exercise the HAPPY path — awaitOsSigExit
+// is running, _sigHandlerReady is true, self-signal fires and reaches
+// the registered Go channel. That covers the receiver-side contract.
+//
+// A2-F-2A identifies the missing companion: the SENDER-side gate check
+// at service.go L2760 (GracefulStop) and L2923 (ImmediateStop) — the
+// `if s._sigHandlerReady.Load()` wrapper. If a future refactor removes
+// that wrapper, the fleet-wide behavior change is:
+//
+//   Before Serve() is called (or after Serve() returns), a programmatic
+//   GracefulStop / ImmediateStop would emit SIGTERM to the process PID.
+//   With NO signal.Notify handler registered, the Go runtime routes
+//   that SIGTERM to the default handler, which terminates the process.
+//
+// The existing tests CANNOT catch this regression: they install the
+// signal handler first, so the self-signal always reaches the Go
+// channel regardless of whether the sender-side gate is in place.
+//
+// These tests close the asymmetry by driving the OTHER code path:
+// call Stop WITHOUT running awaitOsSigExit, prove the process is
+// still alive afterward. If the gate is removed, the test binary
+// dies with "signal: terminated" and the `go test` run fails loudly.
+//
+// The assertions are intentionally minimal — the primary correctness
+// signal is "did the test process survive" (implicit: the test
+// function returns normally). The supporting assertions confirm
+// the _quit handler still ran so we know we actually exercised the
+// stop path and didn't just silently no-op.
+//
+// Mutation-probe record (SP-010 protocol):
+//   Probe: remove the `if s._sigHandlerReady.Load()` wrapper from
+//   service.go L2760 (GracefulStop). Run
+//   TestService_GracefulStop_BeforeAwaitOsSigExit_NoSelfSignal_A2F2A.
+//   The test binary dies with "signal: terminated" before the test
+//   even reports a result — `go test` exits with a non-zero status
+//   and the failure is visible in CI. Restored: GREEN.
+
+// TestService_GracefulStop_BeforeAwaitOsSigExit_NoSelfSignal_A2F2A
+// asserts that GracefulStop is safe to call on a Service whose
+// awaitOsSigExit preamble has NOT run (common in unit tests and in
+// any code path that performs partial Serve setup before bailing).
+// The readiness gate at service.go L2760 must short-circuit the
+// self-signal; the unified quit path must still run.
+func TestService_GracefulStop_BeforeAwaitOsSigExit_NoSelfSignal_A2F2A(t *testing.T) {
+	s := newSVCF7TestService(false, ShutdownPhaseImmediate)
+	s._mu.Lock()
+	s._config = &config{}
+	s._mu.Unlock()
+
+	// Precondition: no awaitOsSigExit → no signal.Notify → readiness
+	// flag is false. If this were true, the test would not be
+	// exercising the sender-side gate branch.
+	if s._sigHandlerReady.Load() {
+		t.Fatal("precondition: _sigHandlerReady must be false before awaitOsSigExit runs (A2-F-2A setup wrong)")
+	}
+
+	exited := startFakeQuitHandler(s, true)
+
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		// If the sender-side gate at L2760 is removed, this
+		// line's self-SIGTERM hits the Go runtime default handler
+		// and terminates the test binary before stopDone is ever
+		// closed. `go test` then reports "signal: terminated".
+		s.GracefulStop()
+	}()
+
+	// Primary assertion: GracefulStop returns within a bounded
+	// deadline. Because no self-signal is sent (gate holds false),
+	// the stop routes through the _quit-send branch only, which
+	// the fake quit handler consumes immediately.
+	select {
+	case <-stopDone:
+		// ok — process survived, GracefulStop returned cleanly
+	case <-time.After(5 * time.Second):
+		t.Fatal("A2-F-2A regression: GracefulStop did not return within 5s with readiness=false — the _quit-send-only path is broken")
+	}
+
+	// Secondary: the _quit handler must have run. This proves we
+	// actually traversed the quit-routing branch — if we took some
+	// legacy pre-Serve fallback path instead, the fake handler
+	// would never see a _quit send.
+	select {
+	case <-exited:
+	case <-time.After(1 * time.Second):
+		t.Fatal("A2-F-2A regression: fake quit handler did not run — _quit send was lost on the readiness=false path")
+	}
+
+	// Tertiary: the readiness flag must STILL be false. Nothing in
+	// this path should have set it to true (only awaitOsSigExit
+	// sets it). If it flipped to true, some other code path is
+	// scribbling on the signal handler — a fresh regression.
+	if s._sigHandlerReady.Load() {
+		t.Fatal("A2-F-2A regression: _sigHandlerReady flipped to true without awaitOsSigExit running — signal handler side effect leaked")
+	}
+}
+
+// TestService_ImmediateStop_BeforeAwaitOsSigExit_NoSelfSignal_A2F2A
+// is the ImmediateStop twin of the above. Both exported stop methods
+// have their own self-signal site (GracefulStop L2760, ImmediateStop
+// L2923) and both need independent sender-side gate coverage — a
+// regression on only ImmediateStop would ship if only GracefulStop
+// were tested.
+func TestService_ImmediateStop_BeforeAwaitOsSigExit_NoSelfSignal_A2F2A(t *testing.T) {
+	s := newSVCF7TestService(false, ShutdownPhaseImmediate)
+	s._mu.Lock()
+	s._config = &config{}
+	s._mu.Unlock()
+
+	if s._sigHandlerReady.Load() {
+		t.Fatal("precondition: _sigHandlerReady must be false before awaitOsSigExit runs (A2-F-2A setup wrong)")
+	}
+
+	exited := startFakeQuitHandler(s, true)
+
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		s.ImmediateStop()
+	}()
+
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("A2-F-2A regression: ImmediateStop did not return within 5s with readiness=false — the _quit-send-only path is broken")
+	}
+
+	select {
+	case <-exited:
+	case <-time.After(1 * time.Second):
+		t.Fatal("A2-F-2A regression: fake quit handler did not run — _quit send was lost on the readiness=false path")
+	}
+
+	if s._sigHandlerReady.Load() {
+		t.Fatal("A2-F-2A regression: _sigHandlerReady flipped to true without awaitOsSigExit running")
+	}
+
+	// ImmediateStop-specific post-condition.
+	if !s._immediateStopRequested.Load() {
+		t.Fatal("A2-F-2A regression: ImmediateStop did not set _immediateStopRequested — legacy fallback taken instead of unified SVC-F7 routing")
+	}
+}
