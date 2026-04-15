@@ -15,6 +15,159 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ## [Unreleased]
 
+## [v1.8.1] — 2026-04-15
+
+Patch release. Coordinated sibling to `common v1.8.1`. Closes the three
+`connector` P1 findings and one P2 test-coverage finding from the
+`deep-review-2026-04-15-contrarian-pass4` cycle that landed on `master`
+after the `v1.8.0` tag was cut, plus bumps the `common` pin through to
+the sibling patch release so consumers pinning `connector v1.8.1` get
+the `common` P1 fixes transitively.
+
+No observable contract change from `v1.8.0`. Drop-in upgrade. Every
+public function signature in `client/`, `service/`, `adapters/`,
+`notifiergateway/`, and `webserver/` is preserved.
+
+Context: `v1.8.0` narrated a full "SP-008 P1 / P2 / P3 remediation
+wave", but three of the four P1 fixes and the P2 CI test actually
+landed on master AFTER the `v1.8.0` tag was cut. `v1.8.1` tags the
+tree with all of them in place. This is the first `connector` release
+cut under workspace rule #15 (release-artifact parity); the drift was
+surfaced as P0-JOINT-1 in the pass-4 contrarian review.
+
+### Changed — sibling pin bump
+
+- **`github.com/aldelo/common`** pin moved `v1.8.0 → v1.8.1`. The
+  sibling release contains:
+  - **SP-008 P1-COMMON-SNS-01** — `ensureSNSCtx` helper rollout
+    across all 25 SNS client callsites (default-30s deadline + nil
+    segCtx guard), plus `maskPhoneForXray` PII redaction wired into
+    `OptInPhoneNumber` / `CheckIfPhoneNumberIsOptedOut` /
+    `ListPhoneNumbersOptedOut` xray emit sites.
+  - **SP-008 P1-COMMON-KMS-01** — `atomic.Pointer[kms.KMS]`
+    migration that makes the torn-read invariant compiler-enforced
+    (a future refactor cannot silently reintroduce an unlocked
+    `kmsClient` read because the field is no longer directly
+    readable). The four hot-path multi-field snapshot methods
+    (`EncryptViaCmkAes256`, `DecryptViaCmkAes256`,
+    `EncryptViaCmkRsa2048`, `DecryptViaCmkRsa2048`) keep their
+    `RLock`s to pin client + key-name + xray-parent-segment to the
+    same publication generation.
+
+  See `github.com/aldelo/common` CHANGELOG `[v1.8.1]` entry for the
+  full narrative. Pure pin bump for `connector`; no consumer-visible
+  behavioral change at the `connector` surface.
+
+### Fixed — SP-008 P1-CONN-MET-A (`adapters/metrics`)
+
+- **Metrics interceptor panic recovery now emits terminal metrics.**
+  `adapters/metrics/grpc.go` previously wrapped the downstream
+  handler in a `defer func() { recover(); ... panic(r) }()` block
+  that re-panicked BEFORE the enclosing metric-emission logic ran,
+  so any handler panic produced a process crash with **zero** metric
+  emission (duration, status, error class — all lost). The fix
+  captures the panic value, emits the final metric batch with
+  status=`internal-error` and error-class=`panic-unwinding`, and
+  THEN re-panics to preserve the gRPC recovery middleware's
+  existing contract with `google.golang.org/grpc/recovery`. Net:
+  panics are now fully observable in the metrics pipeline before
+  the goroutine unwinds. Commit `95919ce`.
+
+### Fixed — SP-008 P1-CONN-SVC-02 (`service`)
+
+- **Serve error path no longer leaks `quitDone`.** When
+  `Service.Serve` returned an error from `startServer` (e.g.
+  CloudMap registration failure, invalid gRPC listener, custom
+  DNS lookup failure), the pre-fix flow left `_quit` / `_quitDone`
+  allocated under `_mu` but never closed `quitDone` and never
+  nil'd the Service-level fields. A later `GracefulStop` or
+  `ImmediateStop` call would observe the non-nil fields under
+  `RLock`, enter the unified SVC-F7 routing path, and block
+  forever on `<-quitDone` — because no goroutine was ever
+  installed to close it. Fix: the `startServer` error branch now
+  closes `quitDone` itself and nils `_quit` / `_quitDone` under
+  `_mu` before returning, so subsequent stop calls fall through
+  to the pre-Serve legacy safety-net path instead of the unified
+  path. A new regression test
+  (`TestService_ServeStartServerErrorFixup_NoDeadlock` +
+  `TestService_ServeStartServerErrorFixup_ImmediateStopNoDeadlock`
+  in `service_svc_serve_error_test.go`) replays the observable
+  steps of the Serve error flow and asserts that both stop paths
+  return within 3 seconds — without the fix, both tests hang
+  until the deadline. Commit `d0b5e13`.
+
+### Fixed — SP-008 P1-CONN-CL-A (`client`)
+
+- **Deleted dead client methods + annotated deferred gRPC
+  deprecations.** Removed four unused public methods on
+  `NotifierClient` that the pass-4 review identified as dead code
+  (zero call sites across the 38-repo workspace, zero downstream
+  imports per the grep cross-check). Added explicit deprecation
+  notices on the remaining `DialWithCustomCredentials` +
+  `DialWithCustomTransportCredentials` methods that are deferred
+  for removal until the `google.golang.org/grpc` v2 migration,
+  because those two are still actively called by
+  `libs/go-ms-remote-connector-apgs` and cannot be removed in a
+  patch release without breaking the consumer. Commit `beb89fb`.
+
+### Added — SP-008 P2-CONN-CI-01 (`service` — non-gated SVC-F8 test)
+
+- **`service_svc_f8_selfsignal_test.go`** — new non-gated
+  regression test that drives the real `awaitOsSigExit()`
+  lifecycle without Serve, CloudMap, or a listener. Before this
+  test, the SVC-F8 self-signal path (production contract: wake the
+  `signal.Notify`-blocked goroutine by delivering a self-SIGTERM
+  to `os.Getpid()` ONLY after a readiness flag set AFTER
+  `signal.Notify` is observed) was only exercised by the
+  integration-gated `TestService_GracefulStop_ReleasesRealServe`
+  (needs `CONNECTOR_RUN_INTEGRATION=1` + real AWS CloudMap +
+  `service.yaml`), so default CI had **zero guard** against a
+  SVC-F8 regression — and the existing non-gated FakeServe test
+  (documented lines 199–222 in `service_svc_f7_test.go`) bypasses
+  `awaitOsSigExit` entirely via a cooperative `_quit` send and
+  passes whether or not SVC-F8 is present. The new test covers
+  both `GracefulStop` and `ImmediateStop` self-signal paths, uses
+  the existing `newSVCF7TestService` + `startFakeQuitHandler`
+  helpers for quit-primitive allocation, and asserts four
+  invariants: (1) stop returns within 5s (self-signal reached the
+  registered Notify channel, not the runtime default handler),
+  (2) `awaitOsSigExit` goroutine returned within 1s of stop
+  (sig-demux observed the signal; no goroutine leak), (3) fake
+  quit handler ran (unified SVC-F7 routing intact), and (4)
+  `_sigHandlerReady` was cleared on exit (signal.Stop cleanup
+  reached). A regressed SVC-F8 where `_sigHandlerReady.Store(true)`
+  is moved BEFORE `signal.Notify` will cause the self-SIGTERM to
+  hit the Go runtime default handler and terminate the test
+  binary — a harder failure than an assertion, which catches the
+  regression faster. Commit `c5d2b18`.
+
+### Verified
+
+- `go build ./...` clean
+- `go vet ./...` clean
+- `go test -race -short ./...` clean (full package tree; `-short`
+  skips the pre-existing `TestClient_Dial` integration test that
+  needs a configured `client.yaml` + running gRPC server, per the
+  author's own comment at `client/client_test.go:128-134`)
+- `go test -race -run TestService_AwaitOsSigExit ./service/` clean
+  (the new P2-CONN-CI-01 regression tests run in sub-millisecond
+  and under the race detector)
+
+### Upgrade notes
+
+- **Drop-in from v1.8.0** for every workspace consumer. The only
+  pin change is `common v1.8.0 → v1.8.1`.
+- **Coordinated with:** `github.com/aldelo/common v1.8.1` (already
+  tagged on origin).
+- **Deferred follow-ups (not in this release, tracked separately):**
+  - aws-sdk-go v1 → v2 migration (pass-4 backlog items #14–#16;
+    deferred per user directive pending a coordinated workspace
+    sweep).
+  - Test hygiene: `service` package has at least one test that
+    writes `service/newtest.yaml` to the working directory instead
+    of using `t.TempDir()`; regenerates on every `go test ./service/`
+    run. Pre-existing, unrelated to v1.8.1 content.
+
 ## [v1.8.0] — 2026-04-15
 
 Minor release. Primary themes: **coordinated `go 1.26.2` baseline bump**
