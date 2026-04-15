@@ -41,12 +41,25 @@ package logger
 // uses the data.ZapLog wrapper that the rest of the connector already
 // depends on, plus google.golang.org/grpc/status for code extraction.
 //
+// PII defaults (SP-010 pass-5, 2026-04-15):
+//
+//   - WithLogMetadata defaults to false — gRPC metadata is off unless
+//     explicitly enabled, and even then the built-in denylist redacts
+//     common secret headers.
+//   - WithLogPeer defaults to false (A4-F1) — client IPs are personal
+//     data under GDPR/CCPA/UK-DPA and must not ship enabled by default.
+//     Set WithLogPeer(true) explicitly if your service requires peer
+//     logging and has documented the legal basis.
+//   - Error message bodies are truncated to maxErrorLen to bound log
+//     volume and prevent leakage of long internal trace strings.
+//
 // Wire it in from a Service:
 //
 //	z := svc.ZLog() // or any *data.ZapLog the caller manages
 //	uIntr, sIntr := logger.NewLoggerInterceptors(z,
 //	    logger.WithSensitiveHeaders("x-tenant-secret"),
 //	    logger.WithLogMetadata(true),
+//	    logger.WithLogPeer(true), // opt-in if peer logging required
 //	)
 //	svc.UnaryServerInterceptors  = append(svc.UnaryServerInterceptors,  uIntr)
 //	svc.StreamServerInterceptors = append(svc.StreamServerInterceptors, sIntr)
@@ -102,6 +115,26 @@ type loggerOptions struct {
 	logPeer          bool
 }
 
+// newDefaultLoggerOptions returns the default options applied when no
+// Option functions are passed to NewLoggerInterceptors. Centralized in
+// one place so that:
+//
+//  1. The constructor initializes exactly one definitive set of
+//     defaults (no risk of drift between multiple initialization sites).
+//  2. Tests can call this directly and assert the defaults without
+//     having to reach into the unexported cfg built inside the
+//     constructor's closure.
+//
+// SP-010 pass-5 A4-F1 (2026-04-15): logPeer defaults to false. See the
+// WithLogPeer godoc for the full rationale.
+func newDefaultLoggerOptions() *loggerOptions {
+	return &loggerOptions{
+		sensitiveHeaders: copyDenylist(defaultSensitiveHeaders),
+		logMetadata:      false,
+		logPeer:          false,
+	}
+}
+
 // Option configures the structured logger interceptors returned by
 // NewLoggerInterceptors. Options follow the standard functional-options
 // idiom — pass any number; later options override earlier ones.
@@ -128,9 +161,24 @@ func WithLogMetadata(enabled bool) Option {
 }
 
 // WithLogPeer controls whether the peer address (from grpc/peer) is
-// included on each log entry. Defaults to true; set false in environments
-// where client IPs are considered PII (e.g. EU consumer endpoints under
-// GDPR).
+// included on each log entry.
+//
+// Default: false. SP-010 pass-5 A4-F1 (2026-04-15) flipped this from
+// true → false because client IPs are personal data under GDPR, CCPA,
+// and UK-DPA; the previous default silently pulled every deployment of
+// this package into a data-protection amendment that nobody signed up
+// for. A package named "PII-aware logger" should not require opt-out
+// to be PII-safe.
+//
+// Set WithLogPeer(true) explicitly in environments where peer logging
+// is required (typically internal-only backends, compliance-audit
+// pipelines, or non-regulated B2B deployments). Document the decision
+// in your service's data-retention policy when you do.
+//
+// Breaking change notice: services that previously relied on the
+// implicit true default will need to add WithLogPeer(true) to their
+// interceptor construction when upgrading past v1.8.2. Grep for
+// NewLoggerInterceptors at upgrade time.
 func WithLogPeer(enabled bool) Option {
 	return func(o *loggerOptions) { o.logPeer = enabled }
 }
@@ -154,11 +202,7 @@ func WithLogPeer(enabled bool) Option {
 // symbols for backward compatibility. New integrations should use this
 // constructor.
 func NewLoggerInterceptors(z *data.ZapLog, opts ...Option) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
-	cfg := &loggerOptions{
-		sensitiveHeaders: copyDenylist(defaultSensitiveHeaders),
-		logMetadata:      false,
-		logPeer:          true,
-	}
+	cfg := newDefaultLoggerOptions()
 	for _, opt := range opts {
 		opt(cfg)
 	}

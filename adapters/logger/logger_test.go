@@ -18,6 +18,7 @@ package logger
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -377,6 +378,101 @@ func TestCopyDenylist_Isolation(t *testing.T) {
 	a["new-header"] = struct{}{}
 	if _, leaked := defaultSensitiveHeaders["new-header"]; leaked {
 		t.Fatal("extension leaked into package default — pollution risk")
+	}
+}
+
+// -----------------------------------------------------------------------
+// Default options — SP-010 pass-5 A4-F1 (2026-04-15)
+// -----------------------------------------------------------------------
+//
+// These tests pin the PII-safe defaults produced by
+// newDefaultLoggerOptions. The A4-F1 fix flipped logPeer from true →
+// false because client IPs are personal data under GDPR/CCPA/UK-DPA
+// and must not ship enabled by default. newDefaultLoggerOptions is
+// the single point of truth for the defaults — both the constructor
+// and these tests call it, so drift between "documented default" and
+// "actual default" is impossible.
+//
+// Mutation probe (quality gate): in logger.go, revert the logPeer
+// default from false back to true (e.g. `logPeer: true` in
+// newDefaultLoggerOptions). TestDefaultLoggerOptions_LogPeerIsFalse_A4F1
+// MUST turn red. Restore the fix and it MUST return to green. This
+// confirms the test exercises the causal path (the actual default-
+// initialization function), not a tautological postcondition.
+
+func TestDefaultLoggerOptions_LogPeerIsFalse_A4F1(t *testing.T) {
+	cfg := newDefaultLoggerOptions()
+	if cfg.logPeer {
+		t.Fatalf("A4-F1 regression: newDefaultLoggerOptions().logPeer must default to false under GDPR/CCPA/UK-DPA; got true")
+	}
+}
+
+func TestDefaultLoggerOptions_LogMetadataIsFalse(t *testing.T) {
+	// Pin the pre-existing safe default for metadata logging.
+	cfg := newDefaultLoggerOptions()
+	if cfg.logMetadata {
+		t.Fatalf("newDefaultLoggerOptions().logMetadata must default to false (headers are a common PII source); got true")
+	}
+}
+
+func TestDefaultLoggerOptions_SensitiveHeadersSeeded(t *testing.T) {
+	// Pin that the default denylist is populated (not nil, not empty).
+	// Without this, WithSensitiveHeaders on top of a bad default could
+	// still silently log authorization headers.
+	cfg := newDefaultLoggerOptions()
+	if cfg.sensitiveHeaders == nil {
+		t.Fatal("newDefaultLoggerOptions().sensitiveHeaders must be pre-seeded, got nil")
+	}
+	for _, required := range []string{"authorization", "cookie", "x-api-key", "password", "token"} {
+		if _, ok := cfg.sensitiveHeaders[required]; !ok {
+			t.Errorf("newDefaultLoggerOptions().sensitiveHeaders missing required denylist entry %q", required)
+		}
+	}
+}
+
+func TestWithLogPeer_OptInFlipsDefault(t *testing.T) {
+	// The A4-F1 flip must not remove the ability to opt in — verify
+	// WithLogPeer(true) still works for the (documented) use cases
+	// where peer logging is required.
+	cfg := newDefaultLoggerOptions()
+	if cfg.logPeer {
+		t.Fatal("precondition: default logPeer must be false (A4-F1)")
+	}
+	WithLogPeer(true)(cfg)
+	if !cfg.logPeer {
+		t.Error("WithLogPeer(true) must flip logPeer from false → true")
+	}
+	// Idempotent off — opting back out should also work.
+	WithLogPeer(false)(cfg)
+	if cfg.logPeer {
+		t.Error("WithLogPeer(false) must flip logPeer from true → false")
+	}
+}
+
+func TestNewLoggerInterceptors_UsesDefaultLoggerOptions_A4F1(t *testing.T) {
+	// Source-invariant pin: NewLoggerInterceptors must initialize its
+	// cfg from newDefaultLoggerOptions() (and not reintroduce an
+	// inline literal with logPeer: true). This catches the specific
+	// regression mode where someone "simplifies" the constructor by
+	// inlining the struct literal and accidentally restores the old
+	// unsafe default.
+	src, err := os.ReadFile("logger.go")
+	if err != nil {
+		t.Fatalf("cannot read logger.go: %v", err)
+	}
+	body := string(src)
+
+	// Positive: the constructor must route through the helper.
+	want := `cfg := newDefaultLoggerOptions()`
+	if !strings.Contains(body, want) {
+		t.Errorf("A4-F1 regression: expected NewLoggerInterceptors to call newDefaultLoggerOptions(), but did not find %q in logger.go", want)
+	}
+
+	// Negative: the old inline literal with logPeer: true must not
+	// exist anywhere in the file.
+	absent := "logPeer:          true"
+	if strings.Contains(body, absent) {
+		t.Errorf("A4-F1 regression: unsafe inline default still present in logger.go: %q", absent)
 	}
 }
 
