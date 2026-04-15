@@ -59,18 +59,42 @@ const (
 func NewServerInterceptors(sink Sink) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
 	s := sinkOrNop(sink)
 
-	unary := func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	// Both paths use a deferred recorder so the metric is emitted on:
+	//   (a) normal return — captures err via named return
+	//   (b) panic — the panicked flag stays true; record Internal and
+	//       let the panic propagate to the outer recovery interceptor.
+	// This removes the pre-P1-CONN-MET-A bug where a panic inside
+	// handler unwound past the inline recordServer call, leaving the
+	// panic invisible to the metrics stream.
+
+	unary := func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
 		start := time.Now()
-		resp, err := handler(ctx, req)
-		recordServer(s, info.FullMethod, time.Since(start), err)
-		return resp, err
+		panicked := true
+		defer func() {
+			if panicked {
+				recordServer(s, info.FullMethod, time.Since(start), status.Error(codes.Internal, "panic"))
+			} else {
+				recordServer(s, info.FullMethod, time.Since(start), err)
+			}
+		}()
+		resp, err = handler(ctx, req)
+		panicked = false
+		return
 	}
 
-	stream := func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	stream := func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 		start := time.Now()
-		err := handler(srv, ss)
-		recordServer(s, info.FullMethod, time.Since(start), err)
-		return err
+		panicked := true
+		defer func() {
+			if panicked {
+				recordServer(s, info.FullMethod, time.Since(start), status.Error(codes.Internal, "panic"))
+			} else {
+				recordServer(s, info.FullMethod, time.Since(start), err)
+			}
+		}()
+		err = handler(srv, ss)
+		panicked = false
+		return
 	}
 
 	return unary, stream
@@ -85,24 +109,44 @@ func NewServerInterceptors(sink Sink) (grpc.UnaryServerInterceptor, grpc.StreamS
 func NewClientInterceptors(sink Sink) (grpc.UnaryClientInterceptor, grpc.StreamClientInterceptor) {
 	s := sinkOrNop(sink)
 
+	// See NewServerInterceptors for the deferred-recorder pattern — same
+	// invariant applies: an invoker / streamer panic must not swallow the
+	// client-side metric.
+
 	unary := func(ctx context.Context, method string, req, reply interface{},
-		cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
 		start := time.Now()
-		err := invoker(ctx, method, req, reply, cc, opts...)
-		recordClient(s, method, time.Since(start), err)
-		return err
+		panicked := true
+		defer func() {
+			if panicked {
+				recordClient(s, method, time.Since(start), status.Error(codes.Internal, "panic"))
+			} else {
+				recordClient(s, method, time.Since(start), err)
+			}
+		}()
+		err = invoker(ctx, method, req, reply, cc, opts...)
+		panicked = false
+		return
 	}
 
 	stream := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn,
-		method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		method string, streamer grpc.Streamer, opts ...grpc.CallOption) (cs grpc.ClientStream, err error) {
 		start := time.Now()
-		cs, err := streamer(ctx, desc, cc, method, opts...)
-		// We instrument stream creation only — full-stream duration would
-		// require wrapping the ClientStream which is out of scope for the
-		// baseline. Per-message metrics belong in a separate, opt-in
-		// wrapper.
-		recordClient(s, method, time.Since(start), err)
-		return cs, err
+		panicked := true
+		defer func() {
+			// We instrument stream creation only — full-stream duration would
+			// require wrapping the ClientStream which is out of scope for the
+			// baseline. Per-message metrics belong in a separate, opt-in
+			// wrapper.
+			if panicked {
+				recordClient(s, method, time.Since(start), status.Error(codes.Internal, "panic"))
+			} else {
+				recordClient(s, method, time.Since(start), err)
+			}
+		}()
+		cs, err = streamer(ctx, desc, cc, method, opts...)
+		panicked = false
+		return
 	}
 
 	return unary, stream

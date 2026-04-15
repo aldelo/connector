@@ -949,6 +949,121 @@ func TestNewServerInterceptors_Unary_Error(t *testing.T) {
 	}
 }
 
+// TestNewServerInterceptors_Unary_Panic is the P1-CONN-MET-A regression.
+// Before the fix, handler panics unwound past the inline recordServer call
+// and the metric was never emitted — directly contradicting the godoc that
+// said "panics still register as Internal errors in the metrics stream".
+// After the fix, the deferred recorder sees panicked=true and records the
+// Internal-coded counter before letting the panic propagate.
+func TestNewServerInterceptors_Unary_Panic(t *testing.T) {
+	sink := NewMemorySink()
+	uIntr, _ := NewServerInterceptors(sink)
+
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		panic("boom")
+	}
+
+	// Catch the propagated panic — we want the metric recorded AND the
+	// panic to continue unwinding so an outer recovery interceptor can see
+	// it. Swallowing it in the metrics layer would be the original bug in
+	// reverse.
+	recovered := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+			}
+		}()
+		_, _ = uIntr(context.Background(), nil,
+			&grpc.UnaryServerInfo{FullMethod: "/x.Y/Z"}, handler)
+	}()
+
+	if !recovered {
+		t.Fatalf("interceptor swallowed the panic — it must propagate")
+	}
+
+	cs, _ := sink.Snapshot()
+	wantReq := seriesKey(mServerRequests, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	wantErr := seriesKey(mServerErrors, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	if !findCounter(cs, wantReq, 1) {
+		t.Errorf("missing panic-path request counter %q", wantReq)
+	}
+	if !findCounter(cs, wantErr, 1) {
+		t.Errorf("missing panic-path error counter %q", wantErr)
+	}
+}
+
+// TestNewServerInterceptors_Stream_Panic is the stream-handler twin of the
+// unary panic test — same invariant, separate code path.
+func TestNewServerInterceptors_Stream_Panic(t *testing.T) {
+	sink := NewMemorySink()
+	_, sIntr := NewServerInterceptors(sink)
+
+	handler := func(srv interface{}, ss grpc.ServerStream) error {
+		panic("boom")
+	}
+
+	recovered := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+			}
+		}()
+		_ = sIntr(nil, nil, &grpc.StreamServerInfo{FullMethod: "/x.Y/Z"}, handler)
+	}()
+
+	if !recovered {
+		t.Fatalf("stream interceptor swallowed the panic — it must propagate")
+	}
+
+	cs, _ := sink.Snapshot()
+	wantReq := seriesKey(mServerRequests, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	wantErr := seriesKey(mServerErrors, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	if !findCounter(cs, wantReq, 1) {
+		t.Errorf("missing stream panic-path request counter %q", wantReq)
+	}
+	if !findCounter(cs, wantErr, 1) {
+		t.Errorf("missing stream panic-path error counter %q", wantErr)
+	}
+}
+
+// TestNewClientInterceptors_Unary_Panic is the client-side twin — the same
+// panic invariant must hold when the invoker panics.
+func TestNewClientInterceptors_Unary_Panic(t *testing.T) {
+	sink := NewMemorySink()
+	uIntr, _ := NewClientInterceptors(sink)
+
+	invoker := func(ctx context.Context, method string, req, reply interface{},
+		cc *grpc.ClientConn, opts ...grpc.CallOption) error {
+		panic("boom")
+	}
+
+	recovered := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+			}
+		}()
+		_ = uIntr(context.Background(), "/x.Y/Z", nil, nil, nil, invoker)
+	}()
+
+	if !recovered {
+		t.Fatalf("client interceptor swallowed the panic — it must propagate")
+	}
+
+	cs, _ := sink.Snapshot()
+	wantReq := seriesKey(mClientRequests, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	wantErr := seriesKey(mClientErrors, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	if !findCounter(cs, wantReq, 1) {
+		t.Errorf("missing client panic-path request counter %q", wantReq)
+	}
+	if !findCounter(cs, wantErr, 1) {
+		t.Errorf("missing client panic-path error counter %q", wantErr)
+	}
+}
+
 func TestNewServerInterceptors_NilSink_Noop(t *testing.T) {
 	uIntr, sIntr := NewServerInterceptors(nil)
 	if uIntr == nil || sIntr == nil {
