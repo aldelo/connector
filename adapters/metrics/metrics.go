@@ -247,6 +247,16 @@ func newHistogramState() *histogramState {
 // observations' sum. This matches the pre-atomic behavior under a
 // single lock.
 func (h *histogramState) observe(v float64) {
+	// SP-008 re-eval follow-up (2026-04-15): defensive nil-receiver guard.
+	// histogramState is constructed exclusively via newHistogramState in
+	// MemorySink.{Counter,Observe} slow paths and is never manually
+	// assembled in library code today. The guard is belt-and-suspenders
+	// against a future refactor (or a test fake) that could set a
+	// histogramState field to nil and silently panic any caller holding a
+	// reference. Cost is one branch predicted never-taken.
+	if h == nil {
+		return
+	}
 	h.count.Add(1)
 
 	// sum += v
@@ -281,10 +291,28 @@ func (h *histogramState) observe(v float64) {
 	}
 }
 
-// NewMemorySink returns a fresh, empty MemorySink ready for use. It has
-// no cardinality cap — every distinct (name, labels) pair allocates a
-// new series. For bounded-memory behavior, use NewMemorySinkWithLimit.
-func NewMemorySink() *MemorySink {
+// DefaultMemorySinkLimit is the cardinality cap applied by NewMemorySink
+// unless the caller explicitly opts into NewMemorySinkUnbounded or
+// overrides via NewMemorySinkWithLimit.
+//
+// SP-008 P2-CONN-1 (2026-04-15): bounded-by-default. The previous
+// NewMemorySink constructor installed no cap, which meant a
+// badly-designed label (request ID, raw URL path, tenant ID — any
+// high-cardinality drift value) would grow the series map without
+// bound until the process OOM'd. The cap is chosen at 10_000 distinct
+// series because (a) a well-designed surface in a single process
+// rarely exceeds low thousands, (b) overflow is visibly signalled via
+// OverflowDropped() and the throttled audit log so operators can see
+// the problem before it becomes OOM, and (c) existing series continue
+// to accept writes after the cap, so the metrics you already care
+// about remain observable.
+const DefaultMemorySinkLimit = 10_000
+
+// newBareMemorySink allocates a MemorySink with shared invariants but
+// no cardinality cap applied. Internal only — every public constructor
+// delegates here and then sets labelLimit explicitly so the default is
+// always visible at the call site.
+func newBareMemorySink() *MemorySink {
 	return &MemorySink{
 		counters:       make(map[string]*atomic.Int64),
 		histograms:     make(map[string]*histogramState),
@@ -297,18 +325,55 @@ func NewMemorySink() *MemorySink {
 	}
 }
 
+// NewMemorySink returns a MemorySink with a safe-by-default cardinality
+// cap of DefaultMemorySinkLimit (10,000) distinct (name, labels)
+// series. When a new series would exceed the cap, it is silently
+// dropped and OverflowDropped() is incremented; existing series
+// continue to accept writes.
+//
+// SP-008 P2-CONN-1 (2026-04-15) — BREAKING CHANGE from v1.7.x:
+// the pre-v1.8.0 NewMemorySink had no cap and could grow without
+// bound under label-design mistakes. If you need the old unbounded
+// behavior (e.g. for a test harness), call NewMemorySinkUnbounded.
+// If you need a specific cap, call NewMemorySinkWithLimit. Callers
+// with a well-designed metric surface (bounded label values) will
+// not notice any behavioral difference at the default cap.
+func NewMemorySink() *MemorySink {
+	m := newBareMemorySink()
+	m.labelLimit = DefaultMemorySinkLimit
+	return m
+}
+
+// NewMemorySinkUnbounded returns a MemorySink with NO cardinality cap.
+// Every distinct (name, labels) pair allocates a new series and the
+// sink will grow without bound until the process runs out of memory.
+//
+// This constructor exists solely for callers who (a) fully trust their
+// label-value surface (e.g. a unit test with a hard-coded set of
+// series) OR (b) have an external circuit-breaker that will kill the
+// process before cardinality becomes unsafe.
+//
+// Prefer NewMemorySink (safe default) or NewMemorySinkWithLimit
+// (explicit cap) unless you have a specific reason to want unbounded
+// growth.
+func NewMemorySinkUnbounded() *MemorySink {
+	// labelLimit stays 0 which is the internal sentinel for
+	// "no cap"; see the Counter/Observe slow-path checks.
+	return newBareMemorySink()
+}
+
 // NewMemorySinkWithLimit returns a MemorySink that caps the total
 // number of distinct (name, labels) series across counters and
 // histograms combined. When a new series would exceed limit, it is
 // silently dropped and OverflowDropped() is incremented. A limit <= 0
-// is equivalent to NewMemorySink (unlimited).
+// is equivalent to NewMemorySinkUnbounded (no cap).
 //
 // Existing series continue to accept writes even after the cap is
 // reached — only the *creation* of new series is gated. This preserves
 // continuity for the metrics you already care about while bounding the
 // blast radius of a label-design mistake.
 func NewMemorySinkWithLimit(limit int) *MemorySink {
-	m := NewMemorySink()
+	m := newBareMemorySink()
 	m.labelLimit = limit
 	return m
 }

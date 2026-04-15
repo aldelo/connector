@@ -1110,7 +1110,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.Seg.AddError(err)
+				_ = seg.SafeAddError(err)
 			}
 		}()
 	}
@@ -1740,7 +1740,7 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.Seg.AddError(err)
+				_ = seg.SafeAddError(err)
 			}
 		}()
 	}
@@ -1822,7 +1822,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.Seg.AddError(err)
+				_ = seg.SafeAddError(err)
 			}
 		}()
 	}
@@ -1882,7 +1882,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		msg := "Set Service Health Report Update To Data Store Skipped: " + "ServiceID Not Defined in Config"
 
 		if seg != nil {
-			_ = seg.Seg.AddMetadata("Skipped-Reason", msg)
+			_ = seg.SafeAddMetadata("Skipped-Reason", msg)
 		}
 
 		log.Println(msg)
@@ -1893,7 +1893,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		msg := "Set Service Health Report Update To Data Store Skipped: " + "InstanceID Not Defined in Config"
 
 		if seg != nil {
-			_ = seg.Seg.AddMetadata("Skipped-Reason", msg)
+			_ = seg.SafeAddMetadata("Skipped-Reason", msg)
 		}
 
 		log.Println(msg)
@@ -1905,7 +1905,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		msg := "Set Service Health Report Update To Data Store Skipped: " + "Service Host Info Not Ready"
 
 		if seg != nil {
-			_ = seg.Seg.AddMetadata("Skipped-Reason", msg)
+			_ = seg.SafeAddMetadata("Skipped-Reason", msg)
 		}
 
 		log.Println(msg)

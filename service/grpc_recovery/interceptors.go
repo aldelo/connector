@@ -37,10 +37,19 @@ func UnaryServerInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 func StreamServerInterceptor(opts ...Option) grpc.StreamServerInterceptor {
 	o := evaluateOptions(opts)
 	return func(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+		// SP-008 P3-CONN-3 (2026-04-15): snapshot ctx once at the top
+		// of the interceptor so the deferred recover never calls
+		// stream.Context() on a potentially-broken stream. If the
+		// stream itself is the panic trigger (test-harness injection,
+		// future gRPC regression), stream.Context() inside the defer
+		// could re-panic with no further recovery. Holding the ctx
+		// reference from the entry moment eliminates that second-
+		// panic window.
+		ctx := stream.Context()
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("grpc_recovery: recovered from panic: %v\n%s", r, debug.Stack())
-				err = recoverFrom(stream.Context(), r, o.recoveryHandlerFunc)
+				err = recoverFrom(ctx, r, o.recoveryHandlerFunc)
 			}
 		}()
 

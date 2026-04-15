@@ -36,6 +36,7 @@ package notifiergateway
 //     without touching the network.
 
 import (
+	"container/list"
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -54,10 +55,103 @@ import (
 // certificate. Tests override this variable to inject a stub fetcher.
 var snsCertFetcher = defaultFetchSNSCert
 
-// certCache memoizes fetched SNS signing certificates keyed by URL.
-// SNS signing certs rotate infrequently; process restart is the expected
-// invalidation event.
-var certCache sync.Map
+// certCacheMax caps the in-process SNS signing cert cache at a small
+// LRU.
+//
+// SP-008 P2-CONN-2 (2026-04-15): the prior implementation used an
+// unbounded sync.Map. The allowlist pattern
+// `^https://sns\.[a-z0-9-]+\.amazonaws\.com/` already bounds the
+// reachable host set to ~30 AWS regions, so real-world growth is tiny
+// — but "tiny but unbounded" is still unbounded, and a future
+// allowlist loosening or a misconfigured regex could quietly uncap the
+// cache. Pinning the cap here turns the failure mode from "slow growth
+// until OOM" into "oldest entry evicted on LRU miss, visible in the
+// process memory profile as a stable footprint". 16 entries comfortably
+// covers every AWS region plus a few rotation-overlap entries.
+const certCacheMax = 16
+
+// lruCertCache is a bounded LRU cache of x509.Certificate values keyed
+// by cert URL. A sync.Mutex guards both the map and the ordering list
+// so Get/Put are atomic; read traffic is expected to be vastly higher
+// than rotation-driven writes, but the lock cost is negligible at ~1-2
+// fetches per rotation cycle.
+type lruCertCache struct {
+	mu    sync.Mutex
+	items map[string]*list.Element
+	order *list.List // MRU at front, LRU at back
+	cap   int
+}
+
+type certCacheEntry struct {
+	url  string
+	cert *x509.Certificate
+}
+
+// newLRUCertCache allocates an empty cache with the given capacity.
+// A non-positive cap disables the cache entirely (every Get misses,
+// every Put is a no-op); production callers should always pass a
+// positive cap such as certCacheMax.
+func newLRUCertCache(cap int) *lruCertCache {
+	return &lruCertCache{
+		items: make(map[string]*list.Element, cap),
+		order: list.New(),
+		cap:   cap,
+	}
+}
+
+// Get returns the cached certificate for url, promoting the entry to
+// MRU on a hit. ok is false if the url is not cached.
+func (c *lruCertCache) Get(url string) (*x509.Certificate, bool) {
+	if c.cap <= 0 {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.items[url]; ok {
+		c.order.MoveToFront(elem)
+		return elem.Value.(*certCacheEntry).cert, true
+	}
+	return nil, false
+}
+
+// Put inserts or refreshes a cache entry. If the cache is at capacity
+// and the url is not already present, the least-recently-used entry
+// is evicted to make room.
+func (c *lruCertCache) Put(url string, cert *x509.Certificate) {
+	if c.cap <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.items[url]; ok {
+		elem.Value.(*certCacheEntry).cert = cert
+		c.order.MoveToFront(elem)
+		return
+	}
+	if c.order.Len() >= c.cap {
+		oldest := c.order.Back()
+		if oldest != nil {
+			c.order.Remove(oldest)
+			delete(c.items, oldest.Value.(*certCacheEntry).url)
+		}
+	}
+	elem := c.order.PushFront(&certCacheEntry{url: url, cert: cert})
+	c.items[url] = elem
+}
+
+// Reset drops all cached entries. Called by tests; safe to call at
+// runtime but intended as a test-only knob.
+func (c *lruCertCache) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[string]*list.Element, c.cap)
+	c.order = list.New()
+}
+
+// certCache memoizes fetched SNS signing certificates in a bounded
+// LRU keyed by URL. SNS signing certs rotate infrequently; process
+// restart is the expected full-invalidation event.
+var certCache = newLRUCertCache(certCacheMax)
 
 // maxCertBodyBytes caps the cert response body size to prevent a hostile
 // upstream from exhausting memory. 1 MiB is ~500x the size of a real cert.
@@ -161,10 +255,8 @@ func verifyAWSSNSSignature(payload, signature, signatureVersion, signingCertURL 
 //   - PEM-decodes and x509-parses.
 //   - Caches on success.
 func defaultFetchSNSCert(certURL string) (*x509.Certificate, error) {
-	if cached, ok := certCache.Load(certURL); ok {
-		if cert, ok := cached.(*x509.Certificate); ok {
-			return cert, nil
-		}
+	if cert, ok := certCache.Get(certURL); ok {
+		return cert, nil
 	}
 
 	// Defense-in-depth — re-check the host allowlist inside the fetcher.
@@ -197,6 +289,6 @@ func defaultFetchSNSCert(certURL string) (*x509.Certificate, error) {
 		return nil, fmt.Errorf("parse x509: %w", err)
 	}
 
-	certCache.Store(certURL, cert)
+	certCache.Put(certURL, cert)
 	return cert, nil
 }

@@ -77,7 +77,7 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 				traceErr := panicTraceError(r)
 				clientErr := panicClientError(r)
 				if createdSeg && seg != nil && seg.Seg != nil {
-					_ = seg.Seg.AddError(traceErr)
+					_ = seg.SafeAddError(traceErr)
 					seg.Close()
 				} else if segCtx := awsxray.GetSegment(ctx); segCtx != nil {
 					_ = segCtx.AddError(traceErr)
@@ -87,7 +87,7 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 			}
 			if createdSeg && seg != nil && seg.Seg != nil {
 				if err != nil {
-					_ = seg.Seg.AddError(err)
+					_ = seg.SafeAddError(err)
 				}
 				seg.Close()
 			}
@@ -144,7 +144,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 				traceErr := panicTraceError(r)
 				clientErr := panicClientError(r)
 				if seg != nil && seg.Seg != nil {
-					_ = seg.Seg.AddError(traceErr)
+					_ = seg.SafeAddError(traceErr)
 					seg.Close()
 				}
 				err = status.Error(codes.Internal, clientErr.Error())
@@ -152,7 +152,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 			}
 			if seg != nil && seg.Seg != nil {
 				if err != nil {
-					_ = seg.Seg.AddError(err)
+					_ = seg.SafeAddError(err)
 				}
 				seg.Close()
 			}
@@ -227,7 +227,7 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 		outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 		if hdrErr := grpc.SetHeader(segCtx, outgoingMD); hdrErr != nil {
-			_ = seg.Seg.AddError(hdrErr)
+			_ = seg.SafeAddError(hdrErr)
 			err = status.Error(codes.Internal, hdrErr.Error())
 			return nil, err
 		}
@@ -332,7 +332,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 			traceErr := panicTraceError(r)
 			clientErr := panicClientError(r)
 			if seg != nil && seg.Seg != nil {
-				_ = seg.Seg.AddError(traceErr)
+				_ = seg.SafeAddError(traceErr)
 				seg.Close()
 			}
 			err = status.Error(codes.Internal, clientErr.Error())
@@ -340,7 +340,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 		}
 		if seg != nil && seg.Seg != nil {
 			if err != nil {
-				_ = seg.Seg.AddError(err)
+				_ = seg.SafeAddError(err)
 			}
 			seg.Close()
 		}
@@ -431,7 +431,7 @@ func TracerStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *
 	outgoingMD.Set("x-amzn-tr-id", seg.Seg.TraceID)
 
 	if hdrErr := grpc.SetHeader(segCtx, outgoingMD); hdrErr != nil {
-		_ = seg.Seg.AddError(hdrErr)
+		_ = seg.SafeAddError(hdrErr)
 		return status.Error(codes.Internal, hdrErr.Error())
 	}
 

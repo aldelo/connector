@@ -458,13 +458,13 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 	seg := xray.NewSegmentNullable("GrpcClient-NotifierClient-SubscribeTopic")
 	if seg != nil {
-		_ = seg.Seg.AddMetadata("GrpcClient-SessionID", sessionId)
-		_ = seg.Seg.AddMetadata("Subscribe-TopicARN", topicArn)
+		_ = seg.SafeAddMetadata("GrpcClient-SessionID", sessionId)
+		_ = seg.SafeAddMetadata("Subscribe-TopicARN", topicArn)
 
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.Seg.AddError(err)
+				_ = seg.SafeAddError(err)
 			}
 		}()
 	}
@@ -631,8 +631,18 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 						}
 
 						// check if already received within the last 10 seconds (deduplication)
-						// Include action in key so ONLINE and OFFLINE for the same host are not deduplicated
-						recvKey := fmt.Sprintf("%s:%d:%s", ip, port, strings.ToUpper(hostDiscNotification.Action))
+						// Include action in key so ONLINE and OFFLINE for the same host are not deduplicated.
+						//
+						// SP-008 P3-CONN-5 (2026-04-15): hoist ToUpper once and
+						// drop the fmt.Sprintf in favor of direct concatenation.
+						// The prior form allocated a fmt format-state plus the
+						// result string (~2 allocs/call) AND re-ran ToUpper at
+						// line 661 below — now one ToUpper, one concat alloc.
+						// Notification rate is low, so this is housekeeping
+						// rather than a hot-path optimization, but it removes
+						// the double-ToUpper bug along the way.
+						action := strings.ToUpper(hostDiscNotification.Action)
+						recvKey := ip + ":" + util.UintToStr(port) + ":" + action
 						now := time.Now()
 						if t, ok := recvMap[recvKey]; ok && util.AbsInt(util.SecondsDiff(now, t)) <= 10 {
 							// already in map within dedup window, skip
@@ -658,7 +668,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 							}
 						}
 
-						isOnline := strings.ToUpper(hostDiscNotification.Action) == "ONLINE"
+						isOnline := action == "ONLINE"
 
 						// notify the discovered host
 						// CL-F5: wrap in safeCall so a panic in a
@@ -803,13 +813,13 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 
 	seg := xray.NewSegmentNullable("GrpcClient-NotifierClient-Unsubscribe")
 	if seg != nil {
-		_ = seg.Seg.AddMetadata("GrpcClient-SessionID", subID)
-		_ = seg.Seg.AddMetadata("Subscribe-TopicARN", subTopic)
+		_ = seg.SafeAddMetadata("GrpcClient-SessionID", subID)
+		_ = seg.SafeAddMetadata("Subscribe-TopicARN", subTopic)
 
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.Seg.AddError(err)
+				_ = seg.SafeAddError(err)
 			}
 		}()
 	}

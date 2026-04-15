@@ -34,7 +34,6 @@ import (
 	"encoding/base64"
 	"math/big"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -105,10 +104,10 @@ func withStubFetcher(t *testing.T, s *testSigner) {
 	snsCertFetcher = func(url string) (*x509.Certificate, error) {
 		return s.cert, nil
 	}
-	certCache = sync.Map{}
+	certCache.Reset()
 	t.Cleanup(func() {
 		snsCertFetcher = prev
-		certCache = sync.Map{}
+		certCache.Reset()
 	})
 }
 
@@ -209,10 +208,10 @@ func TestVerifyAWSSNSSignature_OffAWSCertURL_Rejected(t *testing.T) {
 		fetcherCalled = true
 		return signer.cert, nil
 	}
-	certCache = sync.Map{}
+	certCache.Reset()
 	t.Cleanup(func() {
 		snsCertFetcher = prev
-		certCache = sync.Map{}
+		certCache.Reset()
 	})
 
 	evilURLs := []string{
@@ -262,8 +261,8 @@ func TestVerifyAWSSNSSignature_UnsupportedVersion(t *testing.T) {
 // -------------------------------------------------------------------------
 func TestDefaultFetchSNSCert_HostAllowlistDefenseInDepth(t *testing.T) {
 	// Reset certCache so a prior test entry cannot satisfy the Load() path.
-	certCache = sync.Map{}
-	t.Cleanup(func() { certCache = sync.Map{} })
+	certCache.Reset()
+	t.Cleanup(func() { certCache.Reset() })
 
 	_, err := defaultFetchSNSCert("https://attacker.example.com/cert.pem")
 	if err == nil {

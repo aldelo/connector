@@ -65,23 +65,23 @@ import (
 
 // Issue #16: Define constants for magic numbers
 const (
-	defaultCacheExpireSeconds         = 300
-	defaultDialTimeoutSeconds         = 5
-	defaultHealthCheckInterval        = 250 * time.Millisecond
-	defaultWebServerCheckInterval     = 500 * time.Millisecond
-	defaultNotifierReconnectDelay     = 5 * time.Second
-	maxTCPPort                        = 65535
-	defaultMaxDiscoveryResults        = 100
-	connectionCloseDelay              = 100 * time.Millisecond
+	defaultCacheExpireSeconds     = 300
+	defaultDialTimeoutSeconds     = 5
+	defaultHealthCheckInterval    = 250 * time.Millisecond
+	defaultWebServerCheckInterval = 500 * time.Millisecond
+	defaultNotifierReconnectDelay = 5 * time.Second
+	maxTCPPort                    = 65535
+	defaultMaxDiscoveryResults    = 100
+	connectionCloseDelay          = 100 * time.Millisecond
 	// P2-13: max time Dial() will wait for a stale notifier reconnect
 	// goroutine from a prior lifecycle to drain. Should be longer than
 	// a single DoNotifierAlertService attempt (which has its own SDK
 	// timeout). 5s matches defaultNotifierReconnectDelay.
-	notifierReconnectDrainTimeout = 5 * time.Second
-	webServerShutdownTimeout          = 5 * time.Second
-	webServerStopChannelTimeout       = 6 * time.Second
-	deregisterInstanceCheckInterval   = 250 * time.Millisecond
-	deregisterInstanceMaxRetries      = 20
+	notifierReconnectDrainTimeout   = 5 * time.Second
+	webServerShutdownTimeout        = 5 * time.Second
+	webServerStopChannelTimeout     = 6 * time.Second
+	deregisterInstanceCheckInterval = 250 * time.Millisecond
+	deregisterInstanceMaxRetries    = 20
 )
 
 // client side cache
@@ -482,10 +482,10 @@ type Client struct {
 	// guard notifier client access to avoid races across callbacks/reconnect/close
 	notifierMu sync.Mutex
 
-	webServer        *ws.WebServer // track started web server for shutdown
-	webServerStop    chan struct{}  // signal channel to stop web server
-	webServerMu      sync.Mutex
-	_origWebCleanUp  func()        // FIX #33: original user-provided cleanup, prevents closure accumulation
+	webServer       *ws.WebServer // track started web server for shutdown
+	webServerStop   chan struct{} // signal channel to stop web server
+	webServerMu     sync.Mutex
+	_origWebCleanUp func() // FIX #33: original user-provided cleanup, prevents closure accumulation
 }
 
 // resetClosedChLocked allocates a fresh closedCh for a new client
@@ -537,9 +537,9 @@ func (c *Client) markClosedCh() {
 func (c *Client) setEndpoints(eps []*serviceEndpoint) {
 	c.endpointsMu.Lock()
 	defer c.endpointsMu.Unlock()
-	
+
 	live := pruneExpiredEndpoints(eps)
-	
+
 	// Issue #3: Deep copy endpoints to own the data and prevent data races
 	copied := make([]*serviceEndpoint, len(live))
 	for i, ep := range live {
@@ -561,10 +561,10 @@ func (c *Client) endpointsSnapshot() []*serviceEndpoint {
 	// Issue #2: Use write lock for atomic read-prune-write operation
 	c.endpointsMu.Lock()
 	defer c.endpointsMu.Unlock()
-	
+
 	// Prune expired endpoints
 	live := pruneExpiredEndpoints(c._endpoints)
-	
+
 	// Update internal state if pruning removed entries
 	if len(live) != len(c._endpoints) {
 		c._endpoints = live
@@ -1170,31 +1170,45 @@ func (c *Client) ZLog() *data.ZapLog {
 	return z
 }
 
-// Issue #17: Consolidate logging patterns - create helper methods for consistent logging
-// logPrintf logs an info message using the configured logger or standard log
-func (c *Client) logPrintf(msg string, args ...interface{}) {
+// SP-008 P3-CONN-4 (2026-04-15): canonical logging helpers used by the
+// circuit-breaker handlers. Previously captured via per-call closures
+// that allocated ~288 B + 3 allocs per unary RPC and ~600-900 B per
+// stream. Hoisting to methods eliminates those allocations entirely on
+// the CB path.
+//
+// Naming note: the methods intentionally DO NOT end in `f` (Printf /
+// Errorf / Warnf) — the `go vet` printf analyzer treats an `f`-suffix
+// as "format string first arg" and would flag every literal-concat
+// call site. These helpers receive pre-formatted messages and pass
+// them through `"%s"` so a `%` character in a message body cannot be
+// misread as a format specifier — this preserves the closure's
+// original safety property. If you need format-style logging from
+// inside the client, call `c.ZLog().Printf(format, args...)` directly.
+//
+// logLine logs an info-level message.
+func (c *Client) logLine(msg string) {
 	if z := c.ZLog(); z != nil {
-		z.Printf(msg, args...)
+		z.Printf("%s", msg)
 	} else {
-		log.Printf(msg, args...)
+		log.Printf("%s", msg)
 	}
 }
 
-// logErrorf logs an error message using the configured logger or standard log
-func (c *Client) logErrorf(msg string, args ...interface{}) {
+// logErr logs an error-level message.
+func (c *Client) logErr(msg string) {
 	if z := c.ZLog(); z != nil {
-		z.Errorf(msg, args...)
+		z.Errorf("%s", msg)
 	} else {
-		log.Printf("ERROR: "+msg, args...)
+		log.Printf("%s", msg)
 	}
 }
 
-// logWarnf logs a warning message using the configured logger or standard log
-func (c *Client) logWarnf(msg string, args ...interface{}) {
+// logWarn logs a warning-level message.
+func (c *Client) logWarn(msg string) {
 	if z := c.ZLog(); z != nil {
-		z.Warnf(msg, args...)
+		z.Warnf("%s", msg)
 	} else {
-		log.Printf("WARN: "+msg, args...)
+		log.Printf("%s", msg)
 	}
 }
 
@@ -1616,7 +1630,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			}
 			e := fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: (If TLS/mTLS, Check Certificate SAN) %w", target, err)
 			if seg != nil {
-				_ = seg.Seg.AddError(e)
+				_ = seg.SafeAddError(e)
 			}
 			return e
 		}
@@ -1647,7 +1661,7 @@ func (c *Client) Dial(ctx context.Context) error {
 				}
 				cleanupConn = false
 				if seg != nil {
-					_ = seg.Seg.AddError(fmt.Errorf("gRPC service server not ready: %w", e))
+					_ = seg.SafeAddError(fmt.Errorf("gRPC service server not ready: %w", e))
 				}
 				return fmt.Errorf("gRPC service server not ready: %w", e)
 			}
@@ -1663,7 +1677,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			// start server and capture immediate config/start errors
 			if err := c.startWebServer(serveErrCh); err != nil {
 				if seg != nil {
-					_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err))
+					_ = seg.SafeAddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err))
 				}
 				return fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
 			}
@@ -1675,7 +1689,7 @@ func (c *Client) Dial(ctx context.Context) error {
 					z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
 				}
 				if seg != nil {
-					_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
+					_ = seg.SafeAddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
 				}
 				return e
 			}
@@ -1687,7 +1701,7 @@ func (c *Client) Dial(ctx context.Context) error {
 				consumed = true
 				if webErr != nil {
 					if seg != nil {
-						_ = seg.Seg.AddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr))
+						_ = seg.SafeAddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr))
 					}
 					return fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr)
 				}
@@ -3164,35 +3178,19 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
 
-	logger := c.ZLog()
-	logPrintf := func(msg string) {
-		if logger != nil {
-			logger.Printf("%s", msg)
-		} else {
-			log.Printf("%s", msg)
-		}
-	}
-	logErrorf := func(msg string) {
-		if logger != nil {
-			logger.Errorf("%s", msg)
-		} else {
-			log.Printf("%s", msg)
-		}
-	}
-	logWarnf := func(msg string) {
-		if logger != nil {
-			logger.Warnf("%s", msg)
-		} else {
-			log.Printf("%s", msg)
-		}
-	}
+	// SP-008 P3-CONN-4 (2026-04-15): previously captured `logger := c.ZLog()`
+	// into three per-call closures (logPrintf/logErrorf/logWarnf), costing
+	// ~288 B + 3 allocs per RPC. Replaced with direct method calls on *Client
+	// so no closure allocations occur on the CB fast-path. c.logPrintf etc.
+	// use a literal-string fast-path so `%` in messages can't be misread as
+	// format specifiers.
 
-	logPrintf("In - Unary Circuit Breaker Handler: " + method)
+	c.logLine("In - Unary Circuit Breaker Handler: " + method)
 
 	cb := c.getCircuitBreaker(method)
 
 	if cb == nil {
-		logPrintf("... Creating Circuit Breaker for: " + method)
+		c.logLine("... Creating Circuit Breaker for: " + method)
 
 		z := &data.ZapLog{
 			DisableLogger:   false,
@@ -3209,40 +3207,38 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 			int(cfg.Grpc.CircuitBreakerSleepWindow),
 			int(cfg.Grpc.CircuitBreakerErrorPercentThreshold),
 			z); e != nil {
-			if z := c.ZLog(); z != nil {
-				z.Errorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
-				z.Errorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
-			}
+			c.logErr("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+			c.logErr("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
 
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
 
 		c.setCircuitBreaker(method, cb)
 
-		logPrintf("... Circuit Breaker Created for: " + method)
+		c.logLine("... Circuit Breaker Created for: " + method)
 	} else {
-		logPrintf("... Using Cached Circuit Breaker Command: " + method)
+		c.logLine("... Using Cached Circuit Breaker Command: " + method)
 	}
 
 	_, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		logPrintf("Run Circuit Breaker Action for: " + method + "...")
+		c.logLine("Run Circuit Breaker Action for: " + method + "...")
 
 		err = invoker(ctx, method, req, reply, cc, opts...)
 
 		if err != nil {
-			logErrorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+			c.logErr("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
 		} else {
-			logPrintf("... Circuit Breaker Action for " + method + " Invoked")
+			c.logLine("... Circuit Breaker Action for " + method + " Invoked")
 		}
 		return nil, err
 
 	}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		logWarnf("Circuit Breaker Action for " + method + " Fallback...")
+		c.logWarn("Circuit Breaker Action for " + method + " Fallback...")
 		errMsg := "nil"
 		if errIn != nil {
 			errMsg = errIn.Error()
 		}
-		logWarnf("... Error = " + errMsg)
+		c.logWarn("... Error = " + errMsg)
 
 		return nil, errIn
 	}, nil)
@@ -3274,35 +3270,16 @@ func (c *Client) streamCircuitBreakerHandler(
 		return streamer(ctx, desc, cc, method, opts...)
 	}
 
-	logger := c.ZLog()
-	logPrintf := func(msg string) {
-		if logger != nil {
-			logger.Printf("%s", msg)
-		} else {
-			log.Printf("%s", msg)
-		}
-	}
-	logErrorf := func(msg string) {
-		if logger != nil {
-			logger.Errorf("%s", msg)
-		} else {
-			log.Printf("%s", msg)
-		}
-	}
-	logWarnf := func(msg string) {
-		if logger != nil {
-			logger.Warnf("%s", msg)
-		} else {
-			log.Printf("%s", msg)
-		}
-	}
+	// SP-008 P3-CONN-4 (2026-04-15): see matching comment in
+	// unaryCircuitBreakerHandler — closures replaced with *Client methods
+	// to eliminate per-stream allocations (~600-900 B + 8-12 allocs).
 
-	logPrintf("In - Stream Circuit Breaker Handler: " + method)
+	c.logLine("In - Stream Circuit Breaker Handler: " + method)
 
 	cb := c.getCircuitBreaker(method)
 
 	if cb == nil {
-		logPrintf("... Creating Circuit Breaker for: " + method)
+		c.logLine("... Creating Circuit Breaker for: " + method)
 
 		z := &data.ZapLog{
 			DisableLogger:   false,
@@ -3321,36 +3298,36 @@ func (c *Client) streamCircuitBreakerHandler(
 			z)
 
 		if e != nil {
-			logErrorf("!!! Create Circuit Breaker for: " + method + " Failed !!!")
-			logErrorf("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
+			c.logErr("!!! Create Circuit Breaker for: " + method + " Failed !!!")
+			c.logErr("Will Skip Circuit Breaker and Continue Execution: " + e.Error())
 			return streamer(ctx, desc, cc, method, opts...)
 		}
 
 		c.setCircuitBreaker(method, cb)
 
-		logPrintf("... Circuit Breaker Created for: " + method)
+		c.logLine("... Circuit Breaker Created for: " + method)
 	} else {
-		logPrintf("... Using Cached Circuit Breaker Command: " + method)
+		c.logLine("... Using Cached Circuit Breaker Command: " + method)
 	}
 
 	gres, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		logPrintf("Run Circuit Breaker Action for: " + method + "...")
+		c.logLine("Run Circuit Breaker Action for: " + method + "...")
 
 		dataOut, err = streamer(ctx, desc, cc, method, opts...)
 
 		if err != nil {
-			logErrorf("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
+			c.logErr("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
 		} else {
-			logPrintf("... Circuit Breaker Action for " + method + " Invoked")
+			c.logLine("... Circuit Breaker Action for " + method + " Invoked")
 		}
 		return dataOut, err
 	}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		logWarnf("Circuit Breaker Action for " + method + " Fallback...")
+		c.logWarn("Circuit Breaker Action for " + method + " Fallback...")
 		errMsg := "nil"
 		if errIn != nil {
 			errMsg = errIn.Error()
 		}
-		logWarnf("... Error = " + errMsg)
+		c.logWarn("... Error = " + errMsg)
 
 		return nil, errIn
 	}, nil)
@@ -3405,7 +3382,7 @@ func (c *Client) unaryXRayTracerHandler(ctx context.Context, method string, req 
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.Seg.AddError(err)
+				_ = seg.SafeAddError(err)
 			}
 		}()
 
@@ -3478,7 +3455,7 @@ func (c *Client) streamXRayTracerHandler(
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.Seg.AddError(err)
+				_ = seg.SafeAddError(err)
 			}
 		}()
 
