@@ -250,6 +250,17 @@ func TestService_GracefulStop_ReleasesRealServe(t *testing.T) {
 }
 
 func TestConfig(t *testing.T) {
+	// SP-008 pass-5 soft-gap #2 fix: redirect the working directory to a
+	// per-test tmp dir so config.Read()'s "create on first run" path
+	// (service/config.go:652-655 → ViperConf.Save() → viperconf.go:319
+	// `./ConfigName.yaml`) writes newtest.yaml into a Go-managed tmp
+	// dir that is auto-cleaned, instead of persisting a stray
+	// service/newtest.yaml in the working tree after `go test`.
+	//
+	// t.Chdir (Go 1.24+) restores the original CWD via t.Cleanup, so
+	// this is safe to co-exist with other tests in the same binary.
+	t.Chdir(t.TempDir())
+
 	cfg := &config{
 		AppName:        "test-connector-service",
 		ConfigFileName: "newtest",
