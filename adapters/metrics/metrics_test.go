@@ -1064,6 +1064,52 @@ func TestNewClientInterceptors_Unary_Panic(t *testing.T) {
 	}
 }
 
+// TestNewClientInterceptors_Stream_Panic is the client-stream twin of the
+// three existing panic-boundary tests — SP-010 pass-5 A4-N1 closes the
+// asymmetry where three of four panic-guarded interceptor lambdas had
+// regression tests and the client *stream* path did not. The invariant is
+// identical to the unary/server counterparts: a panicking streamer must
+// (a) propagate to the caller (the defer must NOT swallow the panic) and
+// (b) still emit the Internal-coded metric triple (request counter,
+// error counter, duration histogram) to the sink.
+//
+// This test exercises the `stream` lambda at interceptors.go:133-151,
+// which is the only one of the four lambdas that never had a regression
+// pin before SP-010.
+func TestNewClientInterceptors_Stream_Panic(t *testing.T) {
+	sink := NewMemorySink()
+	_, sIntr := NewClientInterceptors(sink)
+
+	streamer := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn,
+		method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		panic("boom")
+	}
+
+	recovered := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+			}
+		}()
+		_, _ = sIntr(context.Background(), &grpc.StreamDesc{StreamName: "Z"}, nil, "/x.Y/Z", streamer)
+	}()
+
+	if !recovered {
+		t.Fatalf("client stream interceptor swallowed the panic — it must propagate (A4-N1 regression)")
+	}
+
+	cs, _ := sink.Snapshot()
+	wantReq := seriesKey(mClientRequests, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	wantErr := seriesKey(mClientErrors, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	if !findCounter(cs, wantReq, 1) {
+		t.Errorf("missing client-stream panic-path request counter %q (A4-N1 regression)", wantReq)
+	}
+	if !findCounter(cs, wantErr, 1) {
+		t.Errorf("missing client-stream panic-path error counter %q (A4-N1 regression)", wantErr)
+	}
+}
+
 func TestNewServerInterceptors_NilSink_Noop(t *testing.T) {
 	uIntr, sIntr := NewServerInterceptors(nil)
 	if uIntr == nil || sIntr == nil {
