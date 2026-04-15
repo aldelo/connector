@@ -63,6 +63,16 @@ var certCache sync.Map
 // upstream from exhausting memory. 1 MiB is ~500x the size of a real cert.
 const maxCertBodyBytes = 1 << 20
 
+// certHTTPClient is the package-level HTTP client used by
+// defaultFetchSNSCert. SP-008 P1-CONN-4 (2026-04-15): hoisted from a
+// per-call &http.Client{} so successive cert fetches on cache miss or
+// rotation can reuse the underlying Transport connection pool and
+// amortize TLS handshake cost across calls. The 10s timeout is
+// preserved from the original per-call construction. This client is
+// dedicated to cert fetching so it cannot compete with unrelated HTTP
+// traffic for connection-pool slots.
+var certHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 // verifySNSConfirmationSignature verifies the signature of an SNS
 // SubscriptionConfirmation / UnsubscribeConfirmation message.
 func verifySNSConfirmationSignature(confirm *confirmation) error {
@@ -162,8 +172,7 @@ func defaultFetchSNSCert(certURL string) (*x509.Certificate, error) {
 		return nil, fmt.Errorf("cert URL host not allowed: %s", certURL)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(certURL)
+	resp, err := certHTTPClient.Get(certURL)
 	if err != nil {
 		return nil, fmt.Errorf("http get: %w", err)
 	}

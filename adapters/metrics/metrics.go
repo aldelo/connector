@@ -51,6 +51,7 @@ package metrics
 
 import (
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -180,14 +181,104 @@ type MemorySink struct {
 }
 
 // histogramState tracks min/max/sum/count for a single histogram series.
-// Mutated under MemorySink.mu (write lock for Observe, read lock for
-// Snapshot reads). The 4 fields are written together so we keep them all
-// behind a single lock rather than mixing atomics with non-atomic state.
+//
+// SP-008 P1-CONN-3 (2026-04-15): all four fields are now atomic so that
+// Observe on an existing series can mutate them without holding
+// MemorySink.mu in write mode. Before this change, Observe took the
+// MemorySink write lock unconditionally, which serialized EVERY
+// histogram write in the process — a hot-path contention point at
+// multi-kRPS ingest. After: the fast path takes only an RLock to look
+// up the map entry and then folds the sample into the histogramState
+// via lock-free atomic CAS loops on float64 bits.
+//
+// Field encoding:
+//   - count: plain atomic.Uint64 counter.
+//   - sumBits/minBits/maxBits: math.Float64bits(value) stored in
+//     atomic.Uint64 so that CAS on the bit pattern is equivalent to
+//     CAS on the underlying float64. This is the standard Go idiom
+//     for lock-free float aggregation.
+//
+// Snapshot trade-off: because the four atomics are read with independent
+// Load() calls, a Snapshot racing an in-flight Observe may see a
+// slightly-inconsistent tuple (e.g. count=3 reflects a new sample whose
+// sum fold has not yet landed). This is acceptable for the documented
+// use case — a debug/ops read of a process-local sink — and is called
+// out in the Snapshot godoc. The alternative (holding the write lock
+// for every Observe) would re-serialize the hot path we are here to
+// fix.
 type histogramState struct {
-	count uint64
-	sum   float64
-	min   float64
-	max   float64
+	count   atomic.Uint64
+	sumBits atomic.Uint64 // math.Float64bits of the running sum
+	minBits atomic.Uint64 // math.Float64bits of the running min (seed +Inf)
+	maxBits atomic.Uint64 // math.Float64bits of the running max (seed -Inf)
+}
+
+// newHistogramState constructs a histogramState ready for the first
+// Observe. min is seeded to +Inf and max to -Inf so that the CAS loops
+// in observe() will unconditionally replace them on the first sample,
+// regardless of sign. sum starts at 0 and count starts at 0.
+func newHistogramState() *histogramState {
+	h := &histogramState{}
+	h.minBits.Store(math.Float64bits(math.Inf(1)))
+	h.maxBits.Store(math.Float64bits(math.Inf(-1)))
+	return h
+}
+
+// observe atomically folds a single sample into the histogram state.
+// Called on the Observe fast path without holding MemorySink.mu — the
+// three CAS loops are independent and race-safe.
+//
+// Correctness sketch (per field):
+//   - count: strict monotonic Add — no loop needed.
+//   - sum: CAS loop reads old bits, computes newSum = old + v, retries
+//     on mismatch. Because addition is commutative and associative, the
+//     final sum is correct regardless of interleaving.
+//   - min: short-circuit if v is already >= current min; otherwise CAS.
+//     The short-circuit exits without mutation when the sample is not
+//     a new minimum, which is the common case after warm-up.
+//   - max: symmetric to min.
+//
+// NaN handling: math.Float64bits(NaN) has a non-unique bit pattern, so
+// a NaN sample could live-lock a CAS loop in theory. In practice the
+// connector never Observes NaN (durations, counts, sizes — all finite
+// non-negative floats). If a NaN ever slips in, the comparisons
+// v < min / v > max both return false, so the min/max loops exit
+// harmlessly; only the sum loop would add NaN and poison subsequent
+// observations' sum. This matches the pre-atomic behavior under a
+// single lock.
+func (h *histogramState) observe(v float64) {
+	h.count.Add(1)
+
+	// sum += v
+	for {
+		old := h.sumBits.Load()
+		newSum := math.Float64frombits(old) + v
+		if h.sumBits.CompareAndSwap(old, math.Float64bits(newSum)) {
+			break
+		}
+	}
+
+	// min = min(min, v) — short-circuit if v is not a new minimum.
+	for {
+		old := h.minBits.Load()
+		if v >= math.Float64frombits(old) {
+			break
+		}
+		if h.minBits.CompareAndSwap(old, math.Float64bits(v)) {
+			break
+		}
+	}
+
+	// max = max(max, v) — short-circuit if v is not a new maximum.
+	for {
+		old := h.maxBits.Load()
+		if v <= math.Float64frombits(old) {
+			break
+		}
+		if h.maxBits.CompareAndSwap(old, math.Float64bits(v)) {
+			break
+		}
+	}
 }
 
 // NewMemorySink returns a fresh, empty MemorySink ready for use. It has
@@ -347,11 +438,36 @@ func (m *MemorySink) Counter(name string, labels map[string]string, delta int64)
 // new series that exceeds the cap, the sample is dropped entirely and
 // OverflowDropped is incremented — an unobservable series cannot have
 // its min/max/sum/count updated.
+//
+// SP-008 P1-CONN-3 (2026-04-15): fast path is now RLock-only. For an
+// existing series, we take the read lock just long enough to look up
+// the map entry, release it, and fold the sample into the
+// histogramState via lock-free atomic CAS loops. The previous
+// implementation held the write lock for the entire Observe call,
+// which serialized EVERY histogram write across EVERY series in the
+// process — a hot-path contention point that kicked in the moment two
+// goroutines tried to observe two unrelated metrics at the same time.
+// See the histogramState godoc for the atomic-field design and
+// Snapshot-consistency trade-off.
 func (m *MemorySink) Observe(name string, labels map[string]string, value float64) {
 	key := seriesKey(name, labels)
 
-	m.mu.Lock()
+	// Fast path: existing series — only the map lookup needs the
+	// RLock. The histogramState fields are atomic, so no further
+	// locking is required for the CAS folds inside observe().
+	m.mu.RLock()
 	h, ok := m.histograms[key]
+	m.mu.RUnlock()
+	if ok {
+		h.observe(value)
+		return
+	}
+
+	// Slow path: new series — acquire the write lock so the
+	// cardinality cap check and the map insert form a single
+	// atomic step with respect to other concurrent insertions.
+	m.mu.Lock()
+	h, ok = m.histograms[key]
 	if !ok {
 		if m.labelLimit > 0 && len(m.counters)+len(m.histograms) >= m.labelLimit {
 			// Release the write lock before invoking the throttled
@@ -363,18 +479,11 @@ func (m *MemorySink) Observe(name string, labels map[string]string, value float6
 			m.recordOverflowDrop()
 			return
 		}
-		h = &histogramState{min: value, max: value}
+		h = newHistogramState()
 		m.histograms[key] = h
 	}
-	h.count++
-	h.sum += value
-	if value < h.min {
-		h.min = value
-	}
-	if value > h.max {
-		h.max = value
-	}
 	m.mu.Unlock()
+	h.observe(value)
 }
 
 // CounterSnapshot is a point-in-time copy of one counter series.
@@ -422,14 +531,22 @@ func (m *MemorySink) Snapshot() ([]CounterSnapshot, []HistogramSnapshot) {
 	hs := make([]HistogramSnapshot, 0, len(m.histograms))
 	for k, h := range m.histograms {
 		name, labels := parseSeriesKey(k)
+		// SP-008 P1-CONN-3 (2026-04-15): fields are atomic — four
+		// independent Loads may observe a slightly-inconsistent
+		// tuple under in-flight Observe (see histogramState godoc).
+		// This is acceptable for a debug-read sink.
+		count := h.count.Load()
+		sum := math.Float64frombits(h.sumBits.Load())
+		hmin := math.Float64frombits(h.minBits.Load())
+		hmax := math.Float64frombits(h.maxBits.Load())
 		mean := 0.0
-		if h.count > 0 {
-			mean = h.sum / float64(h.count)
+		if count > 0 {
+			mean = sum / float64(count)
 		}
 		hs = append(hs, HistogramSnapshot{
 			Name: name, Labels: labels,
-			Count: h.count, Sum: h.sum,
-			Min: h.min, Max: h.max, Mean: mean,
+			Count: count, Sum: sum,
+			Min: hmin, Max: hmax, Mean: mean,
 		})
 	}
 	sort.Slice(hs, func(i, j int) bool {

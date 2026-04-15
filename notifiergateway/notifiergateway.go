@@ -713,27 +713,45 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 }
 
 // buildConfirmationSigningPayload unescapes and builds subscription confirmation payload, to be ready for signing
+//
+// SP-008 P1-CONN-5 (2026-04-15): constructed via strings.Builder with a
+// single Grow so the allocation cost is O(n) rather than the O(n^2)
+// cost of repeated `buf += str` string concatenation (each `+=` on a
+// Go string re-allocates the full buffer). This path fires BEFORE
+// signature verification on every inbound SubscriptionConfirmation,
+// so it is un-dodgeable load on the SNS webhook route.
 func buildConfirmationSigningPayload(confirm *confirmation) string {
-	if confirm != nil {
-		buf := "Message\n"
-		buf += confirm.Message + "\n"
-		buf += "MessageId\n"
-		buf += confirm.MessageId + "\n"
-		buf += "SubscribeURL\n"
-		buf += confirm.SubscribeURL + "\n"
-		buf += "Timestamp\n"
-		buf += confirm.Timestamp + "\n"
-		buf += "Token\n"
-		buf += confirm.Token + "\n"
-		buf += "TopicArn\n"
-		buf += confirm.TopicArn + "\n"
-		buf += "Type\n"
-		buf += confirm.Type + "\n"
-
-		return buf
-	} else {
+	if confirm == nil {
 		return ""
 	}
+	var b strings.Builder
+	// Pre-size the buffer: 7 fixed header labels (~60 bytes) plus the
+	// worst-case length of the variable fields. Over-sizing slightly is
+	// cheaper than mid-build re-growth.
+	b.Grow(64 + len(confirm.Message) + len(confirm.MessageId) + len(confirm.SubscribeURL) +
+		len(confirm.Timestamp) + len(confirm.Token) + len(confirm.TopicArn) + len(confirm.Type))
+	b.WriteString("Message\n")
+	b.WriteString(confirm.Message)
+	b.WriteByte('\n')
+	b.WriteString("MessageId\n")
+	b.WriteString(confirm.MessageId)
+	b.WriteByte('\n')
+	b.WriteString("SubscribeURL\n")
+	b.WriteString(confirm.SubscribeURL)
+	b.WriteByte('\n')
+	b.WriteString("Timestamp\n")
+	b.WriteString(confirm.Timestamp)
+	b.WriteByte('\n')
+	b.WriteString("Token\n")
+	b.WriteString(confirm.Token)
+	b.WriteByte('\n')
+	b.WriteString("TopicArn\n")
+	b.WriteString(confirm.TopicArn)
+	b.WriteByte('\n')
+	b.WriteString("Type\n")
+	b.WriteString(confirm.Type)
+	b.WriteByte('\n')
+	return b.String()
 }
 
 // snsnotification handles sns notification response
@@ -892,27 +910,40 @@ func snsnotification(c *gin.Context, serverKey string) {
 }
 
 // buildNotificationSigningPayload unescapes and builds notification payload, to be ready for signing
+//
+// SP-008 P1-CONN-5 (2026-04-15): constructed via strings.Builder with a
+// single Grow — see buildConfirmationSigningPayload godoc for the
+// rationale. This path fires BEFORE signature verification on every
+// inbound SNS Notification, so it is un-dodgeable load on the hottest
+// webhook route.
 func buildNotificationSigningPayload(notify *notification) string {
-	if notify != nil {
-		buf := "Message\n"
-		buf += notify.Message + "\n"
-		buf += "MessageId\n"
-		buf += notify.MessageId + "\n"
-		if util.LenTrim(notify.Subject) > 0 {
-			buf += "Subject\n"
-			buf += notify.Subject + "\n"
-		}
-		buf += "Timestamp\n"
-		buf += notify.Timestamp + "\n"
-		buf += "TopicArn\n"
-		buf += notify.TopicArn + "\n"
-		buf += "Type\n"
-		buf += notify.Type + "\n"
-
-		return buf
-	} else {
+	if notify == nil {
 		return ""
 	}
+	var b strings.Builder
+	b.Grow(64 + len(notify.Message) + len(notify.MessageId) + len(notify.Subject) +
+		len(notify.Timestamp) + len(notify.TopicArn) + len(notify.Type))
+	b.WriteString("Message\n")
+	b.WriteString(notify.Message)
+	b.WriteByte('\n')
+	b.WriteString("MessageId\n")
+	b.WriteString(notify.MessageId)
+	b.WriteByte('\n')
+	if util.LenTrim(notify.Subject) > 0 {
+		b.WriteString("Subject\n")
+		b.WriteString(notify.Subject)
+		b.WriteByte('\n')
+	}
+	b.WriteString("Timestamp\n")
+	b.WriteString(notify.Timestamp)
+	b.WriteByte('\n')
+	b.WriteString("TopicArn\n")
+	b.WriteString(notify.TopicArn)
+	b.WriteByte('\n')
+	b.WriteString("Type\n")
+	b.WriteString(notify.Type)
+	b.WriteByte('\n')
+	return b.String()
 }
 
 // unsubscribeSNS unsubscribes from an SNS topic using the UnsubscribeURL from the notification payload
@@ -996,6 +1027,22 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 	}
 
 	go func() {
+		// SP-008 P1-CONN-1 (2026-04-15): panic boundary for this
+		// long-lived background goroutine. A panic inside
+		// removeInactiveInstancesFromServiceDiscovery (DynamoDB
+		// scan, CloudMap deregister, xray segment write) would
+		// otherwise crash the whole notifier-gateway process and
+		// regresses the SVC-F6 / CL-F5 invariant that every
+		// library-spawned goroutine recovers its own panic.
+		// The recovery logs-and-continues rather than re-panicking
+		// so transient dependency failures cannot take the service
+		// down; the next ticker fire retries the cleanup cycle.
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("!!! PANIC in StaleHealthReportRecordsRemover background goroutine, recovered: %v !!!", r)
+			}
+		}()
+
 		// Run immediately on startup before waiting for the first tick
 		log.Println(">>> Stale Health Report Record Remover - Processing Invoked <<<")
 		removeInactiveInstancesFromServiceDiscovery()

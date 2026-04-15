@@ -26,6 +26,7 @@ package metrics
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -107,28 +108,92 @@ func NewClientInterceptors(sink Sink) (grpc.UnaryClientInterceptor, grpc.StreamC
 	return unary, stream
 }
 
+// SP-008 P1-CONN-2 (2026-04-15): hot-path label-set caches.
+//
+// Before: recordServer / recordClient allocated TWO fresh
+// map[string]string per RPC — one for {method, code} (counter + error
+// counter) and one for {method} (duration histogram). At 10K RPS that
+// is ~20K map allocations per second per interceptor, plus the
+// entries, plus escape-analysis heap promotion, plus GC pressure.
+//
+// After: the maps are memoized by cache key. `method` is a gRPC
+// FullMethod string like "/pkg.Service/Op" — bounded by the service's
+// RPC surface. `code` is codes.Code.String() — ~16 distinct values in
+// practice. So the Cartesian product `(method, code)` is bounded by
+// a small constant, and the first RPC per pair allocates the shared
+// map which every subsequent RPC reuses.
+//
+// The cached maps are treated as immutable after first publish.
+// Implementations of Sink MUST NOT mutate label maps passed to
+// Counter / Observe — see Sink godoc. Both provided implementations
+// (NopSink, MemorySink) are read-only consumers of their labels.
+//
+// The cache uses sync.Map so that (a) the common hit path is
+// lock-free and (b) we don't need to pre-declare the label surface.
+// LoadOrStore handles the race between two first-arrivers for the
+// same (method, code) pair — whoever wins installs the map, the
+// loser discards their transient allocation.
+var (
+	serverPairLabels   sync.Map // key: "method\x00code" -> map[string]string{"method":..,"code":..}
+	serverMethodLabels sync.Map // key: "method"         -> map[string]string{"method":..}
+	clientPairLabels   sync.Map // key: "method\x00code" -> map[string]string{"method":..,"code":..}
+	clientMethodLabels sync.Map // key: "method"         -> map[string]string{"method":..}
+)
+
+// pairKey builds a compact cache key for a (method, code) pair. The
+// ASCII NUL separator is absent from every legal gRPC FullMethod and
+// from every codes.Code.String(), so (a+\x00+b) is injective.
+func pairKey(a, b string) string {
+	return a + "\x00" + b
+}
+
+// getOrBuildPairLabels returns a cached {method, code} label map for
+// the requested cache bucket, creating it on first use.
+func getOrBuildPairLabels(cache *sync.Map, method, code string) map[string]string {
+	k := pairKey(method, code)
+	if v, ok := cache.Load(k); ok {
+		return v.(map[string]string)
+	}
+	m := map[string]string{"method": method, "code": code}
+	actual, _ := cache.LoadOrStore(k, m)
+	return actual.(map[string]string)
+}
+
+// getOrBuildMethodLabels returns a cached {method} label map for the
+// requested cache bucket, creating it on first use.
+func getOrBuildMethodLabels(cache *sync.Map, method string) map[string]string {
+	if v, ok := cache.Load(method); ok {
+		return v.(map[string]string)
+	}
+	m := map[string]string{"method": method}
+	actual, _ := cache.LoadOrStore(method, m)
+	return actual.(map[string]string)
+}
+
 // recordServer emits the standard 3-metric set for one served RPC.
 // Centralized so the unary and stream paths cannot drift on label keys.
 func recordServer(s Sink, method string, dur time.Duration, err error) {
 	code := codeOf(err).String()
-	labels := map[string]string{"method": method, "code": code}
+	pair := getOrBuildPairLabels(&serverPairLabels, method, code)
+	mOnly := getOrBuildMethodLabels(&serverMethodLabels, method)
 
-	s.Counter(mServerRequests, labels, 1)
-	s.Observe(mServerDuration, map[string]string{"method": method}, dur.Seconds())
+	s.Counter(mServerRequests, pair, 1)
+	s.Observe(mServerDuration, mOnly, dur.Seconds())
 	if err != nil {
-		s.Counter(mServerErrors, labels, 1)
+		s.Counter(mServerErrors, pair, 1)
 	}
 }
 
 // recordClient emits the standard 3-metric set for one outbound RPC.
 func recordClient(s Sink, method string, dur time.Duration, err error) {
 	code := codeOf(err).String()
-	labels := map[string]string{"method": method, "code": code}
+	pair := getOrBuildPairLabels(&clientPairLabels, method, code)
+	mOnly := getOrBuildMethodLabels(&clientMethodLabels, method)
 
-	s.Counter(mClientRequests, labels, 1)
-	s.Observe(mClientDuration, map[string]string{"method": method}, dur.Seconds())
+	s.Counter(mClientRequests, pair, 1)
+	s.Observe(mClientDuration, mOnly, dur.Seconds())
 	if err != nil {
-		s.Counter(mClientErrors, labels, 1)
+		s.Counter(mClientErrors, pair, 1)
 	}
 }
 
