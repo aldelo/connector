@@ -2202,6 +2202,19 @@ func (s *Service) Serve() error {
 
 	if err = s.startServer(lis, quit, quitDone); err != nil {
 		_ = lis.Close()
+		// P1-CONN-SVC-02 (2026-04-15): startServer failed BEFORE the
+		// quit-handler goroutine was installed. _quit and _quitDone are
+		// non-nil (we allocated them above), but nothing will ever close
+		// quitDone. A subsequent GracefulStop / ImmediateStop call would
+		// read the non-nil fields under RLock and deadlock forever on
+		// `<-quitDone`. Close quitDone ourselves and nil the Service
+		// fields so later stop callers fall through to the pre-Serve
+		// legacy safety-net branch (see ~L2749).
+		close(quitDone)
+		s._mu.Lock()
+		s._quit = nil
+		s._quitDone = nil
+		s._mu.Unlock()
 		return err
 	}
 
