@@ -24,6 +24,7 @@ import (
 	"time"
 
 	testpb "github.com/aldelo/connector/example/proto/test"
+	"github.com/aldelo/connector/internal/safego"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
@@ -461,7 +462,7 @@ func TestCL_F4_CircuitBreakerHandlerSurvivesConcurrentNilStore(t *testing.T) {
 
 func TestCL_F5_SafeGoRecoversPanic(t *testing.T) {
 	done := make(chan struct{})
-	safeGo("test-panic", func() {
+	safego.Go("test-panic", func() {
 		defer close(done)
 		panic("boom")
 	})
@@ -479,7 +480,7 @@ func TestCL_F5_SafeGoNilFnIsNoop(t *testing.T) {
 			t.Fatalf("safeGo(nil) panicked: %v", r)
 		}
 	}()
-	safeGo("test-nil", nil) // must not panic, must not spawn a goroutine
+	safego.Go("test-nil", nil) // must not panic, must not spawn a goroutine
 	// Give any stray goroutine a chance to crash if it existed.
 	time.Sleep(20 * time.Millisecond)
 }

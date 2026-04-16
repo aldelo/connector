@@ -53,6 +53,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aldelo/connector/internal/safego"
 	"google.golang.org/grpc"
 )
 
@@ -81,7 +82,7 @@ func TestGRPCServeError_PreSignalHandler_QuitsCleanly_A2P601(t *testing.T) {
 	// It blocks on _quit, then closes _quitDone. We use a simple
 	// version here since we only care about the quit send arriving.
 	exited := make(chan struct{})
-	safeGo("a2p601-test-quit-handler", func() {
+	safego.Go("a2p601-test-quit-handler", func() {
 		defer close(exited)
 		<-s._quit
 		close(s._quitDone)

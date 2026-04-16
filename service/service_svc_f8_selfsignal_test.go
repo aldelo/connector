@@ -80,31 +80,25 @@ import (
 	"time"
 )
 
-// waitForSigHandlerReady spins until the Service's _sigHandlerReady
-// atomic observes true, or the deadline expires. A 2s deadline is
-// generous: signal.Notify is a microsecond-scale operation; anything
-// approaching 2s indicates awaitOsSigExit never progressed past its
-// preamble (a real regression).
+// waitForSigHandlerReady blocks until the Service's _sigHandlerReadyCh
+// is closed (signalling that awaitOsSigExit has called signal.Notify
+// and set _sigHandlerReady=true), or the timeout expires.
 //
-// A2-P6-04 (2026-04-16): This uses a sleep-based poll because
-// _sigHandlerReady is an atomic.Bool — there is no channel or
-// condition variable to wait on. Exposing a readiness channel from
-// production code solely for test consumption was rejected as too
-// invasive for the narrow benefit: the poll converges in <1ms on all
-// observed CI runs (signal.Notify is a microsecond-scale syscall),
-// and the 2s timeout ensures the test fails fast on regression rather
-// than hanging. The 2ms sleep interval balances CPU waste against
-// responsiveness — shorter intervals (100us) burn CPU on slow CI
-// runners; longer intervals (50ms) would mask regressions that
-// manifest as delayed readiness.
+// REM-4 (2026-04-16): Replaced the sleep-based poll loop with a
+// channel-based select. The production code closes _sigHandlerReadyCh
+// immediately after _sigHandlerReady.Store(true) in awaitOsSigExit,
+// providing a deterministic synchronization point. The time.After
+// fallback is kept as a safety net — if awaitOsSigExit never
+// progresses past its preamble, the test fails with a clear message
+// rather than hanging.
 func waitForSigHandlerReady(t *testing.T, s *Service, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !s._sigHandlerReady.Load() {
-		if time.Now().After(deadline) {
-			t.Fatalf("SVC-F8 regression: awaitOsSigExit did not set _sigHandlerReady within %s — signal.Notify registration stage did not complete", timeout)
-		}
-		time.Sleep(2 * time.Millisecond)
+	select {
+	case <-s._sigHandlerReadyCh:
+		// Channel closed — awaitOsSigExit has completed signal.Notify
+		// registration and set _sigHandlerReady=true.
+	case <-time.After(timeout):
+		t.Fatalf("SVC-F8 regression: awaitOsSigExit did not set _sigHandlerReady within %s — signal.Notify registration stage did not complete", timeout)
 	}
 }
 
@@ -285,6 +279,64 @@ func TestService_AwaitOsSigExit_WokenByImmediateStopSelfSignal(t *testing.T) {
 	// code path, not the legacy fallback).
 	if !s._immediateStopRequested.Load() {
 		t.Fatal("ImmediateStop did not set _immediateStopRequested — legacy fallback taken instead of unified SVC-F7 routing")
+	}
+}
+
+
+// TestSigHandlerReadyChannel_ClosedAfterNotify validates that the
+// REM-4 channel-based readiness mechanism fires correctly: start
+// awaitOsSigExit in a goroutine, wait on the _sigHandlerReadyCh
+// channel, and verify it closes before the timeout. This is the
+// direct test for the channel — distinct from the existing tests
+// which use the channel indirectly via waitForSigHandlerReady.
+//
+// The test also confirms the atomic.Bool and channel are consistent:
+// once the channel fires, _sigHandlerReady.Load() must return true.
+func TestSigHandlerReadyChannel_ClosedAfterNotify(t *testing.T) {
+	s := newSVCF7TestService(false, ShutdownPhaseImmediate)
+
+	s._mu.Lock()
+	s._config = &config{}
+	s._mu.Unlock()
+
+	exited := startFakeQuitHandler(s, true)
+
+	awaitDone := make(chan struct{})
+	go func() {
+		defer close(awaitDone)
+		s.awaitOsSigExit()
+	}()
+
+	// Primary assertion: the readiness channel fires within a
+	// bounded deadline. This is the REM-4 deterministic wait — no
+	// polling, no sleep intervals, pure channel synchronization.
+	select {
+	case <-s._sigHandlerReadyCh:
+		// Channel closed — signal.Notify registration completed.
+	case <-time.After(2 * time.Second):
+		t.Fatal("REM-4 regression: _sigHandlerReadyCh was not closed within 2s — awaitOsSigExit did not progress past signal.Notify registration")
+	}
+
+	// Secondary: the atomic.Bool must be consistent with the channel.
+	// The channel is closed immediately after Store(true), so they
+	// must agree.
+	if !s._sigHandlerReady.Load() {
+		t.Fatal("REM-4 regression: _sigHandlerReadyCh was closed but _sigHandlerReady is false — Store(true) and close(ch) are out of order")
+	}
+
+	// Clean up: stop the service so awaitOsSigExit returns cleanly.
+	go s.GracefulStop()
+
+	select {
+	case <-awaitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup: awaitOsSigExit did not return within 5s after GracefulStop")
+	}
+
+	select {
+	case <-exited:
+	case <-time.After(1 * time.Second):
+		t.Fatal("cleanup: fake quit handler did not run")
 	}
 }
 

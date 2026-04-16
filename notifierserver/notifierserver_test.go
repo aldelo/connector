@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aldelo/connector/internal/safego"
 )
 
 // -----------------------------------------------------------------------
@@ -65,14 +67,14 @@ func TestSNSRelayHandler_FireAndForgetDocumented_A4P6F3(t *testing.T) {
 
 func TestSafeGo_NilFnIsNoOp(t *testing.T) {
 	// safeGo with nil fn must not panic or spawn a goroutine
-	safeGo("nil-fn", nil)
+	safego.Go("nil-fn", nil)
 	time.Sleep(20 * time.Millisecond)
 }
 
 func TestSafeGo_NormalFnCompletes(t *testing.T) {
 	done := make(chan struct{})
 
-	safeGo("normal-fn", func() {
+	safego.Go("normal-fn", func() {
 		close(done)
 	})
 
@@ -87,7 +89,7 @@ func TestSafeGo_NormalFnCompletes(t *testing.T) {
 func TestSafeGo_PanickingFnRecovered(t *testing.T) {
 	entered := make(chan struct{})
 
-	safeGo("panic-fn", func() {
+	safego.Go("panic-fn", func() {
 		close(entered)
 		panic("deliberate test panic (TG-4)")
 	})
@@ -106,7 +108,7 @@ func TestSafeGo_PanickingFnRecovered(t *testing.T) {
 func TestSafeGo_PanickingFnRuntimeError(t *testing.T) {
 	entered := make(chan struct{})
 
-	safeGo("nil-deref-fn", func() {
+	safego.Go("nil-deref-fn", func() {
 		close(entered)
 		var p *int
 		_ = *p // nil pointer dereference — runtime panic
@@ -129,7 +131,7 @@ func TestSafeGo_ConcurrentPanicsAllRecovered(t *testing.T) {
 
 	for i := 0; i < n; i++ {
 		i := i
-		safeGo("concurrent-panic", func() {
+		safego.Go("concurrent-panic", func() {
 			wg.Done()
 			panic(i)
 		})

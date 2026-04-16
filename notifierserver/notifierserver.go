@@ -55,7 +55,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"runtime/debug"
 	"sync"
 	"time"
 
@@ -64,6 +63,7 @@ import (
 	ginw "github.com/aldelo/common/wrapper/gin"
 	"github.com/aldelo/common/wrapper/gin/ginbindtype"
 	"github.com/aldelo/common/wrapper/gin/ginhttpmethod"
+	"github.com/aldelo/connector/internal/safego"
 	"github.com/aldelo/connector/notifierserver/impl"
 	pb "github.com/aldelo/connector/notifierserver/proto"
 	"github.com/aldelo/connector/service"
@@ -231,7 +231,7 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 		//     log lines to detect silent delivery failures.
 		// Do NOT make this synchronous without accounting for the SNS timeout.
 		// CONN-R3-003 + CONN-R3-002: Use safeGo for panic isolation with debug.Stack
-		safeGo("sns-relay", func() {
+		safego.Go("sns-relay", func() {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -308,19 +308,5 @@ func snsupdate(c *gin.Context, bindingInputPtr interface{}) {
 	}
 }
 
-// safeGo launches fn in a goroutine with panic recovery and stack trace capture.
-// Matches the safeGo pattern in service/service.go (package-private, duplicated here
-// because it is unexported there).
-func safeGo(name string, fn func()) {
-	if fn == nil {
-		return
-	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("!!! safeGo panic recovered in %q: %v\n%s !!!", name, r, debug.Stack())
-			}
-		}()
-		fn()
-	}()
-}
+// safeGo is provided by internal/safego.Go — see that package for the
+// full documentation.

@@ -46,6 +46,7 @@ import (
 	"github.com/aldelo/common/wrapper/sqs"
 	"github.com/aldelo/common/wrapper/xray"
 	"github.com/aldelo/connector/adapters/health"
+	"github.com/aldelo/connector/internal/safego"
 	"github.com/aldelo/connector/adapters/notification"
 	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/ratelimiter"
@@ -458,6 +459,17 @@ type Service struct {
 	// self-signal into a no-op handler — defence-in-depth even
 	// though SVC-F3's single-use gate prevents Service re-use.
 	_sigHandlerReady atomic.Bool
+
+	// REM-4: _sigHandlerReadyCh is a notification channel closed by
+	// awaitOsSigExit immediately after _sigHandlerReady.Store(true).
+	// It provides a deterministic, non-polling wait mechanism for tests
+	// that need to synchronize with the signal handler registration.
+	// Production code continues to use the atomic.Bool for sender-side
+	// gates (GracefulStop/ImmediateStop); this channel is an addition,
+	// not a replacement. Initialized in NewService and must be
+	// initialized in any test helper that constructs a Service directly.
+	// Single-use per Service (SVC-F3), so no re-allocation needed.
+	_sigHandlerReadyCh chan struct{}
 }
 
 // NewService constructs a Service ready for further configuration.
@@ -479,6 +491,7 @@ func NewService(appName string, configFileName string, customConfigPath string, 
 		ConfigFileName:          configFileName,
 		CustomConfigPath:        customConfigPath,
 		RegisterServiceHandlers: registerServiceHandlers,
+		_sigHandlerReadyCh:      make(chan struct{}),
 	}
 }
 
@@ -1173,7 +1186,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 	// the timing assumptions that the health warm-up and SD registration
 	// depend on. The cost of the gap (a few extra log lines during a failed
 	// startup) does not justify the risk of altering the startup flow.
-	safeGo("startup-orchestrator", func() {
+	safego.Go("startup-orchestrator", func() {
 		if s.BeforeServerStart != nil {
 			log.Println("Before gRPC Server Starts Begin...")
 			s.runHook("BeforeServerStart", s.BeforeServerStart)
@@ -1182,7 +1195,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 
 		log.Println("Initiating gRPC Server Startup...")
 
-		safeGo("grpc-server", func() {
+		safego.Go("grpc-server", func() {
 			log.Println("Starting gRPC Health Server...")
 
 			if startErr := s.startHealthChecker(); startErr != nil {
@@ -1240,7 +1253,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 				log.Println("Starting Http Web Server...")
 				startWebServerFail := make(chan bool, 1)
 
-				safeGo("web-server", func() {
+				safego.Go("web-server", func() {
 					if webServerErr := s.startWebServer(); webServerErr != nil {
 						log.Printf("!!! Serve Http Web Server %s Failed: %s !!!\n", s.WebServerConfig.AppName, webServerErr)
 						startWebServerFail <- true
@@ -1261,7 +1274,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 		}
 
 		// trigger sd initial health update
-		safeGo("sd-health-reporter", func() {
+		safego.Go("sd-health-reporter", func() {
 			s._mu.RLock()
 			healthFailThreshold := s._config.SvcCreateData.HealthFailThreshold
 			s._mu.RUnlock()
@@ -1455,7 +1468,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 	// Quit handler goroutine: performs full graceful cleanup on shutdown signal,
 	// matching the cleanup done by GracefulStop()/ImmediateStop().
 	// Closes quitDone when all cleanup is complete so Serve() can wait.
-	safeGo("quit-handler", func() {
+	safego.Go("quit-handler", func() {
 		defer close(quitDone)
 		<-quit
 
@@ -1641,7 +1654,7 @@ func stopGRPCServerBoundedWithHook(gs gracefulStopper, timeout time.Duration, on
 		timeout = 30 * time.Second
 	}
 	stopped := make(chan struct{})
-	safeGo("graceful-stop-escalator", func() {
+	safego.Go("graceful-stop-escalator", func() {
 		defer close(stopped)
 		gs.GracefulStop()
 	})
@@ -1769,7 +1782,16 @@ func (s *Service) awaitOsSigExit() {
 	// gate prevents re-use in practice.
 	s._sigHandlerReady.Store(true)
 
-	safeGo("sig-demux", func() {
+	// REM-4: close the readiness channel to wake any test waiting on it.
+	// A closed channel returns immediately on receive, providing a
+	// deterministic (non-polling) synchronization point. Safe to call
+	// unconditionally: the channel is initialized in NewService / test
+	// helpers, and awaitOsSigExit runs exactly once per Service (SVC-F3).
+	if s._sigHandlerReadyCh != nil {
+		close(s._sigHandlerReadyCh)
+	}
+
+	safego.Go("sig-demux", func() {
 		sig := <-sigs
 		log.Println("OS Sig Exit Command: ", sig)
 		// SVC-F5: fire Immediate phase BEFORE notifying Serve that a
@@ -2136,38 +2158,8 @@ func runCleanup(name string, cleanup func()) {
 	cleanup()
 }
 
-// safeGo runs fn in a new goroutine with panic recovery. If fn panics,
-// the panic is logged with its value and full stack trace, and the
-// goroutine exits cleanly — the process keeps running.
-//
-// Fix: SVC-F6 (deep-review-2026-04-13-contrarian). grpc_recovery is a
-// handler interceptor and covers ONLY RPC handler invocations; it does
-// nothing for goroutines launched by service.go itself (startup
-// orchestrator, gRPC Serve, web server, SD health reporter, quit
-// handler, GracefulStop escalator, signal demux). Pre-fix, a panic
-// in any of these crashed the entire process — a single AWS SDK panic
-// in the SNS warmup goroutine would take the pod down. With safeGo,
-// the panic is logged but the process survives long enough for the
-// normal shutdown path to run or for another pod to take over.
-//
-// Use safeGo for every service-internal goroutine spawn. Intentional
-// "background forever" goroutines (tickers, signal demuxes) exit on
-// panic and log — per-iteration recovery for tickers is a separate
-// refinement that can be layered on top when needed. The priority is
-// "process stays alive" not "ticker stays alive".
-func safeGo(name string, fn func()) {
-	if fn == nil {
-		return
-	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("!!! safeGo panic recovered in %q: %v\n%s !!!", name, r, debug.Stack())
-			}
-		}()
-		fn()
-	}()
-}
+// safeGo is provided by internal/safego.Go — see that package for the
+// full documentation. All goroutine spawns in this file use safego.Go.
 
 // Serve runs the full service lifecycle and blocks until the gRPC
 // server has shut down. The sequence is:

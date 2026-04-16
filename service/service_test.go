@@ -24,6 +24,7 @@ import (
 	ginw "github.com/aldelo/common/wrapper/gin"
 	"github.com/aldelo/common/wrapper/route53"
 	testpb "github.com/aldelo/connector/example/proto/test"
+	"github.com/aldelo/connector/internal/safego"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"log"
@@ -1037,7 +1038,7 @@ func TestSafeGo_NilFnIsNoOp(t *testing.T) {
 		}
 	}()
 
-	safeGo("nil-fn", nil)
+	safego.Go("nil-fn", nil)
 	// Give any accidentally-spawned goroutine a moment to run.
 	time.Sleep(20 * time.Millisecond)
 }
@@ -1047,7 +1048,7 @@ func TestSafeGo_NilFnIsNoOp(t *testing.T) {
 func TestSafeGo_NormalFnCompletes(t *testing.T) {
 	done := make(chan struct{})
 
-	safeGo("normal-fn", func() {
+	safego.Go("normal-fn", func() {
 		close(done)
 	})
 
@@ -1069,7 +1070,7 @@ func TestSafeGo_NormalFnCompletes(t *testing.T) {
 func TestSafeGo_PanickingFnRecovered(t *testing.T) {
 	entered := make(chan struct{})
 
-	safeGo("panicking-fn", func() {
+	safego.Go("panicking-fn", func() {
 		close(entered)
 		panic("deliberate panic in safeGo test")
 	})
@@ -1092,7 +1093,7 @@ func TestSafeGo_PanickingFnRecovered(t *testing.T) {
 func TestSafeGo_PanickingFnRuntimeError(t *testing.T) {
 	entered := make(chan struct{})
 
-	safeGo("runtime-error-fn", func() {
+	safego.Go("runtime-error-fn", func() {
 		close(entered)
 		var p *int
 		_ = *p // nil deref
@@ -1117,7 +1118,7 @@ func TestSafeGo_ConcurrentPanicsAllRecovered(t *testing.T) {
 	started.Add(n)
 
 	for i := 0; i < n; i++ {
-		safeGo("concurrent-panic", func() {
+		safego.Go("concurrent-panic", func() {
 			started.Done()
 			panic("concurrent panic")
 		})
@@ -1543,7 +1544,7 @@ func TestService_ShutdownCtx_HandlerObservingCtxExitsEarly(t *testing.T) {
 	// marker. Mirrors the godoc example pattern exactly.
 	handlerDone := make(chan int, 1)
 	startWork := make(chan struct{})
-	safeGo("svc-f5-test-handler", func() {
+	safego.Go("svc-f5-test-handler", func() {
 		<-startWork
 		processed := 0
 		for {
@@ -1586,7 +1587,7 @@ func TestService_ShutdownCtx_HandlerIgnoringCtxStillCompletes(t *testing.T) {
 
 	// Simulated handler: ignores ShutdownCtx, always returns success.
 	handlerResult := make(chan error, 1)
-	safeGo("svc-f5-test-handler-ignoring", func() {
+	safego.Go("svc-f5-test-handler-ignoring", func() {
 		// No ShutdownCtx observation.
 		time.Sleep(50 * time.Millisecond)
 		handlerResult <- nil // "successful" RPC

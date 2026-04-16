@@ -41,6 +41,7 @@ import (
 	"github.com/aldelo/common/wrapper/xray"
 	data "github.com/aldelo/common/wrapper/zap"
 	"github.com/aldelo/connector/adapters/circuitbreaker"
+	"github.com/aldelo/connector/internal/safego"
 	"github.com/aldelo/connector/adapters/circuitbreaker/plugins"
 	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/connector/adapters/loadbalancer"
@@ -208,7 +209,7 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 		oldConn := old
 		logger := c.ZLog()
 		d := closeDelay
-		safeGo("close-old-conn", func() {
+		safego.Go("close-old-conn", func() {
 			time.Sleep(d) // Allow in-flight RPCs to complete
 			if err := oldConn.Close(); err != nil {
 				if logger != nil {
@@ -697,7 +698,7 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 		// CL-F5: wrapped in safeGo so a panic in
 		// DoNotifierAlertService → Subscribe → user-supplied
 		// ServiceHostOnlineHandler does NOT tear down the process.
-		safeGo("notifier-reconnect-loop", func() {
+		safego.Go("notifier-reconnect-loop", func() {
 			defer c.notifierReconnectActive.Store(false)
 
 			ticker := time.NewTicker(defaultNotifierReconnectDelay)
@@ -791,35 +792,8 @@ func (c *Client) getConfig() *config {
 	return c._config.Load()
 }
 
-// safeGo runs fn in a new goroutine with panic recovery. If fn panics,
-// the value and full stack trace are logged and the goroutine exits
-// cleanly — the process keeps running.
-//
-// Fix: CL-F5 (deep-review-2026-04-13-contrarian). Mirror of the
-// server-side safeGo in service.go (SVC-F6). Pre-fix, every
-// goroutine spawned from client.go / notifierclient.go — the
-// notifier reconnect loop, the async close-old-conn goroutine, the
-// webserver errCh observer — ran without any panic guard. Any panic
-// in one of them (including panics in user callbacks invoked
-// transitively via Subscribe → ServiceHostOnlineHandler) would
-// tear down the whole process. grpc_recovery covers only RPC
-// handler invocations, not goroutines the client package launches
-// itself.
-//
-// Use safeGo for every client-package-internal goroutine spawn.
-func safeGo(name string, fn func()) {
-	if fn == nil {
-		return
-	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("!!! client.safeGo panic recovered in %q: %v\n%s !!!", name, r, debug.Stack())
-			}
-		}()
-		fn()
-	}()
-}
+// safeGo is provided by internal/safego.Go — see that package for the
+// full documentation. All goroutine spawns in this file use safego.Go.
 
 // safeCall invokes a user-provided callback (notifier handler,
 // lifecycle hook, etc.) with panic recovery. If fn panics, the
@@ -1736,7 +1710,7 @@ func (c *Client) Dial(ctx context.Context) error {
 				// A3-F2: select on closedCh so the observer exits when the
 				// client is closed, instead of leaking forever if the
 				// webserver never sends on errCh.
-				safeGo("webserver-errch-observer", func() {
+				safego.Go("webserver-errch-observer", func() {
 					select {
 					case webErr := <-serveErrCh:
 						if webErr != nil {
@@ -2135,7 +2109,7 @@ func (c *Client) DoNotifierAlertService() (err error) {
 	// (grpc.ClientConn.Close edge cases, see CL-F5 comment at line 203)
 	// cannot crash the process. Preserves CL-F5 invariant at line 803.
 	watchdogDone := make(chan struct{})
-	safeGo("subscribe-close-on-closed-watchdog", func() {
+	safego.Go("subscribe-close-on-closed-watchdog", func() {
 		closeOnClosed(c.getClosedCh(), watchdogDone, func() {
 			if nc != nil {
 				nc.Close()
@@ -3456,7 +3430,7 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 	// the local recover is retained AHEAD of safeGo's outer recover. The
 	// outer safeGo recover acts as a belt-and-suspenders backstop.
 	stopCh := c.webServerStop
-	safeGo("start-webserver-serve", func() {
+	safego.Go("start-webserver-serve", func() {
 		defer close(stopCh) // signal completion/shutdown
 		defer func() {
 			if r := recover(); r != nil {
@@ -3497,7 +3471,7 @@ func (c *Client) startWebServer(serveErr chan<- error) error {
 	// goroutine, but that is a caller-contract bug, not our concern here.
 	internalErrCh := internalServeErr
 	outCh := serveErr
-	safeGo("start-webserver-errch-forwarder", func() {
+	safego.Go("start-webserver-errch-forwarder", func() {
 		outCh <- <-internalErrCh
 	})
 

@@ -34,6 +34,7 @@ package service
 
 import (
 	"context"
+	"github.com/aldelo/connector/internal/safego"
 	"testing"
 	"time"
 )
@@ -47,6 +48,7 @@ func newSVCF7TestService(shutdownCancel bool, phase ShutdownPhase) *Service {
 	s := &Service{
 		ShutdownCancel:      shutdownCancel,
 		ShutdownCancelPhase: phase,
+		_sigHandlerReadyCh:  make(chan struct{}),
 	}
 	s._mu.Lock()
 	s._quit = make(chan bool, 1)
@@ -69,7 +71,7 @@ func newSVCF7TestService(shutdownCancel bool, phase ShutdownPhase) *Service {
 // same way the real handler bypasses the bounded grpc graceful stop.
 func startFakeQuitHandler(s *Service, honorImmediate bool) <-chan struct{} {
 	exited := make(chan struct{})
-	safeGo("svc-f7-test-quit-handler", func() {
+	safego.Go("svc-f7-test-quit-handler", func() {
 		defer close(exited)
 		<-s._quit
 		// PreDrain fire: this is the equivalent of the real handler's
