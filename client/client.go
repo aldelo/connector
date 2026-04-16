@@ -908,8 +908,9 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	// setup xray is configured via yaml
 	//
 	if cfg.Target.TraceUseXRay {
-		_ = xray.Init("127.0.0.1:2000", "1.2.0")
-		xray.SetXRayServiceOn()
+		if err := xray.Init("127.0.0.1:2000", "1.2.0"); err != nil {
+			log.Println("!!! X-Ray Init Failed: " + err.Error() + " — tracing disabled !!!")
+		}
 	}
 
 	/*

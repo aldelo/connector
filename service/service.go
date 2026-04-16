@@ -688,8 +688,9 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 	} else {
 		// enable xray if configured
 		if s._config.Service.TracerUseXRay {
-			_ = xray.Init("127.0.0.1:2000", "1.2.0")
-			xray.SetXRayServiceOn()
+			if err := xray.Init("127.0.0.1:2000", "1.2.0"); err != nil {
+				log.Println("!!! X-Ray Init Failed: " + err.Error() + " — tracing disabled !!!")
+			}
 		}
 
 		// if rest target ca cert files defined, load self-signed ca certs so that this service may use those host resources

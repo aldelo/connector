@@ -348,9 +348,8 @@ func (w *WebServer) setupWebServer() error {
 		//		X-Amzn-Seg-Id = Parent Segment ID
 		//		X-Amzn-Tr-Id = Segment Trace ID
 		if err := xray.Init("127.0.0.1:2000", "1.2.0"); err != nil {
-			log.Printf("!!! X-Ray Init Failed: %s (tracing may not be available) !!!", err.Error())
+			log.Println("!!! X-Ray Init Failed: " + err.Error() + " — tracing disabled !!!")
 		}
-		xray.SetXRayServiceOn()
 	}
 
 	// if rest target ca cert files defined, load self-signed ca certs so that this service may use those host resources
