@@ -929,7 +929,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			if publicIPSeg != nil {
 				xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddMetadata("Public-IP-Gateway", s._config.Instance.PublicIPGateway))
 				xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddMetadata("Hash-Date", util.FormatDate(time.Now().UTC())))
-				xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddMetadata("Hash-Validation-Token", validationToken))
+				xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddMetadata("Hash-Validation-Token", "[REDACTED]"))
 			}
 
 			if status, body, err := rest.GET(s._config.Instance.PublicIPGateway, []*rest.HeaderKeyValue{
