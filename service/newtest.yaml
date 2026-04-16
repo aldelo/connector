@@ -1,0 +1,69 @@
+grpc:
+    client_ca_cert_files: ""
+    connection_timeout: 15
+    keepalive_inactive_ping_time_trigger: 0
+    keepalive_inactive_ping_timeout: 0
+    keepalive_max_conn_age: 0
+    keepalive_max_conn_age_grace: 0
+    keepalive_max_conn_idle: 0
+    keepalive_min_wait: 0
+    keepalive_permit_without_stream: false
+    max_concurrent_streams: 0
+    max_recv_msg_size: 0
+    max_send_msg_size: 0
+    num_stream_workers: 0
+    rate_limit_per_second: 0
+    read_buffer_size: 0
+    server_cert_file: ""
+    server_key_file: ""
+    write_buffer_size: 0
+instance:
+    auto_deregister_prior: true
+    hash_key_name: ""
+    hash_key_secret: ""
+    health_report_service_url: ""
+    health_report_update_frequency_seconds: 120
+    initial_unhealthy: false
+    instance_favor_public_ip: false
+    instance_id: ""
+    instance_port: 0
+    instance_prefix: ms-
+    instance_version: v1.0.0
+    internal_health_frequency: 5
+    public_ip_discovery_gateway: ""
+    public_ip_gateway_key: ""
+    sd_timeout: 5
+namespace:
+    ns_id: ""
+    ns_name: ""
+queues:
+    sqs_discovery_message_retention_seconds: 300
+    sqs_discovery_queue_arn: ""
+    sqs_discovery_queue_name_prefix: service-discovery-data-
+    sqs_discovery_queue_url: ""
+    sqs_logger_message_retention_seconds: 14400
+    sqs_logger_queue_arn: ""
+    sqs_logger_queue_name_prefix: service-logger-data-
+    sqs_logger_queue_url: ""
+service:
+    rest_target_ca_cert_files: ""
+    sv_discovery_use_sqs_sns: false
+    sv_id: ""
+    sv_logger_use_sqs: false
+    sv_name: ""
+    sv_tracer_use_xray: false
+service_auto_create:
+    sac_dns_routing: multivalue
+    sac_dns_ttl: 90
+    sac_dns_type: srv
+    sac_health_custom: true
+    sac_health_failthreshold: 1
+    sac_health_pubdns_path: ""
+    sac_health_pubdns_type: ""
+target:
+    app_name: connector.service
+    region: us-east-1
+topics:
+    sns_discovery_subscription_arn: ""
+    sns_discovery_topic_arn: ""
+    sns_discovery_topic_name_prefix: service-discovery-notify-

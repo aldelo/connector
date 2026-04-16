@@ -1195,6 +1195,16 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 					if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
 						_ = p.Signal(syscall.SIGTERM)
 					}
+				} else {
+					// A2-P6-01 (2026-04-16): gRPC Serve failed before awaitOsSigExit
+					// registered the signal handler. Self-SIGTERM would hit the Go
+					// runtime's default handler (process termination) instead of the
+					// registered channel. Fall back to a non-blocking quit-channel
+					// send so the quit handler can still run cleanup.
+					select {
+					case quit <- true:
+					default:
+					}
 				}
 			} else {
 				log.Println("... gRPC Server Quit Command Received")
