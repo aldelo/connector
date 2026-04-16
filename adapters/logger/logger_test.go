@@ -18,8 +18,10 @@ package logger
 
 import (
 	"context"
+	"log"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -657,6 +659,88 @@ func TestNewLoggerInterceptors_PropagatesHandlerError(t *testing.T) {
 	_, gotErr := uIntr(context.Background(), nil, &grpc.UnaryServerInfo{FullMethod: "/x.Y/Z"}, handler)
 	if gotErr != wantErr {
 		t.Errorf("expected handler error to propagate, got %v", gotErr)
+	}
+}
+
+// -----------------------------------------------------------------------
+// logPeerMigrationOnce testability — A4-P6-F2 (2026-04-16)
+// -----------------------------------------------------------------------
+//
+// The package-level sync.Once fires at most once per process, making it
+// impossible to verify the migration warning in more than one test
+// function within the same binary. resetLogPeerMigrationOnce replaces
+// the Once with a fresh instance so each test that exercises the warning
+// path gets a clean slate. This function exists only in _test.go and is
+// not compiled into production binaries.
+
+func resetLogPeerMigrationOnce() {
+	logPeerMigrationOnce = sync.Once{}
+}
+
+func TestLogPeerMigrationWarning_FiresWhenNotExplicit_A4P6F2(t *testing.T) {
+	resetLogPeerMigrationOnce()
+
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr) // restore default
+
+	// Call with NO WithLogPeer option — should trigger the migration warning
+	NewLoggerInterceptors(nil)
+
+	output := buf.String()
+	if !strings.Contains(output, "[MIGRATION]") {
+		t.Errorf("expected migration warning to fire, got: %q", output)
+	}
+	if !strings.Contains(output, "WithLogPeer") {
+		t.Errorf("expected warning to mention WithLogPeer, got: %q", output)
+	}
+}
+
+func TestLogPeerMigrationWarning_DoesNotFireWhenExplicit_A4P6F2(t *testing.T) {
+	resetLogPeerMigrationOnce()
+
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	// Call WITH explicit WithLogPeer(false) — should NOT trigger the warning
+	NewLoggerInterceptors(nil, WithLogPeer(false))
+
+	output := buf.String()
+	if strings.Contains(output, "[MIGRATION]") {
+		t.Errorf("migration warning should NOT fire when WithLogPeer is set explicitly, got: %q", output)
+	}
+}
+
+func TestLogPeerMigrationWarning_FiresOncePerReset_A4P6F2(t *testing.T) {
+	resetLogPeerMigrationOnce()
+
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	// First call — should fire
+	NewLoggerInterceptors(nil)
+	first := buf.String()
+	if !strings.Contains(first, "[MIGRATION]") {
+		t.Fatalf("expected migration warning on first call, got: %q", first)
+	}
+
+	// Second call without reset — should NOT fire again (Once semantics)
+	buf.Reset()
+	NewLoggerInterceptors(nil)
+	second := buf.String()
+	if strings.Contains(second, "[MIGRATION]") {
+		t.Errorf("migration warning should fire only once per sync.Once, but fired again: %q", second)
+	}
+
+	// After reset — should fire again
+	resetLogPeerMigrationOnce()
+	buf.Reset()
+	NewLoggerInterceptors(nil)
+	third := buf.String()
+	if !strings.Contains(third, "[MIGRATION]") {
+		t.Errorf("expected migration warning to fire after reset, got: %q", third)
 	}
 }
 

@@ -1150,7 +1150,29 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 
 	stopHealthReportService := make(chan bool, 1)
 
-	// Launch server startup in a goroutine
+	// Launch server startup in a goroutine.
+	//
+	// A2-P6-02 (2026-04-16): Startup goroutine coordination gap — known P3.
+	//
+	// The safeGo goroutines spawned below (grpc-server, web-server,
+	// sd-health-reporter, health-report-ticker) have no coordinated
+	// termination on early quit. If the gRPC listener fails to bind (e.g.,
+	// EADDRINUSE), the grpc-server goroutine sends on quit (or self-SIGTERMs),
+	// but the sd-health-reporter and health-report-ticker goroutines remain
+	// alive until the quit handler sends on stopHealthReportService. This is
+	// functionally safe — those goroutines block on timers and select on
+	// stopHealthReportService, so they DO eventually drain — but there is a
+	// window where the startup-orchestrator goroutine continues launching
+	// sub-goroutines (web-server, sd-health-reporter) after gRPC has already
+	// failed. The window is narrow (~150ms for the web-server sleep) and the
+	// affected goroutines are all interruptible via stopHealthReportService.
+	//
+	// Not fixed with errgroup/WaitGroup: the startup ordering is load-bearing
+	// (gRPC must start before web server, health warm-up must overlap with
+	// both) and introducing a shared cancellation context would risk changing
+	// the timing assumptions that the health warm-up and SD registration
+	// depend on. The cost of the gap (a few extra log lines during a failed
+	// startup) does not justify the risk of altering the startup flow.
 	safeGo("startup-orchestrator", func() {
 		if s.BeforeServerStart != nil {
 			log.Println("Before gRPC Server Starts Begin...")
@@ -1451,8 +1473,14 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 		s.unsubscribeSNS()
 
 		// Delete health report from data store
+		// A2-P6-03 (2026-04-16): nil-guard _config before reading Instance.Id,
+		// matching the cfg != nil pattern used 10 lines above. Without this guard,
+		// a quit signal arriving before config is loaded panics on nil dereference.
 		s._mu.RLock()
-		instanceId := s._config.Instance.Id
+		var instanceId string
+		if s._config != nil {
+			instanceId = s._config.Instance.Id
+		}
 		s._mu.RUnlock()
 
 		if util.LenTrim(instanceId) > 0 {

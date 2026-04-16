@@ -65,8 +65,30 @@ import (
 )
 
 // startServerFnTestMu serializes the global startServerFn override
-// across the two Serve-error tests so go test -count=N or parallel
+// across the Serve-error tests so go test -count=N or parallel
 // dispatch within this file cannot race on the package-level var.
+//
+// A2-P6-05 (2026-04-16): Fragility documentation.
+//
+// What it guards: the package-level `startServerFn` variable, which is
+// the test-injection seam for Serve()'s startServer call. Any test that
+// overrides startServerFn MUST hold this mutex for the entire duration
+// of the override (including the Serve() call and any assertions that
+// depend on the injected behavior).
+//
+// Why it exists: startServerFn is a package-level var, not a per-Service
+// field. Two tests overriding it concurrently would race on the write
+// and could restore the wrong original value. The mutex makes the
+// override-use-restore cycle atomic across tests.
+//
+// Rule for future tests: any new test that touches startServerFn MUST
+// use withInjectedStartServerFailure (below) or acquire startServerFnTestMu
+// directly. Do NOT call t.Parallel() on any test that holds this mutex —
+// the lock serializes against other startServerFn tests in the same binary,
+// but t.Parallel() would allow other non-mutex tests to interleave, which
+// is fine, EXCEPT if those other tests also touch startServerFn without
+// the mutex. Grep for `startServerFn` before adding t.Parallel() to any
+// test in this file.
 var startServerFnTestMu sync.Mutex
 
 // newServeErrorTestService builds a Service that is able to reach the

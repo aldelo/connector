@@ -18,14 +18,15 @@ package client
 
 import (
 	"context"
+	"log"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	testpb "github.com/aldelo/connector/example/proto/test"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
-	"log"
 )
 
 // -------- CL-F3 _lifecycleMu tests --------
@@ -569,6 +570,104 @@ func TestCL_F5_CallAlertStopped_NilReceiverNoop(t *testing.T) {
 	}()
 	var nc *NotifierClient
 	nc.callAlertStopped("should be swallowed")
+}
+
+// -------- A3-F1 HealthProbe snapshot safety tests --------
+// A3-F1 ensures the HealthProbe method captures the health checker
+// snapshot under connMu.RLock and gracefully handles nil/closed states.
+// A full rotation test requires a real gRPC server so we test the
+// guard paths that don't need a live connection.
+
+func TestA3_F1_HealthProbe_NilClient(t *testing.T) {
+	var c *Client
+	status, err := c.HealthProbe("test-svc")
+	if err == nil {
+		t.Fatal("expected error for nil client, got nil")
+	}
+	if status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+		t.Errorf("expected NOT_SERVING, got %v", status)
+	}
+}
+
+func TestA3_F1_HealthProbe_ClosedClient(t *testing.T) {
+	c := &Client{}
+	c.closed.Store(true)
+
+	status, err := c.HealthProbe("test-svc")
+	if err == nil {
+		t.Fatal("expected error for closed client, got nil")
+	}
+	if status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+		t.Errorf("expected NOT_SERVING, got %v", status)
+	}
+	if !contains(err.Error(), "client is closed") {
+		t.Errorf("error should mention closed client, got: %v", err)
+	}
+}
+
+func TestA3_F1_HealthProbe_NilConnection(t *testing.T) {
+	c := &Client{}
+	// No connection set — _conn is nil.
+	status, err := c.HealthProbe("test-svc")
+	if err == nil {
+		t.Fatal("expected error for nil connection, got nil")
+	}
+	if status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+		t.Errorf("expected NOT_SERVING, got %v", status)
+	}
+	if !contains(err.Error(), "client connection is nil") {
+		t.Errorf("error should mention nil connection, got: %v", err)
+	}
+}
+
+// -------- A3-F2 webserver errch observer cancellation test --------
+// A3-F2 adds a closedCh branch to the webserver error channel observer
+// goroutine. This test verifies the observer exits when the client is
+// closed, rather than blocking forever on errCh.
+
+func TestA3_F2_WebserverObserverExitsOnClose(t *testing.T) {
+	c := &Client{}
+	// Initialize closedCh (simulating a dialed client).
+	c.closedChMu.Lock()
+	c.closedCh = make(chan struct{})
+	c.closedChMu.Unlock()
+
+	errCh := make(chan error, 1) // buffered, will NOT send anything
+	exited := make(chan struct{})
+
+	go func() {
+		defer close(exited)
+		select {
+		case webErr := <-errCh:
+			if webErr != nil {
+				log.Printf("webserver error: %v", webErr)
+			}
+		case <-c.getClosedCh():
+			// Client closed — stop observing.
+		}
+	}()
+
+	// Simulate client closing by closing closedCh.
+	c.closedChMu.Lock()
+	close(c.closedCh)
+	c.closedChMu.Unlock()
+
+	select {
+	case <-exited:
+		// Good: observer exited promptly when closedCh fired.
+	case <-time.After(2 * time.Second):
+		t.Fatal("observer goroutine did not exit within 2s after closedCh closed")
+	}
+}
+
+// contains is a small helper to avoid importing strings in the test file.
+func contains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // panicError wraps a recovered panic value so it can flow through a

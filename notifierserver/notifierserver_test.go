@@ -1,10 +1,62 @@
 package notifierserver
 
 import (
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// -----------------------------------------------------------------------
+// A4-P6-F1: Source-level test — SNS relay must NOT have CORS middleware
+// -----------------------------------------------------------------------
+//
+// NewNotifierServer has heavy external dependencies (DynamoDB, SNS, config
+// files) making it impractical to instantiate in a unit test. Instead we
+// pin the source invariant: the "base" RouteDefinition must set
+// CorsMiddleware to nil, not to &cors.Config{} or any other value.
+// This catches re-introduction of an empty CORS config at code-review
+// time without needing a full integration harness.
+
+func TestSNSRelayEndpoint_NoCorsMiddleware_A4P6F1(t *testing.T) {
+	src, err := os.ReadFile("notifierserver.go")
+	if err != nil {
+		t.Fatalf("cannot read notifierserver.go: %v", err)
+	}
+	body := string(src)
+
+	// The route definition must contain CorsMiddleware: nil
+	if !strings.Contains(body, "CorsMiddleware: nil,") {
+		t.Error("A4-P6-F1 regression: SNS relay route definition must set CorsMiddleware: nil (no CORS for server-to-server SNS callbacks)")
+	}
+
+	// The old empty config must NOT exist
+	if strings.Contains(body, "CorsMiddleware: &cors.Config{}") {
+		t.Error("A4-P6-F1 regression: SNS relay route definition still has empty &cors.Config{} — remove CORS entirely for SNS endpoints")
+	}
+}
+
+// A4-P6-F3: Source-level test — the fire-and-forget trade-off must be documented
+func TestSNSRelayHandler_FireAndForgetDocumented_A4P6F3(t *testing.T) {
+	src, err := os.ReadFile("notifierserver.go")
+	if err != nil {
+		t.Fatalf("cannot read notifierserver.go: %v", err)
+	}
+	body := string(src)
+
+	// Must document the intentional fire-and-forget pattern near the safeGo call
+	required := []string{
+		"fire-and-forget",
+		"Broadcast",
+		"SNS",
+	}
+	for _, kw := range required {
+		if !strings.Contains(body, kw) {
+			t.Errorf("A4-P6-F3: expected documentation keyword %q near safeGo call site in snsrelay handler", kw)
+		}
+	}
+}
 
 // TG-4: safeGo tests for notifierserver.
 // The safeGo function here is identical to service/service.go's version

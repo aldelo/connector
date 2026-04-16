@@ -67,7 +67,6 @@ import (
 	"github.com/aldelo/connector/notifierserver/impl"
 	pb "github.com/aldelo/connector/notifierserver/proto"
 	"github.com/aldelo/connector/service"
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc"
 )
@@ -147,7 +146,10 @@ func NewNotifierServer(appName string, configFileNameGrpcServer string, configFi
 						Handler:         snsupdate,
 					},
 				},
-				CorsMiddleware: &cors.Config{},
+				// A4-P6-F1: No CORS middleware on the SNS relay endpoint. SNS sends
+				// server-to-server HTTP callbacks — no browser is involved, so CORS
+				// headers serve no purpose and would only widen the attack surface.
+				CorsMiddleware: nil,
 			},
 		},
 	}
@@ -218,6 +220,16 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 	log.Println("Notifier Server SNS Relay Started...")
 
 	if util.LenTrim(n.Message) > 0 {
+		// A4-P6-F3: Intentional fire-and-forget via safeGo. The HTTP 200 is
+		// returned to AWS SNS *before* Broadcast completes. Trade-off:
+		//   - Pro: Sub-millisecond response to SNS avoids delivery timeouts
+		//     (SNS enforces a 15-second HTTP timeout on endpoints).
+		//   - Con: If Broadcast fails, the 200 has already been sent — SNS
+		//     considers the delivery successful and will NOT retry.
+		//   - Mitigation: Broadcast failures are logged at ERROR level below.
+		//     Operators should alert on "Notifier Server Relay SNS Message Failed"
+		//     log lines to detect silent delivery failures.
+		// Do NOT make this synchronous without accounting for the SNS timeout.
 		// CONN-R3-003 + CONN-R3-002: Use safeGo for panic isolation with debug.Stack
 		safeGo("sns-relay", func() {
 

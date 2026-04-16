@@ -159,7 +159,12 @@ func (c *Client) setConnection(conn *grpc.ClientConn, remote string) {
 		return
 	}
 
-	// refuse to bind a new connection when the client is already closed.
+	// A3-F3: refuse to bind a new connection when the client is already
+	// closed. This read of c.closed is outside connMu — that is safe
+	// because setConnection is only reachable from Dial, which is
+	// serialized by _lifecycleMu. No concurrent writer can flip closed
+	// between this check and the connMu.Lock below without first
+	// acquiring _lifecycleMu (which Close() also acquires).
 	if c.closed.Load() {
 		if conn != nil {
 			_ = conn.Close() // avoid leak and zombie connection
@@ -1728,13 +1733,21 @@ func (c *Client) Dial(ctx context.Context) error {
 			if !consumed {
 				// CL-F5: safeGo so a panic on late errCh delivery does
 				// not crash the process.
+				// A3-F2: select on closedCh so the observer exits when the
+				// client is closed, instead of leaking forever if the
+				// webserver never sends on errCh.
 				safeGo("webserver-errch-observer", func() {
-					if webErr := <-serveErrCh; webErr != nil {
-						if z := c.ZLog(); z != nil {
-							z.Errorf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
-						} else {
-							log.Printf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
+					select {
+					case webErr := <-serveErrCh:
+						if webErr != nil {
+							if z := c.ZLog(); z != nil {
+								z.Errorf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
+							} else {
+								log.Printf("Http Web Server %s exited: %v", c.WebServerConfig.AppName, webErr)
+							}
 						}
+					case <-c.getClosedCh():
+						// Client is closing; stop observing the webserver error channel.
 					}
 				})
 			}
@@ -2438,6 +2451,12 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 		}
 	}
 
+	// A3-F1: capture hc and conn atomically under RLock. The snapshot may
+	// become stale if setConnection rotates the connection concurrently,
+	// but hc.Check() will return an appropriate gRPC error in that case
+	// (the old connection enters Shutdown state). Callers should retry on
+	// transient errors. Holding RLock through the Check() call is avoided
+	// because Check() performs a blocking RPC and would starve writers.
 	c.connMu.RLock()
 	hc := c._healthManualChecker
 	conn := c._conn
@@ -2453,14 +2472,23 @@ func (c *Client) HealthProbe(serviceName string, timeoutDuration ...time.Duratio
 	if hc == nil {
 		// conn is guaranteed non-nil here (checked above)
 		c.setupHealthManualChecker()
+
+		// A3-F1: re-snapshot hc AND conn under a single RLock to ensure the
+		// health checker we use belongs to the current connection. If a
+		// rotation happened between the first snapshot and this one, we get
+		// the new hc for the new conn, not a stale hc for the old conn.
 		c.connMu.RLock()
 		hc = c._healthManualChecker
+		conn = c._conn
+		c.connMu.RUnlock()
+
 		if hc == nil {
-			c.connMu.RUnlock()
 			return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: (Auto Instantiate) %s", "Health Manual Checker is Nil")
 		}
-		// Hold RLock through the nil check to prevent TOCTOU race
-		c.connMu.RUnlock()
+		// Re-check conn after re-snapshot since rotation may have closed it.
+		if conn == nil || conn.GetState() == connectivity.Shutdown {
+			return grpc_health_v1.HealthCheckResponse_NOT_SERVING, fmt.Errorf("Health Probe Failed: connection rotated during health check setup")
+		}
 	}
 
 	printf("Health Probe - Manual Check Begin...")
@@ -2925,6 +2953,11 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		}
 	}
 
+	// A3-F4: _sd is read under connMu.RLock and used after release.
+	// This is lifecycle-safe: _sd is set once during Dial (serialized
+	// by _lifecycleMu) and cleared only during Close (also serialized).
+	// The snapshot cannot become stale during normal operation. The
+	// connMu guard here prevents a data race with Close's teardown.
 	c.connMu.RLock()
 	sd := c._sd
 	c.connMu.RUnlock()

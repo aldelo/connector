@@ -85,6 +85,18 @@ import (
 // generous: signal.Notify is a microsecond-scale operation; anything
 // approaching 2s indicates awaitOsSigExit never progressed past its
 // preamble (a real regression).
+//
+// A2-P6-04 (2026-04-16): This uses a sleep-based poll because
+// _sigHandlerReady is an atomic.Bool — there is no channel or
+// condition variable to wait on. Exposing a readiness channel from
+// production code solely for test consumption was rejected as too
+// invasive for the narrow benefit: the poll converges in <1ms on all
+// observed CI runs (signal.Notify is a microsecond-scale syscall),
+// and the 2s timeout ensures the test fails fast on regression rather
+// than hanging. The 2ms sleep interval balances CPU waste against
+// responsiveness — shorter intervals (100us) burn CPU on slow CI
+// runners; longer intervals (50ms) would mask regressions that
+// manifest as delayed readiness.
 func waitForSigHandlerReady(t *testing.T, s *Service, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -92,7 +104,7 @@ func waitForSigHandlerReady(t *testing.T, s *Service, timeout time.Duration) {
 		if time.Now().After(deadline) {
 			t.Fatalf("SVC-F8 regression: awaitOsSigExit did not set _sigHandlerReady within %s — signal.Notify registration stage did not complete", timeout)
 		}
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
