@@ -41,12 +41,39 @@ package logger
 // uses the data.ZapLog wrapper that the rest of the connector already
 // depends on, plus google.golang.org/grpc/status for code extraction.
 //
+// PII defaults (SP-010 pass-5, 2026-04-15):
+//
+//   - WithLogMetadata defaults to false — gRPC metadata is off unless
+//     explicitly enabled, and even then the built-in denylist redacts
+//     common secret headers.
+//   - WithLogPeer defaults to false (A4-F1) — client IPs are personal
+//     data under GDPR/CCPA/UK-DPA and must not ship enabled by default.
+//     Set WithLogPeer(true) explicitly if your service requires peer
+//     logging and has documented the legal basis.
+//   - Error message bodies are truncated to maxErrorLen to bound log
+//     volume and prevent leakage of long internal trace strings.
+//
+// Cost bounds (SP-010 pass-5 A4-F3, 2026-04-15):
+//
+//   - WithSampleRate defaults to unlimited, preserving the legacy
+//     backward-compatible behavior. A hot-path emitter with no upper
+//     bound becomes the largest line item on the CloudWatch ingest
+//     bill the moment something misbehaves upstream — a 5K RPS
+//     scanner storm or a panic loop in a downstream service produces
+//     5K lines/s through Errorw, and Zap itself does not throttle.
+//     Services exposed to uncontrolled traffic should opt in with
+//     WithSampleRate(cap) to cap emissions per second via a token
+//     bucket; dropped lines are silently discarded (the RPC still
+//     completes normally).
+//
 // Wire it in from a Service:
 //
 //	z := svc.ZLog() // or any *data.ZapLog the caller manages
 //	uIntr, sIntr := logger.NewLoggerInterceptors(z,
 //	    logger.WithSensitiveHeaders("x-tenant-secret"),
 //	    logger.WithLogMetadata(true),
+//	    logger.WithLogPeer(true),     // opt-in if peer logging required
+//	    logger.WithSampleRate(500),   // opt-in cost cap: 500 emissions/sec
 //	)
 //	svc.UnaryServerInterceptors  = append(svc.UnaryServerInterceptors,  uIntr)
 //	svc.StreamServerInterceptors = append(svc.StreamServerInterceptors, sIntr)
@@ -59,6 +86,7 @@ import (
 	"unicode/utf8"
 
 	data "github.com/aldelo/common/wrapper/zap"
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -100,6 +128,34 @@ type loggerOptions struct {
 	sensitiveHeaders map[string]struct{}
 	logMetadata      bool
 	logPeer          bool
+	// rateLimiter caps emissions per second when non-nil. nil means
+	// unlimited (the backward-compatible default). Populated via
+	// WithSampleRate. SP-010 pass-5 A4-F3 (2026-04-15).
+	rateLimiter *rate.Limiter
+}
+
+// newDefaultLoggerOptions returns the default options applied when no
+// Option functions are passed to NewLoggerInterceptors. Centralized in
+// one place so that:
+//
+//  1. The constructor initializes exactly one definitive set of
+//     defaults (no risk of drift between multiple initialization sites).
+//  2. Tests can call this directly and assert the defaults without
+//     having to reach into the unexported cfg built inside the
+//     constructor's closure.
+//
+// SP-010 pass-5 A4-F1 (2026-04-15): logPeer defaults to false. See the
+// WithLogPeer godoc for the full rationale.
+//
+// SP-010 pass-5 A4-F3 (2026-04-15): rateLimiter defaults to nil
+// (unlimited). See the WithSampleRate godoc for the full rationale.
+func newDefaultLoggerOptions() *loggerOptions {
+	return &loggerOptions{
+		sensitiveHeaders: copyDenylist(defaultSensitiveHeaders),
+		logMetadata:      false,
+		logPeer:          false,
+		rateLimiter:      nil,
+	}
 }
 
 // Option configures the structured logger interceptors returned by
@@ -128,11 +184,70 @@ func WithLogMetadata(enabled bool) Option {
 }
 
 // WithLogPeer controls whether the peer address (from grpc/peer) is
-// included on each log entry. Defaults to true; set false in environments
-// where client IPs are considered PII (e.g. EU consumer endpoints under
-// GDPR).
+// included on each log entry.
+//
+// Default: false. SP-010 pass-5 A4-F1 (2026-04-15) flipped this from
+// true → false because client IPs are personal data under GDPR, CCPA,
+// and UK-DPA; the previous default silently pulled every deployment of
+// this package into a data-protection amendment that nobody signed up
+// for. A package named "PII-aware logger" should not require opt-out
+// to be PII-safe.
+//
+// Set WithLogPeer(true) explicitly in environments where peer logging
+// is required (typically internal-only backends, compliance-audit
+// pipelines, or non-regulated B2B deployments). Document the decision
+// in your service's data-retention policy when you do.
+//
+// Breaking change notice: services that previously relied on the
+// implicit true default will need to add WithLogPeer(true) to their
+// interceptor construction when upgrading past v1.8.2. Grep for
+// NewLoggerInterceptors at upgrade time.
 func WithLogPeer(enabled bool) Option {
 	return func(o *loggerOptions) { o.logPeer = enabled }
+}
+
+// WithSampleRate caps the number of log emissions per second using a
+// token bucket. Values <= 0 mean unlimited (the default, which preserves
+// backward-compatible behavior for every consumer that does not opt in).
+// Dropped emissions are silently discarded — the RPC still completes
+// normally, only the access log line is skipped.
+//
+// Motivation — SP-010 pass-5 A4-F3 (2026-04-15): a hot-path emitter with
+// no upper bound becomes the largest line item on the CloudWatch ingest
+// bill the moment something misbehaves upstream. A 5K RPS scanner storm
+// or a panic loop in a downstream service produces 5K lines/s through
+// Errorw, and Zap itself does not throttle. The metrics package learned
+// the same operational invariant via M1-001; applying it to the logger
+// closes the symmetry gap. Default unlimited was chosen over error-only
+// throttling because success-path volume can spike just as hard
+// (retry storms, client reconnect floods) and a single option that caps
+// both is simpler to reason about than two separate throttles.
+//
+// Burst is set equal to perSecondCap so that short bursts are absorbed
+// cleanly while the steady-state rate enforces the cap. A cap of 100
+// means "up to 100 tokens available instantaneously, refilling at 100
+// tokens/second."
+//
+// Lifecycle: each NewLoggerInterceptors call receives its own limiter —
+// limiters are NOT shared across services, so a 100 rps cap applied to
+// two services yields up to 200 rps combined. This matches the
+// per-interceptor-instance lifecycle of the other options and avoids
+// cross-service interference. The same limiter is shared by the unary
+// and stream interceptor pair returned from a single constructor call
+// (both sides of the pair receive cfg by closure), so the cap applies
+// to the combined unary+stream emission rate, which is the natural
+// accounting unit for a single logical service.
+//
+// Concurrency: rate.Limiter.Allow() is goroutine-safe via its internal
+// mutex; no additional synchronization is required.
+func WithSampleRate(perSecondCap int) Option {
+	return func(o *loggerOptions) {
+		if perSecondCap <= 0 {
+			o.rateLimiter = nil
+			return
+		}
+		o.rateLimiter = rate.NewLimiter(rate.Limit(perSecondCap), perSecondCap)
+	}
 }
 
 // NewLoggerInterceptors returns a paired (unary, stream) gRPC server
@@ -154,11 +269,7 @@ func WithLogPeer(enabled bool) Option {
 // symbols for backward compatibility. New integrations should use this
 // constructor.
 func NewLoggerInterceptors(z *data.ZapLog, opts ...Option) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
-	cfg := &loggerOptions{
-		sensitiveHeaders: copyDenylist(defaultSensitiveHeaders),
-		logMetadata:      false,
-		logPeer:          true,
-	}
+	cfg := newDefaultLoggerOptions()
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -184,6 +295,12 @@ func NewLoggerInterceptors(z *data.ZapLog, opts ...Option) (grpc.UnaryServerInte
 // log level. Centralized so unary and stream paths cannot drift.
 func emit(ctx context.Context, z *data.ZapLog, cfg *loggerOptions, method, kind string, dur time.Duration, err error) {
 	if z == nil {
+		return
+	}
+	// SP-010 pass-5 A4-F3 (2026-04-15): token-bucket cost cap. nil
+	// limiter = unlimited (default, BC). When the bucket is empty we
+	// drop the log line silently — the handler result is untouched.
+	if cfg.rateLimiter != nil && !cfg.rateLimiter.Allow() {
 		return
 	}
 

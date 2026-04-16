@@ -1101,6 +1101,22 @@ func (s *Service) CurrentlyServing() bool {
 	return s._serving
 }
 
+// startServerFn is the indirection used by Serve() to invoke startServer.
+// Production code MUST leave this as the default (*Service).startServer
+// method-value — it exists solely so the P1-CONN-SVC-02 regression test
+// at service/service_svc_serve_error_test.go can inject a synthetic
+// startServer failure and exercise the real Serve() error branch end
+// to end. See SP-010 pass-5 finding A2-F-2B (2026-04-15) and lesson L18
+// for the causal-path-vs-postcondition distinction that motivated this
+// injection point.
+//
+// Concurrency: this var is written only during test setup (before a
+// Serve() call) and restored via defer at test teardown. Tests must NOT
+// mutate it concurrently with a running Serve(), nor from parallel
+// tests; the service package owns the single Serve() contract and the
+// P1-CONN-SVC-02 tests run sequentially.
+var startServerFn = (*Service).startServer
+
 // startServer will start and serve grpc services, it will run in goroutine until terminated.
 // FIX #8: Replaced busy-wait (default + time.Sleep(10ms)) with blocking on quit channel
 // after server startup is complete.
@@ -2200,7 +2216,7 @@ func (s *Service) Serve() error {
 	quitDone := s._quitDone
 	s._mu.Unlock()
 
-	if err = s.startServer(lis, quit, quitDone); err != nil {
+	if err = startServerFn(s, lis, quit, quitDone); err != nil {
 		_ = lis.Close()
 		// P1-CONN-SVC-02 (2026-04-15): startServer failed BEFORE the
 		// quit-handler goroutine was installed. _quit and _quitDone are

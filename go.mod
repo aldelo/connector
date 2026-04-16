@@ -3,11 +3,12 @@ module github.com/aldelo/connector
 go 1.26.2
 
 require (
-	github.com/aldelo/common v1.8.1
+	github.com/aldelo/common v1.8.2
 	github.com/aws/aws-sdk-go v1.55.8
 	github.com/aws/aws-xray-sdk-go v1.8.5
 	github.com/gin-contrib/cors v1.7.6
 	github.com/gin-gonic/gin v1.11.0
+	golang.org/x/time v0.14.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260209200024-4cfbd4190f57
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
@@ -89,7 +90,6 @@ require (
 	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
-	golang.org/x/time v0.14.0 // indirect
 )
 
 replace github.com/gomodule/redigo v2.0.0+incompatible => github.com/gomodule/redigo v1.9.3

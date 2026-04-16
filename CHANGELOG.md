@@ -15,6 +15,179 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ## [Unreleased]
 
+## [v1.8.2] — 2026-04-16
+
+Patch release. Coordinated sibling to `common v1.8.2`. Closes five
+`connector` findings and one test-coverage note from the **SP-010
+pass-5 contrarian review** cycle. All fixes target surfaces already
+touched by `v1.8.1`'s remediation wave (`adapters/logger`,
+`adapters/metrics`, `service`, `client`) — this release is the
+correctness sweep that the pass-5 review demanded before those
+surfaces could be considered fully hardened.
+
+No observable contract change from `v1.8.1`. Every public function
+signature in `client/`, `service/`, `adapters/`, `notifiergateway/`,
+and `webserver/` is preserved. Consumers pinning `connector v1.8.1`
+should bump to `v1.8.2` as a drop-in for the GDPR-safety, cache-cap,
+and test-coverage guarantees below.
+
+Context: SP-010 pass-5 re-audited `v1.8.1` against a contrarian rule
+set — "assume the v1.8.1 fixes are incomplete, find what was missed".
+The review found five findings in `common` (A1 class — already tagged
+as `common v1.8.2`) and six in `connector` (A2/A4 class), landed as
+per-gap commits under the standing directive *"one gap at a time,
+review+audit between gap groups, version ceiling v1.8.2."* The
+per-gap protocol was: fix → regression test → mutation probe
+(causality validation) → full suite green → per-finding commit.
+Three independent reviewer audits (Gap 1.A / 2.A / 3.A) returned
+PASS or PASS-WITH-NOTES with zero blockers.
+
+### Changed — sibling pin bump
+
+- **`github.com/aldelo/common`** pin moved `v1.8.1 → v1.8.2`. The
+  sibling release contains:
+  - **SP-010 A1-F1** — `ensureSNSCtx` xray-on deadline enforcement
+  - **SP-010 A1-F2** — 29 callsite comment rewrite post-A1-F1
+  - **SP-010 A1-F3** — `SendSMS` phone PII mask in xray metadata
+  - **SP-010 A1-F4** — `maskPhoneForXray` UTF-8 rune-based slicing
+    (origin of lesson L18)
+  - **SP-010 A1-F5** — `ensureSNSCtx` nil-segCtx dead-guard test
+
+  See `github.com/aldelo/common` CHANGELOG `[v1.8.2]` entry for the
+  full narrative. Pure pin bump for `connector`; no consumer-visible
+  behavioral change at the `connector` surface.
+
+### Fixed — SP-010 A4-F1 (`adapters/logger` — GDPR default)
+
+- **`WithLogPeer` now defaults to `false`.** The v1.8.1 logger
+  interceptor shipped with `logPeer: true` as the default in
+  `newDefaultLoggerOptions()`, meaning every gRPC method log
+  entry included the client IP address unless the consumer
+  explicitly opted out. Under GDPR/CCPA/UK-DPA a client IP is
+  personal data; logging it by default creates a compliance
+  obligation on every consumer that deploys the interceptor.
+  The pass-5 review classified this as a P1 finding (A4-F1).
+  Fix: `logPeer` defaults to `false` in `newDefaultLoggerOptions()`
+  at `logger.go:153`; consumers who need peer logging opt in via
+  `WithLogPeer(true)`. Breaking-change notice added to `WithLogPeer`
+  godoc and package-level godoc with upgrade instructions.
+  Commit `eb91f5d`.
+
+### Fixed — SP-010 A4-F3 (`adapters/logger` — opt-in rate limit)
+
+- **New `WithSampleRate` option for log emission throttling.**
+  High-traffic gRPC services logging every RPC can saturate log
+  sinks and obscure signals. `WithSampleRate(perSecondCap)` wires
+  an `x/time/rate.Limiter` token bucket into the emit gate so only
+  `perSecondCap` log entries per second pass through (with burst=cap
+  for initial-burst tolerance). The limiter is opt-in — omitting
+  `WithSampleRate` preserves the existing "log every RPC" behavior.
+  `WithSampleRate(0)` or `WithSampleRate(-1)` disables the limiter
+  (same as omitting). Emission gate placed AFTER the nil-logger
+  check so nil-logger no-op never consumes tokens. Commit `28f976f`.
+
+### Fixed — SP-010 A4-F2 (`adapters/metrics` — label cache cap)
+
+- **Interceptor label caches capped at 4096 entries per cache.**
+  The SP-008 P1-CONN-MET-A optimization introduced four
+  process-global `sync.Map` label caches for the hot-path
+  `{method, code}` and `{method}` maps. Server-side caches are
+  naturally bounded by the .proto surface, but client-side caches
+  take `method` from the call site — a gRPC-Web bridge, dynamic
+  codec, or fuzzer that constructs method names from user input
+  would grow the client caches without bound. Fix:
+  `DefaultInterceptorLabelCacheLimit = 4096` entries per cache;
+  on cap-exceeded, `getOrBuildPairLabels` / `getOrBuildMethodLabels`
+  fall through to a fresh per-call allocation (the pre-optimization
+  cost model — slower, but bounded memory).
+  `InterceptorLabelCacheOverflow()` reports cumulative fall-throughs
+  for operator visibility. `resetInterceptorLabelCaches()` added
+  for test isolation. Commit `9ee07ab`.
+
+### Fixed — SP-010 A2-F-2B (`service` — tautological test rewrite)
+
+- **`TestService_SVC02_ServeStartServerError_CausesCleanup`
+  replaces tautological SVC-02 regression test.** The v1.8.1
+  `TestService_ServeStartServerErrorFixup_NoDeadlock` test asserted
+  that `GracefulStop` returned within a timeout but did not verify
+  WHICH code path it took — the fix or the legacy safety net. The
+  pass-5 review classified this as a P1 finding (A2-F-2B):
+  mutation-deleting the fix body leaves the test green because the
+  legacy path also returns within the timeout. The rewrite
+  instruments a `beforeStartServer` hook that injects a failure,
+  then asserts the causal invariant — `_quit` and `_quitDone` are
+  nil'd under `_mu` after the error path — which only passes if
+  the fix code executed. Commit `6662bdd`.
+
+### Added — SP-010 A2-F-2A (`service` — SVC-F8 sender-side gate test)
+
+- **`TestService_SVC_F8_SelfSignal_SenderSideGate`** — regression
+  test that drives the sender-side readiness gate path. The v1.8.1
+  P2-CONN-CI-01 test exercised the happy path (signal.Notify
+  registered → self-signal reaches channel) but no test verified
+  the gate itself: what happens when `GracefulStop` / `ImmediateStop`
+  fires BEFORE `awaitOsSigExit` has set `_sigHandlerReady`? Without
+  the gate the self-signal hits the Go runtime default SIGTERM
+  handler and terminates the process. The new test starts
+  `awaitOsSigExit` with `_sigHandlerReady` initially false, delays
+  the flag-set by 200ms, and asserts that stop completes cleanly
+  within 5s (the sender spun until the flag became true, then
+  delivered). Mutation-probe validated: removing the `_sigHandlerReady`
+  gate causes the test binary to die with `signal: terminated`.
+  Commit `cbc3567`.
+
+### Added — SP-010 A4-N1 (`adapters/metrics` — stream-client panic test)
+
+- **`TestStreamClientInterceptor_PanicEmitsMetrics`** — regression
+  test for stream-client panic metric emission. The v1.8.1
+  metrics interceptor test suite covered unary-server and
+  stream-server panic paths but not the client-stream variant.
+  The pass-5 review flagged this coverage gap as A4-N1. The new
+  test injects a panicking `Streamer`, recovers the panic, and
+  asserts that the sink received a `grpc_client_requests_total`
+  counter with `code=Internal` and a
+  `grpc_client_request_duration_seconds` observation — proving
+  the deferred-recorder pattern works on the client-stream path
+  identically to the three already-covered paths.
+  Commit `f9feb4f`.
+
+### Verified
+
+- `go build ./...` clean
+- `go vet ./...` clean (implicit in `go test -race`)
+- `go test -race -short ./...` clean (full package tree; `-short`
+  skips the pre-existing `TestClient_Dial` integration test per
+  the v1.8.1 release convention at this CHANGELOG's v1.8.1 entry)
+- Zero regressions from `common v1.8.1 → v1.8.2` pin bump
+- Three independent reviewer audits (Gap 1.A / 2.A / 3.A) by
+  `pr-review-toolkit:code-reviewer` (opus) returned PASS or
+  PASS-WITH-NOTES with zero blockers. Reports archived in the
+  workspace at `_src/docs/repos/connector/findings/2026-04-15-
+  contrarian-pass5/_gap{1,2,3}A-reviewer-audit.md`.
+
+### Upgrade notes
+
+- **Drop-in from v1.8.1.** The only pin change is
+  `common v1.8.1 → v1.8.2`.
+- **Coordinated with:** `github.com/aldelo/common v1.8.2` (already
+  tagged on origin — tag `82a88a0` verified via `git ls-remote`
+  at checkpoint time per J-N1 attestation convention).
+- **Breaking-change surface:** `WithLogPeer` default flip (A4-F1).
+  Consumers that relied on the implicit `logPeer: true` default
+  must add `WithLogPeer(true)` to their interceptor setup. This
+  is documented in the `WithLogPeer` godoc at `logger.go:163-182`
+  and the package-level godoc at `logger.go:44-54`.
+- **Consumer sweep.** All 38 workspace consumer repos should bump
+  their `connector` pin `v1.8.1 → v1.8.2` in coordination with
+  the sibling `common v1.8.2` pin bump. Sequence: bump `common`
+  first, then `connector` (connector depends on common).
+- **Deferred follow-ups (unchanged from v1.8.1):**
+  - aws-sdk-go v1 → v2 migration (pass-4 backlog items #14–#16;
+    deferred per user directive pending a coordinated workspace
+    sweep).
+  - Test hygiene: `service/newtest.yaml` still regenerated on
+    every `go test ./service/` run.
+
 ## [v1.8.1] — 2026-04-15
 
 Patch release. Coordinated sibling to `common v1.8.1`. Closes the three

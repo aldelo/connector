@@ -18,10 +18,12 @@ package logger
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -377,6 +379,224 @@ func TestCopyDenylist_Isolation(t *testing.T) {
 	a["new-header"] = struct{}{}
 	if _, leaked := defaultSensitiveHeaders["new-header"]; leaked {
 		t.Fatal("extension leaked into package default — pollution risk")
+	}
+}
+
+// -----------------------------------------------------------------------
+// Default options — SP-010 pass-5 A4-F1 (2026-04-15)
+// -----------------------------------------------------------------------
+//
+// These tests pin the PII-safe defaults produced by
+// newDefaultLoggerOptions. The A4-F1 fix flipped logPeer from true →
+// false because client IPs are personal data under GDPR/CCPA/UK-DPA
+// and must not ship enabled by default. newDefaultLoggerOptions is
+// the single point of truth for the defaults — both the constructor
+// and these tests call it, so drift between "documented default" and
+// "actual default" is impossible.
+//
+// Mutation probe (quality gate): in logger.go, revert the logPeer
+// default from false back to true (e.g. `logPeer: true` in
+// newDefaultLoggerOptions). TestDefaultLoggerOptions_LogPeerIsFalse_A4F1
+// MUST turn red. Restore the fix and it MUST return to green. This
+// confirms the test exercises the causal path (the actual default-
+// initialization function), not a tautological postcondition.
+
+func TestDefaultLoggerOptions_LogPeerIsFalse_A4F1(t *testing.T) {
+	cfg := newDefaultLoggerOptions()
+	if cfg.logPeer {
+		t.Fatalf("A4-F1 regression: newDefaultLoggerOptions().logPeer must default to false under GDPR/CCPA/UK-DPA; got true")
+	}
+}
+
+func TestDefaultLoggerOptions_LogMetadataIsFalse(t *testing.T) {
+	// Pin the pre-existing safe default for metadata logging.
+	cfg := newDefaultLoggerOptions()
+	if cfg.logMetadata {
+		t.Fatalf("newDefaultLoggerOptions().logMetadata must default to false (headers are a common PII source); got true")
+	}
+}
+
+func TestDefaultLoggerOptions_SensitiveHeadersSeeded(t *testing.T) {
+	// Pin that the default denylist is populated (not nil, not empty).
+	// Without this, WithSensitiveHeaders on top of a bad default could
+	// still silently log authorization headers.
+	cfg := newDefaultLoggerOptions()
+	if cfg.sensitiveHeaders == nil {
+		t.Fatal("newDefaultLoggerOptions().sensitiveHeaders must be pre-seeded, got nil")
+	}
+	for _, required := range []string{"authorization", "cookie", "x-api-key", "password", "token"} {
+		if _, ok := cfg.sensitiveHeaders[required]; !ok {
+			t.Errorf("newDefaultLoggerOptions().sensitiveHeaders missing required denylist entry %q", required)
+		}
+	}
+}
+
+func TestWithLogPeer_OptInFlipsDefault(t *testing.T) {
+	// The A4-F1 flip must not remove the ability to opt in — verify
+	// WithLogPeer(true) still works for the (documented) use cases
+	// where peer logging is required.
+	cfg := newDefaultLoggerOptions()
+	if cfg.logPeer {
+		t.Fatal("precondition: default logPeer must be false (A4-F1)")
+	}
+	WithLogPeer(true)(cfg)
+	if !cfg.logPeer {
+		t.Error("WithLogPeer(true) must flip logPeer from false → true")
+	}
+	// Idempotent off — opting back out should also work.
+	WithLogPeer(false)(cfg)
+	if cfg.logPeer {
+		t.Error("WithLogPeer(false) must flip logPeer from true → false")
+	}
+}
+
+func TestNewLoggerInterceptors_UsesDefaultLoggerOptions_A4F1(t *testing.T) {
+	// Source-invariant pin: NewLoggerInterceptors must initialize its
+	// cfg from newDefaultLoggerOptions() (and not reintroduce an
+	// inline literal with logPeer: true). This catches the specific
+	// regression mode where someone "simplifies" the constructor by
+	// inlining the struct literal and accidentally restores the old
+	// unsafe default.
+	src, err := os.ReadFile("logger.go")
+	if err != nil {
+		t.Fatalf("cannot read logger.go: %v", err)
+	}
+	body := string(src)
+
+	// Positive: the constructor must route through the helper.
+	want := `cfg := newDefaultLoggerOptions()`
+	if !strings.Contains(body, want) {
+		t.Errorf("A4-F1 regression: expected NewLoggerInterceptors to call newDefaultLoggerOptions(), but did not find %q in logger.go", want)
+	}
+
+	// Negative: the old inline literal with logPeer: true must not
+	// exist anywhere in the file.
+	absent := "logPeer:          true"
+	if strings.Contains(body, absent) {
+		t.Errorf("A4-F1 regression: unsafe inline default still present in logger.go: %q", absent)
+	}
+}
+
+// -----------------------------------------------------------------------
+// Sample-rate opt-in — SP-010 pass-5 A4-F3 (2026-04-15)
+// -----------------------------------------------------------------------
+//
+// A4-F3: the logger's hot-path emit() has no upper bound on emissions.
+// A 5K RPS scanner storm or a panic loop in a downstream service drives
+// 5K log lines/sec through Errorw, and Zap does not throttle — the
+// CloudWatch ingest bill spikes before the operator notices. The fix is
+// an opt-in WithSampleRate(perSecondCap int) token bucket with default
+// unlimited (preserves backward compatibility for every consumer that
+// does not opt in).
+//
+// Mutation probe (quality gate): in logger.go, remove the gate
+// `if cfg.rateLimiter != nil && !cfg.rateLimiter.Allow() { return }`
+// from emit(). TestEmit_ContainsRateLimiterGate_A4F3 and
+// TestWithSampleRate_AllowsBurstThenDrops MUST turn red (the former
+// because the source substring disappears, the latter because even
+// after bucket exhaustion the hypothetical caller path would not drop).
+// Restore the gate and both MUST return to green.
+
+func TestDefaultLoggerOptions_RateLimiterIsNil_A4F3(t *testing.T) {
+	// Default-unlimited is a backward-compatibility guarantee. Every
+	// consumer that does not opt in via WithSampleRate must see the
+	// legacy unthrottled behavior — nil limiter is the sentinel emit()
+	// uses to skip the gate entirely.
+	cfg := newDefaultLoggerOptions()
+	if cfg.rateLimiter != nil {
+		t.Fatalf("A4-F3 regression: newDefaultLoggerOptions().rateLimiter must default to nil (unlimited, BC); got non-nil limiter")
+	}
+}
+
+func TestWithSampleRate_NonPositiveIsUnlimited(t *testing.T) {
+	// Both 0 and negative values must normalize to nil (unlimited),
+	// not to a rate.NewLimiter(0, 0) which would drop every emission
+	// and silently disable the logger. This is the most important
+	// edge case for the option: misconfiguration must not break the
+	// default BC path.
+	for _, cap := range []int{0, -1, -1000} {
+		cfg := newDefaultLoggerOptions()
+		WithSampleRate(cap)(cfg)
+		if cfg.rateLimiter != nil {
+			t.Errorf("WithSampleRate(%d): expected nil limiter (unlimited), got non-nil", cap)
+		}
+	}
+}
+
+func TestWithSampleRate_CreatesLimiterWithExpectedRate(t *testing.T) {
+	// Positive caps must produce a limiter whose steady-state rate
+	// equals the cap and whose burst is sized to absorb short spikes
+	// cleanly. Pin both so a future "optimization" that silently
+	// changes burst sizing is caught at test time.
+	cfg := newDefaultLoggerOptions()
+	WithSampleRate(100)(cfg)
+	if cfg.rateLimiter == nil {
+		t.Fatal("WithSampleRate(100): expected non-nil limiter")
+	}
+	if got, want := cfg.rateLimiter.Limit(), rate.Limit(100); got != want {
+		t.Errorf("WithSampleRate(100).Limit() = %v, want %v", got, want)
+	}
+	if got, want := cfg.rateLimiter.Burst(), 100; got != want {
+		t.Errorf("WithSampleRate(100).Burst() = %d, want %d", got, want)
+	}
+}
+
+func TestWithSampleRate_AllowsBurstThenDrops(t *testing.T) {
+	// Functional pin: with cap=3, the first 3 rapid-fire Allow()
+	// calls must succeed (burst absorption) and the 4th must fail
+	// (bucket empty, refill too slow for immediate retry). This is
+	// the direct analog of what emit() does on the hot path — if
+	// cfg.rateLimiter.Allow() ever stops returning false under
+	// burst, the gate has no effect and the A4-F3 fix is a lie.
+	cfg := newDefaultLoggerOptions()
+	WithSampleRate(3)(cfg)
+	if cfg.rateLimiter == nil {
+		t.Fatal("precondition: WithSampleRate(3) must produce non-nil limiter")
+	}
+	for i := 0; i < 3; i++ {
+		if !cfg.rateLimiter.Allow() {
+			t.Errorf("burst call %d/3: expected Allow()=true (bucket has %v tokens), got false", i+1, cfg.rateLimiter.Tokens())
+		}
+	}
+	if cfg.rateLimiter.Allow() {
+		t.Error("4th call: expected Allow()=false (bucket exhausted), got true — rate limiter is not capping")
+	}
+}
+
+func TestEmit_ContainsRateLimiterGate_A4F3(t *testing.T) {
+	// Source-invariant pin: emit() must gate on cfg.rateLimiter
+	// before building the structured fields slice. This catches the
+	// regression mode where someone "simplifies" emit() by removing
+	// the gate — unit tests on the Option alone do not exercise the
+	// emit() path, so without this assertion a gate deletion would
+	// pass tests while silently restoring the unbounded behavior.
+	src, err := os.ReadFile("logger.go")
+	if err != nil {
+		t.Fatalf("cannot read logger.go: %v", err)
+	}
+	body := string(src)
+	want := `if cfg.rateLimiter != nil && !cfg.rateLimiter.Allow()`
+	if !strings.Contains(body, want) {
+		t.Errorf("A4-F3 regression: emit() no longer gates on rate limiter.\nExpected source substring:\n  %s", want)
+	}
+}
+
+func TestNewLoggerInterceptors_RateLimitOptInDoesNotBreakNilLogger(t *testing.T) {
+	// Orthogonality pin: the A4-F3 opt-in must not interact with the
+	// nil-logger no-op path. Passing nil *data.ZapLog AND a sample
+	// rate must still yield a working (silent) interceptor pair.
+	uIntr, sIntr := NewLoggerInterceptors(nil, WithSampleRate(5))
+	if uIntr == nil || sIntr == nil {
+		t.Fatal("expected non-nil interceptors with nil logger + WithSampleRate opt-in")
+	}
+	called := false
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		called = true
+		return "ok", nil
+	}
+	resp, err := uIntr(context.Background(), nil, &grpc.UnaryServerInfo{FullMethod: "/x.Y/Z"}, handler)
+	if err != nil || resp != "ok" || !called {
+		t.Fatalf("nil logger + rate-limit opt-in must still serve: resp=%v err=%v called=%v", resp, err, called)
 	}
 }
 

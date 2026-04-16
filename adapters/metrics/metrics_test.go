@@ -1064,6 +1064,52 @@ func TestNewClientInterceptors_Unary_Panic(t *testing.T) {
 	}
 }
 
+// TestNewClientInterceptors_Stream_Panic is the client-stream twin of the
+// three existing panic-boundary tests — SP-010 pass-5 A4-N1 closes the
+// asymmetry where three of four panic-guarded interceptor lambdas had
+// regression tests and the client *stream* path did not. The invariant is
+// identical to the unary/server counterparts: a panicking streamer must
+// (a) propagate to the caller (the defer must NOT swallow the panic) and
+// (b) still emit the Internal-coded metric triple (request counter,
+// error counter, duration histogram) to the sink.
+//
+// This test exercises the `stream` lambda at interceptors.go:133-151,
+// which is the only one of the four lambdas that never had a regression
+// pin before SP-010.
+func TestNewClientInterceptors_Stream_Panic(t *testing.T) {
+	sink := NewMemorySink()
+	_, sIntr := NewClientInterceptors(sink)
+
+	streamer := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn,
+		method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		panic("boom")
+	}
+
+	recovered := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+			}
+		}()
+		_, _ = sIntr(context.Background(), &grpc.StreamDesc{StreamName: "Z"}, nil, "/x.Y/Z", streamer)
+	}()
+
+	if !recovered {
+		t.Fatalf("client stream interceptor swallowed the panic — it must propagate (A4-N1 regression)")
+	}
+
+	cs, _ := sink.Snapshot()
+	wantReq := seriesKey(mClientRequests, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	wantErr := seriesKey(mClientErrors, map[string]string{"method": "/x.Y/Z", "code": "Internal"})
+	if !findCounter(cs, wantReq, 1) {
+		t.Errorf("missing client-stream panic-path request counter %q (A4-N1 regression)", wantReq)
+	}
+	if !findCounter(cs, wantErr, 1) {
+		t.Errorf("missing client-stream panic-path error counter %q (A4-N1 regression)", wantErr)
+	}
+}
+
 func TestNewServerInterceptors_NilSink_Noop(t *testing.T) {
 	uIntr, sIntr := NewServerInterceptors(nil)
 	if uIntr == nil || sIntr == nil {
@@ -1113,4 +1159,199 @@ func findHistogram(hs []HistogramSnapshot, key string, wantCount uint64) bool {
 		}
 	}
 	return false
+}
+
+// -----------------------------------------------------------------------
+// SP-010 pass-5 A4-F2 — interceptor label cache cardinality cap
+// -----------------------------------------------------------------------
+//
+// These tests pin the bounded-cache contract for the four process-global
+// label caches in interceptors.go. Invariants:
+//
+//  1. Cache grows until DefaultInterceptorLabelCacheLimit distinct keys
+//     have been installed. At the cap, new keys fall through to per-call
+//     allocation and do NOT grow the cache.
+//  2. The per-call fall-through path returns a fresh map instance each
+//     time (no aliasing with a prior fall-through). This is the hot-path
+//     reversion to the pre-P1-CONN-2 cost model: slower, but bounded.
+//  3. InterceptorLabelCacheOverflow() aggregates across all four caches
+//     so an operator-facing process-wide counter is observable.
+//  4. The boundedLabelCache struct and its cap/overflow fields are
+//     source-visible so future refactors cannot silently drop the cap.
+//
+// Mutation-probe guidance (comment-only, for reviewer + future
+// maintainer):
+//
+//   - Remove the `if cache.size.Load() >= DefaultInterceptorLabelCacheLimit`
+//     block from getOrBuildPairLabels → EnforcesCap should go RED because
+//     the cache grows past 4096 and overflow stays 0.
+//   - Revert the struct back to raw `sync.Map` → SourcePinsBoundedCache
+//     should go RED on the "boundedLabelCache" substring.
+//
+// These probes were run once during SP-010 pass-5 A4-F2 remediation and
+// both tests flipped RED as expected.
+
+// synthMethod constructs a synthetic FullMethod-shaped string with a
+// monotonically increasing index. We deliberately do NOT use real gRPC
+// method names — the test's purpose is to prove the cap works under
+// adversarial `method` cardinality, which is the exact threat model
+// A4-F2 identifies on the client side.
+func synthMethod(i int) string {
+	return fmt.Sprintf("/a4f2.Service/Method_%06d", i)
+}
+
+// TestInterceptorLabelCache_EnforcesCap_A4F2 fills one of the four
+// caches to exactly DefaultInterceptorLabelCacheLimit distinct keys,
+// then requests one more distinct key and asserts: (a) size stays at
+// the cap, (b) overflow == 1, (c) the returned map still has the
+// correct labels so the metric series downstream is not lost.
+func TestInterceptorLabelCache_EnforcesCap_A4F2(t *testing.T) {
+	resetInterceptorLabelCaches()
+	t.Cleanup(resetInterceptorLabelCaches)
+
+	// Fill exactly to the cap.
+	for i := 0; i < DefaultInterceptorLabelCacheLimit; i++ {
+		m := getOrBuildPairLabels(&clientPairLabels, synthMethod(i), codes.OK.String())
+		if m["method"] != synthMethod(i) || m["code"] != codes.OK.String() {
+			t.Fatalf("iter %d: labels wrong: %+v", i, m)
+		}
+	}
+	if got := clientPairLabels.size.Load(); got != int64(DefaultInterceptorLabelCacheLimit) {
+		t.Fatalf("after fill: size=%d, want %d", got, DefaultInterceptorLabelCacheLimit)
+	}
+	if got := clientPairLabels.overflow.Load(); got != 0 {
+		t.Fatalf("after fill: overflow=%d, want 0", got)
+	}
+
+	// Request one more distinct key → must fall through.
+	over := getOrBuildPairLabels(&clientPairLabels, synthMethod(DefaultInterceptorLabelCacheLimit), codes.OK.String())
+	if over["method"] != synthMethod(DefaultInterceptorLabelCacheLimit) {
+		t.Errorf("fall-through map lost method label: %+v", over)
+	}
+	if over["code"] != codes.OK.String() {
+		t.Errorf("fall-through map lost code label: %+v", over)
+	}
+
+	// Cap must hold: size stays at DefaultInterceptorLabelCacheLimit,
+	// overflow increments. If the cap check were removed, size would
+	// grow to cap+1 and overflow would stay 0 — mutation probe target.
+	if got := clientPairLabels.size.Load(); got != int64(DefaultInterceptorLabelCacheLimit) {
+		t.Errorf("post-overflow: size=%d, want %d (A4-F2 regression: cache grew past cap)",
+			got, DefaultInterceptorLabelCacheLimit)
+	}
+	if got := clientPairLabels.overflow.Load(); got != 1 {
+		t.Errorf("post-overflow: overflow=%d, want 1 (A4-F2 regression: overflow counter not incremented)", got)
+	}
+}
+
+// TestInterceptorLabelCache_OverflowFallsThroughToFreshMaps_A4F2
+// asserts that the fall-through path returns a *fresh* map each time —
+// not a cached one. Two calls for the same over-cap key must return
+// two different map instances (different addresses). This is the
+// behavioral guarantee that the cache has stopped growing: if the
+// second call returned the same instance as the first, the cache
+// would have installed it, violating the cap.
+func TestInterceptorLabelCache_OverflowFallsThroughToFreshMaps_A4F2(t *testing.T) {
+	resetInterceptorLabelCaches()
+	t.Cleanup(resetInterceptorLabelCaches)
+
+	// Fill the method-only cache to the cap.
+	for i := 0; i < DefaultInterceptorLabelCacheLimit; i++ {
+		_ = getOrBuildMethodLabels(&clientMethodLabels, synthMethod(i))
+	}
+	// Sanity.
+	if got := clientMethodLabels.size.Load(); got != int64(DefaultInterceptorLabelCacheLimit) {
+		t.Fatalf("pre-overflow: size=%d, want %d", got, DefaultInterceptorLabelCacheLimit)
+	}
+
+	over := synthMethod(DefaultInterceptorLabelCacheLimit + 100)
+	m1 := getOrBuildMethodLabels(&clientMethodLabels, over)
+	m2 := getOrBuildMethodLabels(&clientMethodLabels, over)
+
+	// Two fresh allocations — NOT a shared cached instance. Compare by
+	// reflect pointer (map headers differ even when keys/values match).
+	p1 := reflect.ValueOf(m1).Pointer()
+	p2 := reflect.ValueOf(m2).Pointer()
+	if p1 == p2 {
+		t.Errorf("fall-through returned same map instance twice (p1=%#x p2=%#x) — "+
+			"A4-F2 regression: cache silently installed overflow entry", p1, p2)
+	}
+
+	// Overflow counter should read 2 (one per over-cap call).
+	if got := clientMethodLabels.overflow.Load(); got != 2 {
+		t.Errorf("overflow=%d, want 2", got)
+	}
+}
+
+// TestInterceptorLabelCacheOverflow_AggregatesAllFourCaches_A4F2
+// pushes one overflow into each of the four caches and asserts the
+// public aggregator returns 4. This is the operator-facing contract:
+// one number that captures process-wide pressure on the interceptor
+// label caches.
+func TestInterceptorLabelCacheOverflow_AggregatesAllFourCaches_A4F2(t *testing.T) {
+	resetInterceptorLabelCaches()
+	t.Cleanup(resetInterceptorLabelCaches)
+
+	caches := []*boundedLabelCache{
+		&serverPairLabels, &serverMethodLabels,
+		&clientPairLabels, &clientMethodLabels,
+	}
+	// Fill each to cap.
+	for ci, c := range caches {
+		for i := 0; i < DefaultInterceptorLabelCacheLimit; i++ {
+			// Use cache-index-scoped keys so each cache's sync.Map
+			// independently hits the cap; otherwise the pair / method
+			// caches share no keyspace anyway but this keeps the test
+			// resilient to future cache-key schema changes.
+			key := fmt.Sprintf("/a4f2.C%d/Method_%06d", ci, i)
+			if ci%2 == 0 {
+				// pair caches
+				getOrBuildPairLabels(c, key, codes.OK.String())
+			} else {
+				// method-only caches
+				getOrBuildMethodLabels(c, key)
+			}
+		}
+		// Drive one overflow per cache.
+		overKey := fmt.Sprintf("/a4f2.C%d/MethodOverflow", ci)
+		if ci%2 == 0 {
+			getOrBuildPairLabels(c, overKey, codes.OK.String())
+		} else {
+			getOrBuildMethodLabels(c, overKey)
+		}
+	}
+
+	if got := InterceptorLabelCacheOverflow(); got != 4 {
+		t.Errorf("InterceptorLabelCacheOverflow()=%d, want 4 (A4-F2 regression: "+
+			"aggregator dropped overflow from one or more caches)", got)
+	}
+}
+
+// TestInterceptorLabelCache_SourcePinsBoundedCache_A4F2 is a
+// source-invariant pin that ensures the bounded-cache primitive, the
+// cap constant, and the overflow-accounting symbols remain present in
+// interceptors.go. A future refactor that reverts to raw sync.Map
+// (dropping the cap) will fail this pin before it can be merged.
+func TestInterceptorLabelCache_SourcePinsBoundedCache_A4F2(t *testing.T) {
+	src, err := os.ReadFile("interceptors.go")
+	if err != nil {
+		t.Fatalf("read interceptors.go: %v", err)
+	}
+	s := string(src)
+
+	// Code-only tokens — godoc prose is allowed to describe them too,
+	// but the test only requires presence, so pins hit godoc + code.
+	pins := []string{
+		"boundedLabelCache",
+		"DefaultInterceptorLabelCacheLimit",
+		"cache.overflow.Add(1)",
+		"cache.size.Add(1)",
+		"InterceptorLabelCacheOverflow",
+	}
+	for _, p := range pins {
+		if !strings.Contains(s, p) {
+			t.Errorf("interceptors.go missing source pin %q — A4-F2 regression: "+
+				"bounded label cache primitive was removed or renamed", p)
+		}
+	}
 }

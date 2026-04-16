@@ -17,92 +17,153 @@ package service
 // the quit primitives, leaving _quit/_quitDone non-nil but with no
 // goroutine that would ever close quitDone. A later GracefulStop read
 // the non-nil fields under RLock, entered the unified-routing path at
-// service.go ~L2714, and blocked forever on `<-quitDone`.
+// service.go ~L2721, and blocked forever on `<-quitDone`.
 //
 // Fix: the startServer error branch now closes quitDone itself and
 // nils _quit/_quitDone under _mu, so later stop callers take the
 // pre-Serve legacy safety-net path instead of the unified path.
+//
+// ── SP-010 pass-5 A2-F-2B rewrite (2026-04-15) ────────────────────
+//
+// The original regression tests in this file inlined the fix block
+// (close(quitDone); s._quit = nil; s._quitDone = nil) into their own
+// setup and then asserted that GracefulStop / ImmediateStop returned
+// promptly. Mutation-deleting the fix at service.go:2219-2234 left
+// both tests GREEN because the tests themselves were driving the
+// post-fix state they purported to verify — a tautology.
+//
+// The rewritten tests below drive real Serve() end-to-end by injecting
+// a synthetic startServer failure via the package-level startServerFn
+// indirection. Serve proceeds normally through readConfig, setupServer,
+// connectSd, autoCreateService, allocates _quit/_quitDone under _mu,
+// then calls startServerFn which returns the injected error. The only
+// code path that can transform "_quitDone open" into "_quitDone closed"
+// between Serve returning and GracefulStop running is the fix block at
+// service.go:2219-2234. If the fix block is deleted, GracefulStop
+// enters unified routing, parks on `<-quitDone`, and the 2-second
+// deadline fires.
+//
+// Mutation probe validation (run by the PR author, documented in the
+// commit message):
+//   1. Delete `close(quitDone)` from service.go:2219-2234
+//   2. `go test -run TestService_Serve_StartServerError ./service/...`
+//   3. Expect: tests turn RED (GracefulStop/ImmediateStop deadlock)
+//   4. Restore the fix
+//   5. Rerun: expect GREEN
+//
+// See lesson L18 for the causal-path-vs-postcondition distinction.
 
 import (
+	"errors"
+	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
 )
 
-// TestService_ServeStartServerErrorFixup_NoDeadlock asserts the
-// post-condition the P1-CONN-SVC-02 fix establishes: after the Serve
-// error path has run, GracefulStop completes without deadlocking.
-//
-// We do not drive real Serve() — that needs a listener, cloud-map
-// registration, and other side effects out of scope for a unit test.
-// Instead we replay the two observable steps Serve's startServer
-// error branch performs, then verify GracefulStop returns promptly.
-// If someone removes the close/nil block from Serve, this test will
-// hang until the 3-second deadline and fail.
-func TestService_ServeStartServerErrorFixup_NoDeadlock(t *testing.T) {
-	s := &Service{}
+// startServerFnTestMu serializes the global startServerFn override
+// across the two Serve-error tests so go test -count=N or parallel
+// dispatch within this file cannot race on the package-level var.
+var startServerFnTestMu sync.Mutex
 
-	// Step 1 — mirror Serve's SVC-F7 allocation of the unified quit
-	// primitives (service.go ~L2196-2201).
-	s._mu.Lock()
-	s._quit = make(chan bool, 1)
-	s._quitDone = make(chan struct{})
-	quitDone := s._quitDone
-	s._mu.Unlock()
-
-	// Step 2 — apply the P1-CONN-SVC-02 fix: close quitDone, nil the
-	// Service fields under lock so later stop callers fall through to
-	// the pre-Serve legacy safety-net branch.
-	close(quitDone)
-	s._mu.Lock()
-	s._quit = nil
-	s._quitDone = nil
-	s._mu.Unlock()
-
-	// Step 3 — GracefulStop must observe the nil fields, take the
-	// legacy fallback (cfg==nil means the fallback is effectively a
-	// no-op), and return before the deadline.
-	done := make(chan struct{})
-	go func() {
-		s.GracefulStop()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// ok
-	case <-time.After(3 * time.Second):
-		t.Fatal("GracefulStop deadlocked after simulated Serve startServer error (P1-CONN-SVC-02 regression)")
-	}
+// newServeErrorTestService builds a Service that is able to reach the
+// Serve() startServer call — it loads the existing service.yaml fixture
+// (empty namespace makes connectSd + autoCreateService no-ops), binds an
+// ephemeral TCP listener via port 0, and registers an empty gRPC handler
+// set so setupServer accepts the configuration.
+func newServeErrorTestService() *Service {
+	return NewService("test-connector-service", "service", "", func(grpcServer *grpc.Server) {})
 }
 
-// TestService_ServeStartServerErrorFixup_ImmediateStopNoDeadlock is
-// the mirror assertion for ImmediateStop — same fix must cover both
-// exported stop paths, since both read _quit/_quitDone under RLock.
-func TestService_ServeStartServerErrorFixup_ImmediateStopNoDeadlock(t *testing.T) {
-	s := &Service{}
+// withInjectedStartServerFailure overrides startServerFn for the
+// duration of fn, restoring the original method-value on return even
+// if fn panics. Serializes on startServerFnTestMu so two tests that
+// both inject a failure cannot race each other.
+func withInjectedStartServerFailure(t *testing.T, injected error, fn func()) {
+	t.Helper()
+	startServerFnTestMu.Lock()
+	defer startServerFnTestMu.Unlock()
 
-	s._mu.Lock()
-	s._quit = make(chan bool, 1)
-	s._quitDone = make(chan struct{})
-	quitDone := s._quitDone
-	s._mu.Unlock()
-
-	close(quitDone)
-	s._mu.Lock()
-	s._quit = nil
-	s._quitDone = nil
-	s._mu.Unlock()
-
-	done := make(chan struct{})
-	go func() {
-		s.ImmediateStop()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// ok
-	case <-time.After(3 * time.Second):
-		t.Fatal("ImmediateStop deadlocked after simulated Serve startServer error (P1-CONN-SVC-02 regression)")
+	orig := startServerFn
+	startServerFn = func(s *Service, lis net.Listener, quit chan bool, quitDone chan struct{}) error {
+		return injected
 	}
+	defer func() { startServerFn = orig }()
+	fn()
+}
+
+// TestService_Serve_StartServerError_GracefulStopDoesNotDeadlock is
+// the real-causal-path rewrite of the old tautological regression
+// test. It drives Serve() all the way to the startServer call, forces
+// startServer to return a synthetic failure, verifies Serve propagates
+// the error, and asserts that a subsequent GracefulStop returns within
+// 2 seconds — which it can only do if the P1-CONN-SVC-02 fix block at
+// service.go:2219-2234 closed quitDone and nilled the fields.
+//
+// Mutation probe (executed manually, documented in commit message):
+// reverting the fix block makes GracefulStop park on `<-quitDone` and
+// this test turns RED on the 2-second deadline.
+func TestService_Serve_StartServerError_GracefulStopDoesNotDeadlock(t *testing.T) {
+	injected := errors.New("A2-F-2B injected startServer failure")
+
+	withInjectedStartServerFailure(t, injected, func() {
+		svc := newServeErrorTestService()
+
+		serveErr := svc.Serve()
+		if serveErr == nil || !strings.Contains(serveErr.Error(), "A2-F-2B injected") {
+			t.Fatalf("expected Serve to return the injected startServer error, got: %v", serveErr)
+		}
+
+		// The P1-CONN-SVC-02 fix must have closed quitDone and nilled
+		// _quit/_quitDone. GracefulStop should observe the nil fields
+		// via _mu RLock, fall through to the pre-Serve legacy safety
+		// net, and return promptly. If the fix were reverted, the
+		// fields would be non-nil and GracefulStop would enter the
+		// unified-routing branch and park on `<-quitDone` forever.
+		done := make(chan struct{})
+		go func() {
+			svc.GracefulStop()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// pass
+		case <-time.After(2 * time.Second):
+			t.Fatal("P1-CONN-SVC-02 regression: GracefulStop deadlocked after Serve's startServer-error path (A2-F-2B causal test)")
+		}
+	})
+}
+
+// TestService_Serve_StartServerError_ImmediateStopDoesNotDeadlock is
+// the mirror assertion for ImmediateStop, which uses the same
+// _quit/_quitDone observation and would exhibit the same deadlock if
+// the fix block were reverted.
+func TestService_Serve_StartServerError_ImmediateStopDoesNotDeadlock(t *testing.T) {
+	injected := errors.New("A2-F-2B injected startServer failure (immediate)")
+
+	withInjectedStartServerFailure(t, injected, func() {
+		svc := newServeErrorTestService()
+
+		serveErr := svc.Serve()
+		if serveErr == nil || !strings.Contains(serveErr.Error(), "A2-F-2B injected") {
+			t.Fatalf("expected Serve to return the injected startServer error, got: %v", serveErr)
+		}
+
+		done := make(chan struct{})
+		go func() {
+			svc.ImmediateStop()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// pass
+		case <-time.After(2 * time.Second):
+			t.Fatal("P1-CONN-SVC-02 regression: ImmediateStop deadlocked after Serve's startServer-error path (A2-F-2B causal test)")
+		}
+	})
 }

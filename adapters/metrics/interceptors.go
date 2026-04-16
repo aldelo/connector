@@ -27,6 +27,7 @@ package metrics
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -177,12 +178,103 @@ func NewClientInterceptors(sink Sink) (grpc.UnaryClientInterceptor, grpc.StreamC
 // LoadOrStore handles the race between two first-arrivers for the
 // same (method, code) pair — whoever wins installs the map, the
 // loser discards their transient allocation.
+//
+// SP-010 pass-5 A4-F2 (2026-04-15): cardinality cap on the label caches.
+//
+// The original design relied on server-side `method` being server-baked
+// at RegisterServer time and therefore bounded by the .proto surface.
+// That is correct for the server-side caches, but the client-side caches
+// take `method` from the call site — a gRPC-Web bridge, dynamic codec,
+// fuzzer, or a consumer that constructs method names from user input
+// would grow `clientPairLabels` / `clientMethodLabels` without bound
+// for the lifetime of the process.
+//
+// The MemorySink learned this lesson via SP-008 P2-CONN-1 and got
+// DefaultMemorySinkLimit; the interceptor caches got the optimization
+// without the corresponding cap. This change applies the same
+// safe-by-default standard: each cache is capped at
+// DefaultInterceptorLabelCacheLimit (4096) distinct entries. On
+// cap-exceeded, getOrBuild* falls through to a fresh per-call
+// allocation (slower path, but bounded memory — this is the same
+// shape as the pre-P1-CONN-2 hot path, so the fall-through is simply
+// a reversion to the pre-optimization cost model).
+//
+// Overflow is signalled via InterceptorLabelCacheOverflow() so operators
+// have visibility into when the cap is being hit; this mirrors
+// OverflowDropped() on MemorySink. A process that is healthy under the
+// cap produces overflow=0; a process that hits the cap should be
+// investigated for method-name hygiene on the client side.
+
+// DefaultInterceptorLabelCacheLimit is the per-cache cardinality cap
+// applied to each of the four process-global interceptor label caches.
+// The value is chosen well above any realistic server's RPC surface
+// (a .proto surface with >1000 distinct methods is pathological) and
+// comfortably below the point where the fall-through allocation cost
+// would dominate. Four separate caches × 4096 entries × ~64 B/entry
+// ≈ 1 MiB steady-state worst case — negligible.
+//
+// On-overflow behavior: getOrBuild* returns a fresh per-call allocation
+// and increments InterceptorLabelCacheOverflow(). The series remains
+// observable downstream; only the hot-path optimization is dropped.
+const DefaultInterceptorLabelCacheLimit = 4096
+
+// boundedLabelCache wraps a sync.Map with an atomic size counter and
+// an overflow counter. The size counter is maintained by the single
+// caller path in getOrBuild* — it is incremented only on first-install
+// (the LoadOrStore "stored" branch), so it cannot drift from the
+// actual sync.Map length under concurrent writers.
+//
+// The cap check is deliberately advisory: we read size with an
+// atomic.Load before LoadOrStore. Under a concurrent burst of N
+// first-arrivers for N distinct keys, the cache can briefly exceed
+// the cap by O(concurrent-writers) — but never by more than that,
+// and the overflow accounting still catches the shape of the problem.
+// No lock needed.
+type boundedLabelCache struct {
+	m        sync.Map
+	size     atomic.Int64
+	overflow atomic.Uint64
+}
+
+// Four process-global caches. The server-side pair also gets the cap
+// even though its `method` is bounded by the .proto surface: (a) the
+// cap is generous enough that no normal .proto surface trips it, and
+// (b) uniform enforcement is simpler to reason about than "server is
+// safe, client is not" asymmetry.
 var (
-	serverPairLabels   sync.Map // key: "method\x00code" -> map[string]string{"method":..,"code":..}
-	serverMethodLabels sync.Map // key: "method"         -> map[string]string{"method":..}
-	clientPairLabels   sync.Map // key: "method\x00code" -> map[string]string{"method":..,"code":..}
-	clientMethodLabels sync.Map // key: "method"         -> map[string]string{"method":..}
+	serverPairLabels   boundedLabelCache // key: "method\x00code" -> map[string]string{"method":..,"code":..}
+	serverMethodLabels boundedLabelCache // key: "method"         -> map[string]string{"method":..}
+	clientPairLabels   boundedLabelCache // key: "method\x00code" -> map[string]string{"method":..,"code":..}
+	clientMethodLabels boundedLabelCache // key: "method"         -> map[string]string{"method":..}
 )
+
+// InterceptorLabelCacheOverflow returns the cumulative count of
+// getOrBuild* fall-throughs across all four interceptor label caches.
+// Non-zero is a signal that somewhere, a `method` label is taking
+// unbounded values and should be investigated — most commonly a
+// client-side gRPC invoker that constructs FullMethod strings from
+// user input. Safe to call from any goroutine; read-only.
+func InterceptorLabelCacheOverflow() uint64 {
+	return serverPairLabels.overflow.Load() +
+		serverMethodLabels.overflow.Load() +
+		clientPairLabels.overflow.Load() +
+		clientMethodLabels.overflow.Load()
+}
+
+// resetInterceptorLabelCaches drops all four caches and zeroes the
+// overflow counters. Test-only: production code must not call this.
+// Exported package-internally for the A4-F2 regression test; not part
+// of the public API.
+func resetInterceptorLabelCaches() {
+	for _, c := range []*boundedLabelCache{
+		&serverPairLabels, &serverMethodLabels,
+		&clientPairLabels, &clientMethodLabels,
+	} {
+		c.m.Range(func(k, _ any) bool { c.m.Delete(k); return true })
+		c.size.Store(0)
+		c.overflow.Store(0)
+	}
+}
 
 // pairKey builds a compact cache key for a (method, code) pair. The
 // ASCII NUL separator is absent from every legal gRPC FullMethod and
@@ -192,25 +284,46 @@ func pairKey(a, b string) string {
 }
 
 // getOrBuildPairLabels returns a cached {method, code} label map for
-// the requested cache bucket, creating it on first use.
-func getOrBuildPairLabels(cache *sync.Map, method, code string) map[string]string {
+// the requested cache bucket, creating it on first use. If the cache
+// size has reached DefaultInterceptorLabelCacheLimit, the call falls
+// through to a fresh per-call allocation and increments the cache's
+// overflow counter.
+func getOrBuildPairLabels(cache *boundedLabelCache, method, code string) map[string]string {
 	k := pairKey(method, code)
-	if v, ok := cache.Load(k); ok {
+	if v, ok := cache.m.Load(k); ok {
 		return v.(map[string]string)
 	}
 	m := map[string]string{"method": method, "code": code}
-	actual, _ := cache.LoadOrStore(k, m)
+	if cache.size.Load() >= DefaultInterceptorLabelCacheLimit {
+		// SP-010 pass-5 A4-F2: fall-through. Return a per-call
+		// allocation so the RPC still emits its metrics. The cache
+		// stops growing; overflow counter records the event.
+		cache.overflow.Add(1)
+		return m
+	}
+	actual, loaded := cache.m.LoadOrStore(k, m)
+	if !loaded {
+		cache.size.Add(1)
+	}
 	return actual.(map[string]string)
 }
 
 // getOrBuildMethodLabels returns a cached {method} label map for the
-// requested cache bucket, creating it on first use.
-func getOrBuildMethodLabels(cache *sync.Map, method string) map[string]string {
-	if v, ok := cache.Load(method); ok {
+// requested cache bucket, creating it on first use. Same overflow
+// fall-through as getOrBuildPairLabels.
+func getOrBuildMethodLabels(cache *boundedLabelCache, method string) map[string]string {
+	if v, ok := cache.m.Load(method); ok {
 		return v.(map[string]string)
 	}
 	m := map[string]string{"method": method}
-	actual, _ := cache.LoadOrStore(method, m)
+	if cache.size.Load() >= DefaultInterceptorLabelCacheLimit {
+		cache.overflow.Add(1)
+		return m
+	}
+	actual, loaded := cache.m.LoadOrStore(method, m)
+	if !loaded {
+		cache.size.Add(1)
+	}
 	return actual.(map[string]string)
 }
 
