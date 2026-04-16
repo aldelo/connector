@@ -1002,7 +1002,10 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 				if util.LenTrim(s._config.Topics.SnsDiscoveryTopicArn) == 0 || !util.StringSliceContains(&snsTopicArns, s._config.Topics.SnsDiscoveryTopicArn) {
 					discoverySnsTopic := s._config.Topics.SnsDiscoveryTopicNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
-					discoverySnsTopic, _ = util.ExtractAlphaNumericUnderscoreDash(util.Replace(discoverySnsTopic, ".", "-"))
+					discoverySnsTopic, extractErr := util.ExtractAlphaNumericUnderscoreDash(util.Replace(discoverySnsTopic, ".", "-"))
+					if extractErr != nil {
+						log.Printf("warning: ExtractAlphaNumericUnderscoreDash failed for SNS topic %q: %v", discoverySnsTopic, extractErr)
+					}
 
 					if topicArn, e := notification.CreateTopic(s._sns, discoverySnsTopic, time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
 						return nil, "", 0, fmt.Errorf("Create SNS Topic %s Failed: %s", discoverySnsTopic, e)
@@ -1015,7 +1018,10 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 				if util.LenTrim(s._config.Queues.SqsDiscoveryQueueArn) == 0 || util.LenTrim(s._config.Queues.SqsDiscoveryQueueUrl) == 0 {
 					discoveryQueueName := s._config.Queues.SqsDiscoveryQueueNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
-					discoveryQueueName, _ = util.ExtractAlphaNumericUnderscoreDash(util.Replace(discoveryQueueName, ".", "-"))
+					discoveryQueueName, extractErr := util.ExtractAlphaNumericUnderscoreDash(util.Replace(discoveryQueueName, ".", "-"))
+					if extractErr != nil {
+						log.Printf("warning: ExtractAlphaNumericUnderscoreDash failed for SQS discovery queue %q: %v", discoveryQueueName, extractErr)
+					}
 
 					if url, arn, e := queue.GetQueue(s._sqs, discoveryQueueName, s._config.Queues.SqsDiscoveryMessageRetentionSeconds, s._config.Topics.SnsDiscoveryTopicArn, time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
 						return nil, "", 0, fmt.Errorf("Create SQS Queue %s Failed: %s", discoveryQueueName, e)
@@ -1030,7 +1036,10 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			if s._config.Service.LoggerUseSqs {
 				if util.LenTrim(s._config.Queues.SqsLoggerQueueArn) == 0 || util.LenTrim(s._config.Queues.SqsLoggerQueueUrl) == 0 {
 					loggerQueueName := s._config.Queues.SqsLoggerQueueNamePrefix + s._config.Service.Name + "." + s._config.Namespace.Name
-					loggerQueueName, _ = util.ExtractAlphaNumericUnderscoreDash(util.Replace(loggerQueueName, ".", "-"))
+					loggerQueueName, extractErr := util.ExtractAlphaNumericUnderscoreDash(util.Replace(loggerQueueName, ".", "-"))
+					if extractErr != nil {
+						log.Printf("warning: ExtractAlphaNumericUnderscoreDash failed for SQS logger queue %q: %v", loggerQueueName, extractErr)
+					}
 
 					if url, arn, e := queue.GetQueue(s._sqs, loggerQueueName, s._config.Queues.SqsLoggerMessageRetentionSeconds, "", time.Duration(s._config.Instance.SdTimeout)*time.Second); e != nil {
 						return nil, "", 0, fmt.Errorf("Create SQS Queue %s Failed: %s", loggerQueueName, e)
@@ -1176,9 +1185,16 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 				// cleanup (SD deregister, SNS unsubscribe, health report removal, etc.).
 				// Send SIGTERM to self instead, which triggers awaitOsSigExit() and runs
 				// the full graceful shutdown path.
+				//
+				// CONN-R2-003: Gate self-SIGTERM on _sigHandlerReady — if Serve fails
+				// before awaitOsSigExit calls signal.Notify, the SIGTERM would hit Go's
+				// default handler and kill the process. Same pattern as GracefulStop and
+				// ImmediateStop.
 				log.Printf("Serve gRPC Service %s on %s Failed: (Server Halt) %s", appName, s.LocalAddress(), serveErr.Error())
-				if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
-					_ = p.Signal(syscall.SIGTERM)
+				if s._sigHandlerReady.Load() {
+					if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
+						_ = p.Signal(syscall.SIGTERM)
+					}
 				}
 			} else {
 				log.Println("... gRPC Server Quit Command Received")

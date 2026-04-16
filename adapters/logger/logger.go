@@ -82,6 +82,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -128,6 +129,7 @@ type loggerOptions struct {
 	sensitiveHeaders map[string]struct{}
 	logMetadata      bool
 	logPeer          bool
+	logPeerExplicit  bool // true when WithLogPeer was called explicitly (CONTRACT-001 migration)
 	// rateLimiter caps emissions per second when non-nil. nil means
 	// unlimited (the backward-compatible default). Populated via
 	// WithSampleRate. SP-010 pass-5 A4-F3 (2026-04-15).
@@ -203,7 +205,10 @@ func WithLogMetadata(enabled bool) Option {
 // interceptor construction when upgrading past v1.8.2. Grep for
 // NewLoggerInterceptors at upgrade time.
 func WithLogPeer(enabled bool) Option {
-	return func(o *loggerOptions) { o.logPeer = enabled }
+	return func(o *loggerOptions) {
+		o.logPeer = enabled
+		o.logPeerExplicit = true
+	}
 }
 
 // WithSampleRate caps the number of log emissions per second using a
@@ -268,10 +273,23 @@ func WithSampleRate(perSecondCap int) Option {
 // LoggerStreamInterceptor functions remain available as package-level
 // symbols for backward compatibility. New integrations should use this
 // constructor.
+// logPeerMigrationOnce ensures the CONTRACT-001 migration warning is
+// emitted at most once per process lifetime.
+var logPeerMigrationOnce sync.Once
+
 func NewLoggerInterceptors(z *data.ZapLog, opts ...Option) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
 	cfg := newDefaultLoggerOptions()
 	for _, opt := range opts {
 		opt(cfg)
+	}
+
+	if !cfg.logPeerExplicit {
+		logPeerMigrationOnce.Do(func() {
+			log.Printf("[MIGRATION] logger: WithLogPeer default changed from true to false in v1.8.2 (GDPR). " +
+				"If your service requires peer logging, add WithLogPeer(true). " +
+				"To suppress this warning, set WithLogPeer(false) explicitly. " +
+				"Find affected call sites: grep -rn 'NewLoggerInterceptors' --include='*.go' | grep -v 'WithLogPeer'")
+		})
 	}
 
 	unary := func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {

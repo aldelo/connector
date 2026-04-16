@@ -40,7 +40,10 @@ package metrics_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"reflect"
 	"strings"
@@ -110,7 +113,11 @@ func newIntegrationServer(
 		defer close(serveDone)
 		// Serve returns nil after GracefulStop; any other return
 		// signals a setup failure we want the test to notice.
-		_ = srv.Serve(lis)
+		// TEST-005: log non-GracefulStop errors instead of discarding
+		// them — a silent Serve failure hangs the test indefinitely.
+		if err := srv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			log.Printf("test server Serve error: %v", err)
+		}
 	}()
 
 	dialer := func(context.Context, string) (net.Conn, error) {
@@ -416,7 +423,12 @@ func TestIntegration_Unary_ClientCancel(t *testing.T) {
 	})
 
 	serveDone := make(chan struct{})
-	go func() { defer close(serveDone); _ = srv.Serve(lis) }()
+	go func() {
+		defer close(serveDone)
+		if err := srv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			log.Printf("test server Serve error: %v", err)
+		}
+	}()
 	t.Cleanup(func() {
 		srv.GracefulStop()
 		_ = lis.Close()
@@ -515,7 +527,12 @@ func TestIntegration_Unary_NilSinkAndNilLogger(t *testing.T) {
 	})
 
 	serveDone := make(chan struct{})
-	go func() { defer close(serveDone); _ = srv.Serve(lis) }()
+	go func() {
+		defer close(serveDone)
+		if err := srv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			log.Printf("test server Serve error: %v", err)
+		}
+	}()
 	t.Cleanup(func() {
 		srv.GracefulStop()
 		_ = lis.Close()
@@ -542,5 +559,198 @@ func TestIntegration_Unary_NilSinkAndNilLogger(t *testing.T) {
 	}
 	if !strings.HasPrefix(resp.Answer, "ping-") {
 		t.Errorf("unexpected response: %q", resp.Answer)
+	}
+}
+
+// -----------------------------------------------------------------------
+// 7. Stream interceptor integration — TEST-007
+// -----------------------------------------------------------------------
+//
+// The preceding subtests cover only unary interceptors end-to-end. This
+// test proves the stream interceptor path composes correctly with the
+// same chain (metrics + logger + recovery). It stands up a real gRPC
+// server with AnswerServerStreamService (server-streaming), wires the
+// full stream interceptor chain, makes a StreamGreeting call that returns
+// multiple answers, and asserts:
+//
+//   - All answers arrive intact.
+//   - The MemorySink recorded a requests counter with code=OK.
+//   - The MemorySink recorded a duration histogram entry.
+//   - No error counter was recorded on the success path.
+
+// advStreamServer is a pluggable implementation of
+// AnswerServerStreamServiceServer. Each subtest installs its own
+// streamGreet function.
+type advStreamServer struct {
+	pb.UnimplementedAnswerServerStreamServiceServer
+	streamGreet func(q *pb.Question, stream pb.AnswerServerStreamService_StreamGreetingServer) error
+}
+
+func (s *advStreamServer) StreamGreeting(q *pb.Question, stream pb.AnswerServerStreamService_StreamGreetingServer) error {
+	return s.streamGreet(q, stream)
+}
+
+// newStreamIntegrationServer wires the full stream interceptor chain,
+// starts a bufconn gRPC server with AnswerServerStreamService, and
+// returns a streaming client and the backing MemorySink. Mirrors the
+// unary newIntegrationServer but for the stream path.
+func newStreamIntegrationServer(
+	t *testing.T,
+	streamGreet func(q *pb.Question, stream pb.AnswerServerStreamService_StreamGreetingServer) error,
+) (pb.AnswerServerStreamServiceClient, *metrics.MemorySink) {
+	t.Helper()
+
+	sink := metrics.NewMemorySink()
+	_, mStream := metrics.NewServerInterceptors(sink)
+	_, lStream := logger.NewLoggerInterceptors(nil) // nil ZapLog -> no-op
+	rStream := grpc_recovery.StreamServerInterceptor()
+
+	lis := bufconn.Listen(integrationBufSize)
+	srv := grpc.NewServer(
+		grpc.ChainStreamInterceptor(mStream, lStream, rStream),
+	)
+	pb.RegisterAnswerServerStreamServiceServer(srv, &advStreamServer{streamGreet: streamGreet})
+
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		if err := srv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			log.Printf("test server Serve error: %v", err)
+		}
+	}()
+
+	dialer := func(context.Context, string) (net.Conn, error) {
+		return lis.Dial()
+	}
+	conn, err := grpc.NewClient(
+		"passthrough:///bufnet",
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("dial bufconn: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = conn.Close()
+		srv.GracefulStop()
+		_ = lis.Close()
+		<-serveDone
+	})
+
+	return pb.NewAnswerServerStreamServiceClient(conn), sink
+}
+
+const streamMethod = "/test.AnswerServerStreamService/StreamGreeting"
+
+func TestIntegration_Stream_HappyPath(t *testing.T) {
+	const numAnswers = 3
+
+	client, sink := newStreamIntegrationServer(t, func(q *pb.Question, stream pb.AnswerServerStreamService_StreamGreetingServer) error {
+		for i := 0; i < numAnswers; i++ {
+			if err := stream.Send(&pb.Answer{Answer: fmt.Sprintf("reply-%d-%s", i, q.Question)}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream, err := client.StreamGreeting(ctx, &pb.Question{Question: "world"})
+	if err != nil {
+		t.Fatalf("StreamGreeting failed: %v", err)
+	}
+
+	var answers []string
+	for {
+		resp, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Recv failed: %v", err)
+		}
+		answers = append(answers, resp.Answer)
+	}
+
+	if len(answers) != numAnswers {
+		t.Fatalf("expected %d answers, got %d: %v", numAnswers, len(answers), answers)
+	}
+	for i, a := range answers {
+		want := fmt.Sprintf("reply-%d-world", i)
+		if a != want {
+			t.Errorf("answer[%d]: want %q, got %q", i, want, a)
+		}
+	}
+
+	cs, hs := sink.Snapshot()
+
+	// Requests counter: method + code=OK.
+	val, ok := findCounterSeries(cs, "grpc_server_requests_total",
+		map[string]string{"method": streamMethod, "code": codes.OK.String()})
+	if !ok || val != 1 {
+		t.Errorf("stream requests counter not recorded as 1 OK: ok=%v val=%d snap=%+v", ok, val, cs)
+	}
+
+	// Duration histogram: method only.
+	h, ok := findHistogramSeries(hs, "grpc_server_request_duration_seconds",
+		map[string]string{"method": streamMethod})
+	if !ok || h.Count != 1 {
+		t.Errorf("stream duration histogram not recorded as count=1: ok=%v h=%+v", ok, h)
+	}
+
+	// Error counter must NOT exist on success.
+	for _, c := range cs {
+		if c.Name == "grpc_server_errors_total" && c.Labels["method"] == streamMethod {
+			t.Errorf("stream error counter should not exist on happy path: %+v", c)
+		}
+	}
+}
+
+func TestIntegration_Stream_HandlerError(t *testing.T) {
+	wantCode := codes.Internal
+
+	client, sink := newStreamIntegrationServer(t, func(_ *pb.Question, _ pb.AnswerServerStreamService_StreamGreetingServer) error {
+		return status.Error(wantCode, "stream handler error")
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream, err := client.StreamGreeting(ctx, &pb.Question{Question: "q"})
+	if err != nil {
+		t.Fatalf("StreamGreeting failed: %v", err)
+	}
+
+	// Drain the stream — the error surfaces on Recv after the server
+	// returns the error from the handler.
+	for {
+		_, err := stream.Recv()
+		if err != nil {
+			st, ok := status.FromError(err)
+			if !ok {
+				t.Fatalf("error is not a grpc status: %v", err)
+			}
+			if st.Code() != wantCode {
+				t.Errorf("code: want %v, got %v", wantCode, st.Code())
+			}
+			break
+		}
+	}
+
+	cs, _ := sink.Snapshot()
+
+	// Requests counter with the error code.
+	if v, found := findCounterSeries(cs, "grpc_server_requests_total",
+		map[string]string{"method": streamMethod, "code": wantCode.String()}); !found || v != 1 {
+		t.Errorf("stream requests counter missing for error path: found=%v val=%d", found, v)
+	}
+
+	// Errors counter with the same error code.
+	if v, found := findCounterSeries(cs, "grpc_server_errors_total",
+		map[string]string{"method": streamMethod, "code": wantCode.String()}); !found || v != 1 {
+		t.Errorf("stream errors counter missing for error path: found=%v val=%d", found, v)
 	}
 }

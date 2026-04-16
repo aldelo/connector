@@ -545,7 +545,10 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 		// unsubscribe all sns topics tracked in config
 		for _, v := range subs {
 			if util.LenTrim(v.SubscriptionArn) > 0 {
-				_ = notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout)
+				// CONN-R2-001: log Unsubscribe failures so ghost subscriptions are visible to operators
+				if err := notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout); err != nil {
+					log.Printf("WARNING: Unsubscribe failed for SubscriptionArn %s: %v", v.SubscriptionArn, err)
+				}
 			}
 		}
 
@@ -554,7 +557,10 @@ func (n *NotifierImpl) UnsubscribeAllPriorSNSTopics(topicArnLimit ...string) {
 		// unsubscribe specific sns topic
 		for _, v := range subs {
 			if util.LenTrim(v.SubscriptionArn) > 0 && strings.EqualFold(v.TopicArn, topicArnToUnsubscribe) {
-				_ = notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout)
+				// CONN-R2-001: log Unsubscribe failures so ghost subscriptions are visible to operators
+				if err := notification.Unsubscribe(n._sns, v.SubscriptionArn, timeout); err != nil {
+					log.Printf("WARNING: Unsubscribe failed for SubscriptionArn %s (TopicArn %s): %v", v.SubscriptionArn, topicArnToUnsubscribe, err)
+				}
 			}
 		}
 
@@ -623,7 +629,10 @@ func (n *NotifierImpl) subscribeToSNSTopic(s *pb.NotificationSubscriber) error {
 			if err := n.ConfigData.Save(); err != nil {
 				// attempt clean up upon config save failure
 				log.Println("!!! Subscribed TopicArn '" + s.Topic + "' with Callback To '" + fmt.Sprintf("%s/%s", n.ConfigData.NotifierServerData.GatewayUrl, n.ConfigData.NotifierServerData.ServerKey) + "' Failed to Save to Config: " + err.Error() + " !!!")
-				_ = notification.Unsubscribe(n._sns, subsArn, timeout)
+				// CONN-R2-001: log Unsubscribe failures during cleanup so ghost subscriptions are visible
+				if unsubErr := notification.Unsubscribe(n._sns, subsArn, timeout); unsubErr != nil {
+					log.Printf("WARNING: Unsubscribe cleanup failed for SubscriptionArn %s (TopicArn %s): %v", subsArn, s.Topic, unsubErr)
+				}
 				return fmt.Errorf("Subscribe to SNS Topic '%s' Failed: (Persist to Config Error) %s", s.Topic, err)
 			}
 
@@ -633,12 +642,16 @@ func (n *NotifierImpl) subscribeToSNSTopic(s *pb.NotificationSubscriber) error {
 				// save to dynamodb error
 				log.Println("!!! Subscribed TopicArn '" + s.Topic + "' with Callback To '" + fmt.Sprintf("%s/%s", n.ConfigData.NotifierServerData.GatewayUrl, n.ConfigData.NotifierServerData.ServerKey) + "' Failed to Save to DynamoDB: " + err.Error() + " !!!")
 
-				// attempt clean up sns subscription
-				_ = notification.Unsubscribe(n._sns, subsArn, timeout)
+				// CONN-R2-001: log Unsubscribe/Save failures during cleanup so ghost subscriptions are visible
+				if unsubErr := notification.Unsubscribe(n._sns, subsArn, timeout); unsubErr != nil {
+					log.Printf("WARNING: Unsubscribe cleanup failed for SubscriptionArn %s (TopicArn %s): %v", subsArn, s.Topic, unsubErr)
+				}
 
 				// attempt clean up config value
 				n.ConfigData.RemoveSubscriptionData(s.Topic)
-				_ = n.ConfigData.Save()
+				if saveErr := n.ConfigData.Save(); saveErr != nil {
+					log.Printf("WARNING: Config save cleanup failed for TopicArn %s: %v", s.Topic, saveErr)
+				}
 
 				return fmt.Errorf("Subscribe to SNS Topic '%s' Failed: (Persist to Data Store Failed) %s", s.Topic, err)
 			}

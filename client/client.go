@@ -1103,8 +1103,9 @@ func (c *Client) shutdownWebServerLocked(timeout time.Duration, callCleanup bool
 	cancel()
 
 	// invoke cleanup hook if requested (e.g., Route53 DNS cleanup)
+	// CONN-R3-001: wrap with safeCall — user callback panic must not crash process
 	if callCleanup && c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
-		c.WebServerConfig.CleanUp()
+		safeCall("WebServerConfig.CleanUp", c.WebServerConfig.CleanUp)
 	}
 
 	// wait for server goroutine to signal completion or timeout
@@ -2569,8 +2570,9 @@ func (c *Client) Close() {
 
 	// clean up web server route53 dns and shutdown web server
 	c.webServerMu.Lock()
+	// CONN-R3-001: wrap with safeCall — user callback panic must not crash process
 	if c.WebServerConfig != nil && c.WebServerConfig.CleanUp != nil {
-		c.WebServerConfig.CleanUp()
+		safeCall("WebServerConfig.CleanUp", c.WebServerConfig.CleanUp)
 	}
 	// Issue #18: Use shared shutdown helper
 	c.shutdownWebServerLocked(webServerShutdownTimeout, false) // CleanUp already called above

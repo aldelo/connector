@@ -450,6 +450,27 @@ func TestWithLogPeer_OptInFlipsDefault(t *testing.T) {
 	}
 }
 
+// TestWithLogPeer_SetsExplicitFlag_CONTRACT001 verifies the migration
+// sentinel: calling WithLogPeer (either true or false) must set
+// logPeerExplicit so NewLoggerInterceptors can distinguish explicit
+// opt-in/out from implicit default.
+func TestWithLogPeer_SetsExplicitFlag_CONTRACT001(t *testing.T) {
+	cfg := newDefaultLoggerOptions()
+	if cfg.logPeerExplicit {
+		t.Fatal("precondition: default logPeerExplicit must be false")
+	}
+	WithLogPeer(true)(cfg)
+	if !cfg.logPeerExplicit {
+		t.Error("WithLogPeer(true) must set logPeerExplicit = true")
+	}
+
+	cfg2 := newDefaultLoggerOptions()
+	WithLogPeer(false)(cfg2)
+	if !cfg2.logPeerExplicit {
+		t.Error("WithLogPeer(false) must also set logPeerExplicit = true")
+	}
+}
+
 func TestNewLoggerInterceptors_UsesDefaultLoggerOptions_A4F1(t *testing.T) {
 	// Source-invariant pin: NewLoggerInterceptors must initialize its
 	// cfg from newDefaultLoggerOptions() (and not reintroduce an

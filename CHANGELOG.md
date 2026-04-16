@@ -73,6 +73,18 @@ PASS or PASS-WITH-NOTES with zero blockers.
   godoc and package-level godoc with upgrade instructions.
   Commit `eb91f5d`.
 
+  **Migration (CONTRACT-001):** A one-time startup warning is now
+  emitted when `NewLoggerInterceptors` is called without an explicit
+  `WithLogPeer(true)` or `WithLogPeer(false)`. To find affected call
+  sites across your codebase:
+  ```
+  grep -rn 'NewLoggerInterceptors' --include='*.go' | grep -v 'WithLogPeer'
+  ```
+  Each result is a call site that previously got implicit `logPeer:true`
+  and now gets implicit `logPeer:false`. Add `WithLogPeer(true)` to
+  restore the old behavior, or `WithLogPeer(false)` to acknowledge the
+  new default and suppress the warning.
+
 ### Fixed — SP-010 A4-F3 (`adapters/logger` — opt-in rate limit)
 
 - **New `WithSampleRate` option for log emission throttling.**

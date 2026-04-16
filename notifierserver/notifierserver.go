@@ -55,6 +55,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -217,13 +218,8 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 	log.Println("Notifier Server SNS Relay Started...")
 
 	if util.LenTrim(n.Message) > 0 {
-		// FIX #4: Added recover in goroutine to prevent a Broadcast panic from crashing the server
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("!!! Notifier Server SNS Relay Goroutine Recovered From Panic: %v !!!", r)
-				}
-			}()
+		// CONN-R3-003 + CONN-R3-002: Use safeGo for panic isolation with debug.Stack
+		safeGo("sns-relay", func() {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -241,7 +237,7 @@ func snsrelay(c *gin.Context, bindingInputPtr interface{}) {
 			} else {
 				log.Println("+++ Notifier Server Relay SNS Message Success +++")
 			}
-		}()
+		})
 	} else {
 		log.Println(">>> Notifier Server Skipped SNS Relay Because Message is Blank <<<")
 	}
@@ -298,4 +294,21 @@ func snsupdate(c *gin.Context, bindingInputPtr interface{}) {
 	} else {
 		c.Status(200)
 	}
+}
+
+// safeGo launches fn in a goroutine with panic recovery and stack trace capture.
+// Matches the safeGo pattern in service/service.go (package-private, duplicated here
+// because it is unexported there).
+func safeGo(name string, fn func()) {
+	if fn == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("!!! safeGo panic recovered in %q: %v\n%s !!!", name, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
 }

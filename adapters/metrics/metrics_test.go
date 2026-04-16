@@ -43,8 +43,22 @@ func TestNopSink_NeverPanics(t *testing.T) {
 	s.Counter("any", nil, 100)
 	s.Counter("any", map[string]string{"k": "v"}, -1)
 	s.Observe("any", nil, 0.5)
-	// No assertion — the contract is "does not panic, does not allocate
-	// observable state". If any of the above panicked, the test fails.
+	// No assertion needed for panic guard — if any of the above panicked,
+	// the test fails.
+
+	// The whole point of NopSink is that it is zero-allocation so callers
+	// can use it as a safe default without GC pressure. AllocsPerRun
+	// proves this by averaging over 100 iterations.
+	allocs := testing.AllocsPerRun(100, func() {
+		s.Counter("any", nil, 100)
+		s.Counter("any", map[string]string{"k": "v"}, -1)
+		s.Observe("any", nil, 0.5)
+		s.Observe("any", map[string]string{"k": "v"}, 1.5)
+	})
+	if allocs > 0 {
+		t.Errorf("NopSink must be zero-allocation, got %.0f allocs per run "+
+			"(TEST-009 regression: NopSink methods should discard without heap work)", allocs)
+	}
 }
 
 // -----------------------------------------------------------------------
