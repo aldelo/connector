@@ -192,7 +192,9 @@ type healthreport struct {
 //   - Exported fields (AppName, hooks, interceptors, RateLimit,
 //     WebServerConfig, etc.) MUST be set before Serve is called and MUST
 //     NOT be mutated after. The Service does not synchronize reads of
-//     these fields against caller-side writes.
+//     these fields against caller-side writes. Use Frozen() to check
+//     whether the Service has entered serving state; Frozen returns true
+//     once Serve has been called and the configuration is locked.
 //   - GracefulStop, ImmediateStop, and the internal signal handler may
 //     be invoked concurrently from any goroutine — they are guarded by
 //     _mu plus an atomic.Bool one-shot CAS (_deregFired) on the Cloud
@@ -560,6 +562,26 @@ func (s *Service) ShutdownCtx() context.Context {
 	s._mu.RLock()
 	defer s._mu.RUnlock()
 	return s._shutdownCtx
+}
+
+// Frozen reports whether the Service's configuration is locked.
+// It returns true once Serve() has been called (even if Serve
+// subsequently failed or returned), and false before that point.
+//
+// Callers that programmatically build a Service and conditionally
+// mutate exported fields can use Frozen as a pre-check:
+//
+//	if !svc.Frozen() {
+//	    svc.GracefulStopTimeout = 10 * time.Second
+//	}
+//
+// The method is safe to call concurrently from any goroutine; it
+// reads the same monotonic _started flag that guards Serve
+// re-entry (SVC-F3).
+//
+// AD-3: lifecycle guardrail for post-Serve mutation.
+func (s *Service) Frozen() bool {
+	return s._started.Load()
 }
 
 // effectiveShutdownCancelPhase returns the phase at which ShutdownCtx
@@ -2201,7 +2223,8 @@ func runCleanup(name string, cleanup func()) {
 // what makes the instance unrecoverable after an early failure.
 //
 // All exported fields on Service must be set before calling Serve;
-// post-Serve mutation is not synchronized.
+// post-Serve mutation is not synchronized. Use Frozen() to check
+// whether the Service has entered the frozen (serving/served) state.
 func (s *Service) Serve() error {
 	// SVC-F3: one-shot re-entry guard. CAS returns false if _started
 	// was already true, meaning a prior (or concurrent) Serve call

@@ -1717,3 +1717,46 @@ func TestService_EffectiveShutdownCancelPhase_ZeroPromotedToImmediate(t *testing
 		t.Errorf("effectiveShutdownCancelPhase() = %v, want Immediate", got)
 	}
 }
+
+// AD-3: Frozen() returns false on a fresh Service and true after
+// Serve() has been called (even if Serve returns an error). This
+// lets callers guard against post-Serve mutation of exported fields.
+//
+// Uses newServeGuardTestService (empty AppName → readConfig fails
+// immediately, no listener bind, no goroutines) so the test is
+// deterministic and fast.
+func TestService_Frozen_LifecycleContract(t *testing.T) {
+	t.Run("false_before_Serve", func(t *testing.T) {
+		svc := newServeGuardTestService()
+		if svc.Frozen() {
+			t.Error("Frozen() returned true before Serve — expected false")
+		}
+	})
+
+	t.Run("true_after_Serve_even_on_error", func(t *testing.T) {
+		// Serve fails at readConfig (empty AppName), but the _started
+		// CAS at the top of Serve fires before readConfig runs.
+		svc := newServeGuardTestService()
+		err := svc.Serve()
+		if err == nil {
+			t.Fatal("expected Serve to fail (empty AppName); got nil")
+		}
+		if !svc.Frozen() {
+			t.Error("Frozen() returned false after Serve — expected true")
+		}
+	})
+
+	t.Run("true_blocks_reentry", func(t *testing.T) {
+		// Verify Frozen is consistent with the re-entry guard: once
+		// Frozen() is true, a second Serve returns ErrServiceAlreadyStarted.
+		svc := newServeGuardTestService()
+		_ = svc.Serve() // first call — fails at readConfig but flips _started
+		if !svc.Frozen() {
+			t.Fatal("precondition: Frozen() should be true after first Serve")
+		}
+		err := svc.Serve()
+		if err != ErrServiceAlreadyStarted {
+			t.Errorf("second Serve returned %v, want ErrServiceAlreadyStarted", err)
+		}
+	})
+}
