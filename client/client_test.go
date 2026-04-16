@@ -480,9 +480,14 @@ func TestCL_F5_SafeGoNilFnIsNoop(t *testing.T) {
 			t.Fatalf("safeGo(nil) panicked: %v", r)
 		}
 	}()
-	safego.Go("test-nil", nil) // must not panic, must not spawn a goroutine
-	// Give any stray goroutine a chance to crash if it existed.
-	time.Sleep(20 * time.Millisecond)
+	ch := safego.GoWait("test-nil", nil) // must not panic, must not spawn a goroutine
+	// GoWait must close the channel immediately for a nil fn.
+	select {
+	case <-ch:
+		// channel closed immediately (nil fn) — no goroutine spawned
+	case <-time.After(2 * time.Second):
+		t.Fatal("GoWait(nil) channel was not closed")
+	}
 }
 
 func TestCL_F5_SafeCallRecoversPanic(t *testing.T) {

@@ -1038,9 +1038,14 @@ func TestSafeGo_NilFnIsNoOp(t *testing.T) {
 		}
 	}()
 
-	safego.Go("nil-fn", nil)
-	// Give any accidentally-spawned goroutine a moment to run.
-	time.Sleep(20 * time.Millisecond)
+	ch := safego.GoWait("nil-fn", nil)
+	// GoWait must close the channel immediately for a nil fn.
+	select {
+	case <-ch:
+		// channel closed immediately (nil fn) — no goroutine spawned
+	case <-time.After(2 * time.Second):
+		t.Fatal("GoWait(nil) channel was not closed")
+	}
 }
 
 // TestSafeGo_NormalFnCompletes: a well-behaved fn runs in a goroutine
@@ -1070,7 +1075,7 @@ func TestSafeGo_NormalFnCompletes(t *testing.T) {
 func TestSafeGo_PanickingFnRecovered(t *testing.T) {
 	entered := make(chan struct{})
 
-	safego.Go("panicking-fn", func() {
+	ch := safego.GoWait("panicking-fn", func() {
 		close(entered)
 		panic("deliberate panic in safeGo test")
 	})
@@ -1081,8 +1086,13 @@ func TestSafeGo_PanickingFnRecovered(t *testing.T) {
 		t.Fatal("safeGo fn did not start within 2s")
 	}
 
-	// Give the panic + recovery + log a moment to complete.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for panic recovery + logging to complete.
+	select {
+	case <-ch:
+		// recovery complete
+	case <-time.After(2 * time.Second):
+		t.Fatal("GoWait channel not closed after panic recovery")
+	}
 
 	// If we got here without the test binary crashing, recovery worked.
 }
@@ -1093,7 +1103,7 @@ func TestSafeGo_PanickingFnRecovered(t *testing.T) {
 func TestSafeGo_PanickingFnRuntimeError(t *testing.T) {
 	entered := make(chan struct{})
 
-	safego.Go("runtime-error-fn", func() {
+	ch := safego.GoWait("runtime-error-fn", func() {
 		close(entered)
 		var p *int
 		_ = *p // nil deref
@@ -1105,7 +1115,13 @@ func TestSafeGo_PanickingFnRuntimeError(t *testing.T) {
 		t.Fatal("safeGo fn did not start within 2s")
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// Wait for panic recovery + logging to complete.
+	select {
+	case <-ch:
+		// recovery complete
+	case <-time.After(2 * time.Second):
+		t.Fatal("GoWait channel not closed after runtime error recovery")
+	}
 }
 
 // TestSafeGo_ConcurrentPanicsAllRecovered: fleet of 50 panicking
@@ -1117,8 +1133,9 @@ func TestSafeGo_ConcurrentPanicsAllRecovered(t *testing.T) {
 	var started sync.WaitGroup
 	started.Add(n)
 
+	channels := make([]<-chan struct{}, n)
 	for i := 0; i < n; i++ {
-		safego.Go("concurrent-panic", func() {
+		channels[i] = safego.GoWait("concurrent-panic", func() {
 			started.Done()
 			panic("concurrent panic")
 		})
@@ -1137,8 +1154,14 @@ func TestSafeGo_ConcurrentPanicsAllRecovered(t *testing.T) {
 		t.Fatal("not all safeGo goroutines started within 3s")
 	}
 
-	// Drain recovery logs.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for all recoveries to complete.
+	for j, ch := range channels {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("goroutine %d recovery did not complete within 5s", j)
+		}
+	}
 }
 
 // TestStopGRPCServerBounded_ZeroTimeoutUsesDefault verifies that a zero

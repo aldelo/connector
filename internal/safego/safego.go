@@ -49,3 +49,26 @@ func Go(name string, fn func()) {
 		fn()
 	}()
 }
+
+// GoWait is like Go but returns a channel that is closed when the goroutine
+// exits (whether normally or via panic recovery). Use in tests for
+// deterministic synchronization instead of time.Sleep.
+//
+// If fn is nil, GoWait returns an already-closed channel (no goroutine spawned).
+func GoWait(name string, fn func()) <-chan struct{} {
+	done := make(chan struct{})
+	if fn == nil {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("!!! safeGo panic recovered in %q: %v\n%s !!!", name, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+	return done
+}
