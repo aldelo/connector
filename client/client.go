@@ -635,7 +635,9 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 			},
 		})
 		c.setEndpoints(cacheGetLiveServiceEndpoints(svcKey, cfg.Target.InstanceVersion, true))
-		_ = c.UpdateLoadBalanceResolver()
+		if resolverErr := c.UpdateLoadBalanceResolver(); resolverErr != nil {
+			log.Printf("warning: UpdateLoadBalanceResolver failed in ServiceHostOnlineHandler: %v", resolverErr)
+		}
 	}
 
 	nc.ServiceHostOfflineHandler = func(host string, port uint) {
@@ -647,7 +649,9 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 		svcKey := strings.ToLower(cfg.Target.ServiceName + "." + cfg.Target.NamespaceName)
 		cachePurgeServiceEndpointByHostAndPort(svcKey, host, port)
 		c.setEndpoints(cacheGetLiveServiceEndpoints(svcKey, cfg.Target.InstanceVersion, true))
-		_ = c.UpdateLoadBalanceResolver()
+		if resolverErr := c.UpdateLoadBalanceResolver(); resolverErr != nil {
+			log.Printf("warning: UpdateLoadBalanceResolver failed in ServiceHostOfflineHandler: %v", resolverErr)
+		}
 	}
 
 	nc.ServiceAlertStoppedHandler = func(reason string) {

@@ -2453,7 +2453,9 @@ func (s *Service) registerInstance(ip string, port uint, healthy bool, version s
 	}
 
 	if cfg.Instance.AutoDeregisterPrior {
-		_ = s.deregisterInstance()
+		if deregErr := s.deregisterInstance(); deregErr != nil {
+			log.Printf("warning: deregisterInstance (AutoDeregisterPrior) failed: %v", deregErr)
+		}
 	}
 
 	if instanceId, operationId, err := registry.RegisterInstance(sd, cfg.Service.Id, cfg.Instance.Prefix, ip, port, healthy, version, timeoutDuration...); err != nil {
@@ -2807,7 +2809,9 @@ func (s *Service) GracefulStop() {
 	s.unsubscribeSNS()
 
 	if cfg != nil {
-		_ = s.deleteServiceHealthReportFromDataStore(cfg.Instance.Id)
+		if delErr := s.deleteServiceHealthReportFromDataStore(cfg.Instance.Id); delErr != nil {
+			log.Printf("warning: deleteServiceHealthReportFromDataStore failed during GracefulStop: %v", delErr)
+		}
 	}
 
 	// SVC-F2 coverage extension (C2-003): user-supplied CleanUp must
@@ -2977,7 +2981,9 @@ func (s *Service) ImmediateStop() {
 	s.unsubscribeSNS()
 
 	if cfg != nil {
-		_ = s.deleteServiceHealthReportFromDataStore(cfg.Instance.Id)
+		if delErr := s.deleteServiceHealthReportFromDataStore(cfg.Instance.Id); delErr != nil {
+			log.Printf("warning: deleteServiceHealthReportFromDataStore failed during ImmediateStop: %v", delErr)
+		}
 	}
 
 	// SVC-F2 coverage extension (C2-003): user-supplied CleanUp must
