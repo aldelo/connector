@@ -720,9 +720,16 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 					return
 				}
 
-				// Re-check after ticker fires
+				// Re-check after ticker fires; also probe closedCh for
+				// the stale-lifecycle case where c.closed was reset by a
+				// new Dial (BL-4).
 				if c.closed.Load() {
 					return
+				}
+				select {
+				case <-closedCh:
+					return
+				default:
 				}
 
 				if current := c.getNotifierClient(); current != nil {
@@ -731,6 +738,20 @@ func (c *Client) configureNotifierHandlers(nc *NotifierClient) {
 				}
 				if c.closed.Load() {
 					return
+				}
+				// BL-4: guard against stale goroutine outliving its lifecycle.
+				// After Close()+Dial(), c.closed is reset to false by the new
+				// lifecycle, so the Load() check above passes. But the captured
+				// closedCh still refers to the OLD lifecycle's channel which
+				// Close() already closed. A non-blocking probe on closedCh
+				// catches the stale goroutine before it enters the
+				// potentially-long-blocking DoNotifierAlertService call, which
+				// holds notifierStartMu and would delay the new lifecycle's
+				// notifier startup until the stale Subscribe stream terminates.
+				select {
+				case <-closedCh:
+					return
+				default:
 				}
 
 				// let DoNotifierAlertService create and wire a fresh client
