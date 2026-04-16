@@ -38,7 +38,10 @@ utilize automatically.
     - see /build/openssl-pem/make-pem.sh for CA, Server and Client Pem and Key self-signed creation  
     - server TLS / mTLS setup in gRPC service and client is required in order to secure channel
 - Auth
-    - TODO: Future Implementation, currently using mTLS for transport level security
+    - Bearer token authentication via gRPC metadata interceptors (unary and stream)
+    - Pluggable token validator set via `adapters/auth.SetTokenValidator`
+    - Server interceptors: `ServerAuthUnaryInterceptor`, `ServerAuthStreamInterceptor`
+    - mTLS provides transport-level security (see Server TLS / mTLS above)
 - Circuit Breaker
     - client side, default using Hystrix-Go package for circuit breaker
     - circuit breaker is handled in client side unary and stream interceptors
