@@ -42,6 +42,10 @@ var (
 	// for all inbound SNS callbacks. Default is true (secure by default) —
 	// see notifiergateway/config/config.go viper default.
 	requireSNSSignature = true
+	// BL-1: configurable DDB endpoint lookup retry parameters for SNS
+	// subscription confirmation. Defaults match prior hardcoded behavior.
+	endpointRetryDelayMs    uint = 250
+	endpointRetryMaxAttempts uint = 3
 )
 
 // GetDynamoDBActionRetryAttempts returns the configured retry attempts value
@@ -160,6 +164,38 @@ func SetRequireSNSSignature(v bool) {
 	configMu.Lock()
 	defer configMu.Unlock()
 	requireSNSSignature = v
+}
+
+// GetEndpointRetryDelayMs returns the configured delay in milliseconds
+// between DDB endpoint lookup retries.
+func GetEndpointRetryDelayMs() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return endpointRetryDelayMs
+}
+
+// SetEndpointRetryDelayMs sets the delay in milliseconds between DDB
+// endpoint lookup retries.
+func SetEndpointRetryDelayMs(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	endpointRetryDelayMs = v
+}
+
+// GetEndpointRetryMaxAttempts returns the configured maximum number of
+// DDB endpoint lookup attempts.
+func GetEndpointRetryMaxAttempts() uint {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return endpointRetryMaxAttempts
+}
+
+// SetEndpointRetryMaxAttempts sets the maximum number of DDB endpoint
+// lookup attempts.
+func SetEndpointRetryMaxAttempts(v uint) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	endpointRetryMaxAttempts = v
 }
 
 type serverRoute struct {

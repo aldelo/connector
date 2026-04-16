@@ -55,6 +55,8 @@ func TestConfig_SettersReturnError_WhenViperNil(t *testing.T) {
 		{"SetHealthReportCleanUpFrequencySeconds", func() error { return c.SetHealthReportCleanUpFrequencySeconds(120) }},
 		{"SetHealthReportRecordStaleMinutes", func() error { return c.SetHealthReportRecordStaleMinutes(5) }},
 		{"SetRequireSNSSignature", func() error { return c.SetRequireSNSSignature(true) }},
+		{"SetEndpointRetryDelayMs", func() error { return c.SetEndpointRetryDelayMs(250) }},
+		{"SetEndpointRetryMaxAttempts", func() error { return c.SetEndpointRetryMaxAttempts(3) }},
 		{"SetHashKeys", func() error {
 			return c.SetHashKeys(HashKeyData{HashKeyName: "k", HashKeySecret: "s"})
 		}},

@@ -135,6 +135,11 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 		}
 		model.SetHashKeys(hashKeysMap)
 
+		// BL-1: Publish configurable DDB endpoint lookup retry parameters
+		// so snsconfirmation uses config values instead of hardcoded 250ms / 3.
+		model.SetEndpointRetryDelayMs(cfg.NotifierGatewayData.EndpointRetryDelayMs)
+		model.SetEndpointRetryMaxAttempts(cfg.NotifierGatewayData.EndpointRetryMaxAttempts)
+
 		// Publish the secure-by-default SNS signature enforcement flag to
 		// the model package so snsrouter handlers can read it. When the
 		// operator explicitly disables verification via config, emit a WARN
@@ -590,8 +595,22 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 
 			log.Println("/snsrouter 'subscriptionconfirmation' serverKey From Invoker = " + escapeUserInput(serverKey))
 
-			// wait 250ms for notifier server to update ddb with server endpoint info
-			waitTimer := time.NewTimer(250 * time.Millisecond)
+			// BL-1: configurable delay before first DDB endpoint lookup and
+			// between retries. Defaults (250ms / 3 attempts) match prior
+			// hardcoded behavior for backward compatibility.
+			retryDelayMs := model.GetEndpointRetryDelayMs()
+			if retryDelayMs == 0 {
+				retryDelayMs = 250
+			}
+			retryDelay := time.Duration(retryDelayMs) * time.Millisecond
+
+			maxAttempts := model.GetEndpointRetryMaxAttempts()
+			if maxAttempts == 0 {
+				maxAttempts = 3
+			}
+
+			// wait for notifier server to update ddb with server endpoint info
+			waitTimer := time.NewTimer(retryDelay)
 			select {
 			case <-waitTimer.C:
 			case <-c.Request.Context().Done():
@@ -602,7 +621,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 
 			serverEndpointUrl := ""
 
-			for i := 0; i < 3; i++ {
+			for i := uint(0); i < maxAttempts; i++ {
 				if serverUrl, err := model.GetServerRouteFromDataStore(serverKey); err != nil {
 					log.Printf("Server Key %s Lookup Failed: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), err.Error())
 					c.String(412, "Server Key Not Valid")
@@ -612,7 +631,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 					}
 
 					return
-				} else if util.LenTrim(serverUrl) == 0 && i == 2 {
+				} else if util.LenTrim(serverUrl) == 0 && i == maxAttempts-1 {
 					log.Printf("Server Key %s Not Found in DDB: (IP Source: %s) %s\n", escapeUserInput(serverKey), escapeUserInput(c.ClientIP()), "ServerUrl Returned is Blank")
 					c.String(412, "Server Key Not Exist")
 
@@ -625,7 +644,7 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 					serverEndpointUrl = serverUrl
 					break
 				} else {
-					retryTimer := time.NewTimer(250 * time.Millisecond)
+					retryTimer := time.NewTimer(retryDelay)
 					select {
 					case <-retryTimer.C:
 					case <-c.Request.Context().Done():

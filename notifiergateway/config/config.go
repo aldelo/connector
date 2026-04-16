@@ -54,6 +54,12 @@ type NotifierGatewayData struct {
 	// inbound SubscriptionConfirmation / Notification callbacks. Secure by
 	// default — operators must explicitly set this to false to bypass.
 	RequireSNSSignature bool `mapstructure:"require_sns_signature"`
+	// EndpointRetryDelayMs is the delay in milliseconds between DDB endpoint
+	// lookup retries during SNS subscription confirmation. Default: 250.
+	EndpointRetryDelayMs uint `mapstructure:"endpoint_retry_delay_ms"`
+	// EndpointRetryMaxAttempts is the maximum number of DDB endpoint lookup
+	// attempts during SNS subscription confirmation. Default: 3.
+	EndpointRetryMaxAttempts uint `mapstructure:"endpoint_retry_max_attempts"`
 }
 
 // FIX #7: Exported so other packages can construct HashKeyData values
@@ -265,6 +271,38 @@ func (c *Config) SetRequireSNSSignature(b bool) error {
 	return nil
 }
 
+// SetEndpointRetryDelayMs sets the delay in milliseconds between DDB
+// endpoint lookup retries during SNS subscription confirmation.
+func (c *Config) SetEndpointRetryDelayMs(i uint) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
+	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureGatewayData()
+	c._v.Set("notifier_gateway.endpoint_retry_delay_ms", i)
+	c.NotifierGatewayData.EndpointRetryDelayMs = i
+	return nil
+}
+
+// SetEndpointRetryMaxAttempts sets the maximum number of DDB endpoint
+// lookup attempts during SNS subscription confirmation.
+func (c *Config) SetEndpointRetryMaxAttempts(i uint) error {
+	if c == nil {
+		return fmt.Errorf("config receiver is nil")
+	}
+	if c._v == nil {
+		return fmt.Errorf("viper config not initialized")
+	}
+
+	c.ensureGatewayData()
+	c._v.Set("notifier_gateway.endpoint_retry_max_attempts", i)
+	c.NotifierGatewayData.EndpointRetryMaxAttempts = i
+	return nil
+}
+
 // FIX #4: Trim key names and secrets before storing so that lookups
 // using trimmed names (e.g. model.GetHashKey("mykey")) match correctly.
 func (c *Config) SetHashKeys(hk ...HashKeyData) error {
@@ -341,6 +379,10 @@ func (c *Config) Read() error {
 	// Secure by default — SNS signature verification is enforced unless
 	// operators explicitly disable it via config.
 	v.Default("notifier_gateway.require_sns_signature", true)
+	// BL-1: configurable DDB endpoint lookup retry parameters for SNS
+	// subscription confirmation. Defaults match prior hardcoded behavior.
+	v.Default("notifier_gateway.endpoint_retry_delay_ms", 250)
+	v.Default("notifier_gateway.endpoint_retry_max_attempts", 3)
 
 	if ok, err := v.Init(); err != nil {
 		return err
