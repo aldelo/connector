@@ -458,13 +458,13 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 	seg := xray.NewSegmentNullable("GrpcClient-NotifierClient-SubscribeTopic")
 	if seg != nil {
-		_ = seg.SafeAddMetadata("GrpcClient-SessionID", sessionId)
-		_ = seg.SafeAddMetadata("Subscribe-TopicARN", topicArn)
+		xray.LogXrayAddFailure("NotifierClient", seg.SafeAddMetadata("GrpcClient-SessionID", sessionId))
+		xray.LogXrayAddFailure("NotifierClient", seg.SafeAddMetadata("Subscribe-TopicARN", topicArn))
 
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.SafeAddError(err)
+				xray.LogXrayAddFailure("NotifierClient", seg.SafeAddError(err))
 			}
 		}()
 	}
@@ -813,13 +813,13 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 
 	seg := xray.NewSegmentNullable("GrpcClient-NotifierClient-Unsubscribe")
 	if seg != nil {
-		_ = seg.SafeAddMetadata("GrpcClient-SessionID", subID)
-		_ = seg.SafeAddMetadata("Subscribe-TopicARN", subTopic)
+		xray.LogXrayAddFailure("NotifierClient", seg.SafeAddMetadata("GrpcClient-SessionID", subID))
+		xray.LogXrayAddFailure("NotifierClient", seg.SafeAddMetadata("Subscribe-TopicARN", subTopic))
 
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.SafeAddError(err)
+				xray.LogXrayAddFailure("NotifierClient", seg.SafeAddError(err))
 			}
 		}()
 	}

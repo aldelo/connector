@@ -1625,7 +1625,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			}
 			e := fmt.Errorf("gRPC Client Dial Service Endpoint %s Failed: (If TLS/mTLS, Check Certificate SAN) %w", target, err)
 			if seg != nil {
-				_ = seg.SafeAddError(e)
+				xray.LogXrayAddFailure("Client", seg.SafeAddError(e))
 			}
 			return e
 		}
@@ -1656,7 +1656,7 @@ func (c *Client) Dial(ctx context.Context) error {
 				}
 				cleanupConn = false
 				if seg != nil {
-					_ = seg.SafeAddError(fmt.Errorf("gRPC service server not ready: %w", e))
+					xray.LogXrayAddFailure("Client", seg.SafeAddError(fmt.Errorf("gRPC service server not ready: %w", e)))
 				}
 				return fmt.Errorf("gRPC service server not ready: %w", e)
 			}
@@ -1672,7 +1672,7 @@ func (c *Client) Dial(ctx context.Context) error {
 			// start server and capture immediate config/start errors
 			if err := c.startWebServer(serveErrCh); err != nil {
 				if seg != nil {
-					_ = seg.SafeAddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err))
+					xray.LogXrayAddFailure("Client", seg.SafeAddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)))
 				}
 				return fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, err)
 			}
@@ -1684,7 +1684,7 @@ func (c *Client) Dial(ctx context.Context) error {
 					z.Errorf("!!! Http Web Server %s Failed: %s !!!", c.WebServerConfig.AppName, e)
 				}
 				if seg != nil {
-					_ = seg.SafeAddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e))
+					xray.LogXrayAddFailure("Client", seg.SafeAddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, e)))
 				}
 				return e
 			}
@@ -1696,7 +1696,7 @@ func (c *Client) Dial(ctx context.Context) error {
 				consumed = true
 				if webErr != nil {
 					if seg != nil {
-						_ = seg.SafeAddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr))
+						xray.LogXrayAddFailure("Client", seg.SafeAddError(fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr)))
 					}
 					return fmt.Errorf("Http Web Server %s Failed: %s", c.WebServerConfig.AppName, webErr)
 				}
@@ -3271,7 +3271,7 @@ func (c *Client) streamXRayTracerHandler(
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.SafeAddError(err)
+				xray.LogXrayAddFailure("Client", seg.SafeAddError(err))
 			}
 		}()
 

@@ -13,7 +13,45 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
-## [Unreleased]
+## [v1.8.3] — 2026-04-16
+
+Patch release. Coordinated sibling to `common v1.8.3`. Closes all 22
+pass-6 contrarian findings plus the 4 "remaining to 10/10" items. This
+release completes the full remediation cycle bringing both repos to
+~9.8/10 health.
+
+No observable contract change from `v1.8.2`. Every public function
+signature is preserved. Consumers pinning `connector v1.8.2` should
+bump to `v1.8.3` as a drop-in.
+
+### Changed — sibling pin bump
+
+- **`github.com/aldelo/common`** pin moved `v1.8.2 → v1.8.3`. The
+  sibling release contains: S3/CloudMap/Route53 deadline enforcement
+  (34 methods bounded), SES/SQS deadline enforcement, TCPServer race
+  fix, ginxray observability + PII fixes, CORS fail-closed.
+
+### Fixed
+
+- **gRPC Serve zombie (A2-P6-01):** Non-blocking send to quit channel
+  as fallback exit path when `_sigHandlerReady` is false.
+- **Startup coordination docs (A2-P6-02..05):** Documentation comments
+  explaining coordination gap, nil-guard on `_config`, poll interval
+  tuning, and `startServerFnTestMu` guard rules.
+- **HealthProbe stale snapshot (A3-F1):** Atomic hc+conn snapshot under
+  RLock with post-snapshot conn state re-check.
+- **Observer goroutine leak (A3-F2):** Select on `getClosedCh()` for
+  clean exit.
+- **CORS on SNS relay removed (A4-P6-F1):** Server-to-server endpoint
+  does not need browser CORS.
+- **logPeerMigrationOnce testable (A4-P6-F2):** Reset helper for
+  `sync.Once` isolation in tests.
+- **safeGo deduplication (REM-2):** 3 identical copies in service/
+  client/notifierserver extracted to `internal/safego.Go()`.
+- **LogXrayAddFailure adoption (REM-3):** 55 xray silent-discard sites
+  converted to rate-limited logging via `xray.LogXrayAddFailure()`.
+- **Channel-based signal readiness (REM-4):** `_sigHandlerReadyCh`
+  replaces sleep-based poll in test helper for deterministic tests.
 
 ## [v1.8.2] — 2026-04-16
 

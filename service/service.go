@@ -927,9 +927,9 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 
 			publicIPSeg := xray.NewSegmentNullable("GrpcService-SetupServer")
 			if publicIPSeg != nil {
-				_ = publicIPSeg.Seg.AddMetadata("Public-IP-Gateway", s._config.Instance.PublicIPGateway)
-				_ = publicIPSeg.Seg.AddMetadata("Hash-Date", util.FormatDate(time.Now().UTC()))
-				_ = publicIPSeg.Seg.AddMetadata("Hash-Validation-Token", validationToken)
+				xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddMetadata("Public-IP-Gateway", s._config.Instance.PublicIPGateway))
+				xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddMetadata("Hash-Date", util.FormatDate(time.Now().UTC())))
+				xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddMetadata("Hash-Validation-Token", validationToken))
 			}
 
 			if status, body, err := rest.GET(s._config.Instance.PublicIPGateway, []*rest.HeaderKeyValue{
@@ -942,7 +942,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 				log.Println(buf)
 
 				if publicIPSeg != nil {
-					_ = publicIPSeg.Seg.AddError(errors.New(buf))
+					xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddError(errors.New(buf)))
 					publicIPSeg.Close()
 				}
 
@@ -952,7 +952,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 				log.Println(buf)
 
 				if publicIPSeg != nil {
-					_ = publicIPSeg.Seg.AddError(errors.New(buf))
+					xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddError(errors.New(buf)))
 					publicIPSeg.Close()
 				}
 
@@ -960,8 +960,8 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			} else {
 				if net.ParseIP(strings.TrimSpace(body)) != nil {
 					if publicIPSeg != nil {
-						_ = publicIPSeg.Seg.AddMetadata("Result-Private-IP", ip)
-						_ = publicIPSeg.Seg.AddMetadata("Result-Public-IP", body)
+						xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddMetadata("Result-Private-IP", ip))
+						xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddMetadata("Result-Public-IP", body))
 						publicIPSeg.Close()
 					}
 
@@ -972,7 +972,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 					log.Println(buf)
 
 					if publicIPSeg != nil {
-						_ = publicIPSeg.Seg.AddError(errors.New(buf))
+						xray.LogXrayAddFailure("Service", publicIPSeg.Seg.AddError(errors.New(buf)))
 						publicIPSeg.Close()
 					}
 
@@ -1148,7 +1148,7 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.SafeAddError(err)
+				xray.LogXrayAddFailure("Service", seg.SafeAddError(err))
 			}
 		}()
 	}
@@ -1832,7 +1832,7 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.SafeAddError(err)
+				xray.LogXrayAddFailure("Service", seg.SafeAddError(err))
 			}
 		}()
 	}
@@ -1870,7 +1870,7 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 
 	if seg != nil {
 		subSeg = seg.NewSubSegment("REST DEL: " + cfg.Instance.HealthReportServiceUrl)
-		_ = subSeg.Seg.AddMetadata("x-nts-gateway-hash-name", cfg.Instance.HashKeyName)
+		xray.LogXrayAddFailure("Service", subSeg.Seg.AddMetadata("x-nts-gateway-hash-name", cfg.Instance.HashKeyName))
 	}
 
 	statusCode, _, e := rest.DELETE(cfg.Instance.HealthReportServiceUrl+"/"+url.PathEscape(instanceId), []*rest.HeaderKeyValue{
@@ -1914,7 +1914,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		defer seg.Close()
 		defer func() {
 			if err != nil {
-				_ = seg.SafeAddError(err)
+				xray.LogXrayAddFailure("Service", seg.SafeAddError(err))
 			}
 		}()
 	}
@@ -1974,7 +1974,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		msg := "Set Service Health Report Update To Data Store Skipped: " + "ServiceID Not Defined in Config"
 
 		if seg != nil {
-			_ = seg.SafeAddMetadata("Skipped-Reason", msg)
+			xray.LogXrayAddFailure("Service", seg.SafeAddMetadata("Skipped-Reason", msg))
 		}
 
 		log.Println(msg)
@@ -1985,7 +1985,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		msg := "Set Service Health Report Update To Data Store Skipped: " + "InstanceID Not Defined in Config"
 
 		if seg != nil {
-			_ = seg.SafeAddMetadata("Skipped-Reason", msg)
+			xray.LogXrayAddFailure("Service", seg.SafeAddMetadata("Skipped-Reason", msg))
 		}
 
 		log.Println(msg)
@@ -1997,7 +1997,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		msg := "Set Service Health Report Update To Data Store Skipped: " + "Service Host Info Not Ready"
 
 		if seg != nil {
-			_ = seg.SafeAddMetadata("Skipped-Reason", msg)
+			xray.LogXrayAddFailure("Service", seg.SafeAddMetadata("Skipped-Reason", msg))
 		}
 
 		log.Println(msg)
@@ -2029,7 +2029,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 
 	if seg != nil {
 		subSeg = seg.NewSubSegment("REST POST: " + cfg.Instance.HealthReportServiceUrl)
-		_ = subSeg.Seg.AddMetadata("Post-Data", jsonData)
+		xray.LogXrayAddFailure("Service", subSeg.Seg.AddMetadata("Post-Data", jsonData))
 	}
 
 	if statusCode, RespBody, e := rest.POST(cfg.Instance.HealthReportServiceUrl, []*rest.HeaderKeyValue{
