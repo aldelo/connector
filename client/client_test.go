@@ -317,26 +317,24 @@ func TestCL_F4_GetConfigIsRaceFree(t *testing.T) {
 
 	// Writer: alternate between valid and nil. This is the exact
 	// pattern Dial → Dial-error → retry produces under a flap.
+	// Bounded to 20 000 iterations so the test terminates
+	// deterministically instead of relying on a time.Sleep window.
 	stop := make(chan struct{})
-	done := make(chan struct{}, 3)
+	readerDone := make(chan struct{}, 2)
+	writerDone := make(chan struct{})
 
 	go func() {
-		defer func() { done <- struct{}{} }()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				c._config.Store(valid)
-				c._config.Store(nil)
-			}
+		defer close(writerDone)
+		for i := 0; i < 20000; i++ {
+			c._config.Store(valid)
+			c._config.Store(nil)
 		}
 	}()
 
 	// Two parallel readers — each must always see either nil or a
 	// fully-formed *config, never a partial/torn pointer.
 	reader := func() {
-		defer func() { done <- struct{}{} }()
+		defer func() { readerDone <- struct{}{} }()
 		for {
 			select {
 			case <-stop:
@@ -356,11 +354,12 @@ func TestCL_F4_GetConfigIsRaceFree(t *testing.T) {
 	go reader()
 	go reader()
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the writer to exhaust its iterations, then signal
+	// readers to stop.
+	<-writerDone
 	close(stop)
-	for i := 0; i < 3; i++ {
-		<-done
-	}
+	<-readerDone
+	<-readerDone
 	// If the race detector is enabled (go test -race), the mere
 	// completion of this test without a detector report proves the
 	// atomic.Pointer path is race-free.
@@ -432,11 +431,12 @@ func TestCL_F4_CircuitBreakerHandlerSurvivesConcurrentNilStore(t *testing.T) {
 		}
 	}()
 
-	// Let the race run for a slice of real time.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the reader to finish its 20 000 iterations (deterministic)
+	// instead of a wall-clock sleep, then stop the writer.
+	err := <-readerDone
 	close(stop)
 	<-writerDone
-	if err := <-readerDone; err != nil {
+	if err != nil {
 		t.Fatalf("CL-F4 regression: unaryCircuitBreakerHandler panicked under concurrent nil-store: %v", err)
 	}
 	if invocations.Load() == 0 {
