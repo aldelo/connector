@@ -1156,7 +1156,9 @@ func (c *Client) ZLog() *data.ZapLog {
 			OutputToConsole: outputConsole,
 			AppName:         appName,
 		}
-		_ = z.Init()
+		if err := z.Init(); err != nil {
+			log.Println("!!! ZapLog Init Failed: " + err.Error() + " !!!")
+		}
 		c._z = z
 	})
 
@@ -3070,7 +3072,9 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 			OutputToConsole: false,
 			AppName:         c.AppName,
 		}
-		_ = z.Init()
+		if err := z.Init(); err != nil {
+			log.Println("!!! ZapLog Init Failed: " + err.Error() + " !!!")
+		}
 
 		var e error
 		if cb, e = plugins.NewHystrixGoPlugin(method,
@@ -3159,7 +3163,9 @@ func (c *Client) streamCircuitBreakerHandler(
 			OutputToConsole: false,
 			AppName:         c.AppName,
 		}
-		_ = z.Init()
+		if err := z.Init(); err != nil {
+			log.Println("!!! ZapLog Init Failed: " + err.Error() + " !!!")
+		}
 
 		var e error
 		cb, e = plugins.NewHystrixGoPlugin(method,

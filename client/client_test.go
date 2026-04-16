@@ -676,6 +676,45 @@ func contains(s, substr string) bool {
 	return false
 }
 
+// -------- EH-2 ZapLog Init error-handling tests --------
+// EH-2 replaces `_ = z.Init()` with proper error checking so that a
+// ZapLog initialization failure is logged rather than silently discarded.
+// These tests verify that the Init call path does not panic and that the
+// logger object is still assigned (even if Init fails, the caller gets a
+// non-nil ZapLog back — the error is logged, not fatal).
+
+// TestEH2_ZLogInitDoesNotPanic exercises the ZLog() lazy-init path on a
+// fresh Client with no config loaded. z.Init() runs with default
+// (disabled-logger) settings. The test confirms the error-checked Init
+// path does not panic and that ZLog returns a non-nil logger.
+func TestEH2_ZLogInitDoesNotPanic(t *testing.T) {
+	c := &Client{}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("EH-2 regression: ZLog() panicked during Init: %v", r)
+		}
+	}()
+
+	z := c.ZLog()
+	if z == nil {
+		t.Error("ZLog() returned nil on a fresh Client — logger was not assigned after Init")
+	}
+}
+
+// TestEH2_ZLogInitIdempotent verifies that repeated ZLog() calls return
+// the same logger instance (sync.Once guarantees Init runs exactly once).
+func TestEH2_ZLogInitIdempotent(t *testing.T) {
+	c := &Client{}
+
+	z1 := c.ZLog()
+	z2 := c.ZLog()
+
+	if z1 != z2 {
+		t.Error("ZLog() returned different instances across calls — sync.Once init is broken")
+	}
+}
+
 // panicError wraps a recovered panic value so it can flow through a
 // channel typed as error.
 type panicError struct{ r interface{} }
