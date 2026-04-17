@@ -13,7 +13,7 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
-## [v1.8.5] — pending
+## [v1.8.5] — 2026-04-17
 
 Patch release. Repairs the release-artifact discipline gap introduced at
 `v1.8.4` (CHANGELOG entry missing, `go.mod` still pinned
@@ -30,13 +30,22 @@ and sibling-pin alignment fixes below.
 
 ### Changed — sibling pin bump
 
-- **`github.com/aldelo/common`** pin moved `v1.8.3 → v1.8.4` in
-  `connector/go.mod:6`. This alignment SHOULD have shipped with the
-  `v1.8.4` tag — the omission is the root cause of the pass-6 `C-2`
-  finding. The `v1.8.4` content already depended on features in
-  `common v1.8.4` (KMS deadline, DynamoDB WARN observability,
-  gin binding-error scrub), so `v1.8.5` restores parity between the
-  binary the tag names and the dependency graph it actually needs.
+- **`github.com/aldelo/common`** pin moved `v1.8.3 → v1.8.5` in
+  `connector/go.mod:6`, over two commits in this release series:
+  first `v1.8.3 → v1.8.4` (C-2 remediation — restoring the sibling
+  pin that SHOULD have shipped with the `v1.8.4` tag), then
+  `v1.8.4 → v1.8.5` at ship time to pull in the sibling's matching
+  remediation release. The `v1.8.4` content already depended on
+  features in `common v1.8.4` (KMS deadline, DynamoDB WARN
+  observability, gin binding-error scrub); the `v1.8.5` bump also
+  picks up `common v1.8.5`'s own P2/P3 hardening (zap/kms error
+  logging, MySQL pool+timeout defaults, gin TrustedProxies
+  fail-closed). `v1.8.5` now restores parity between the binary the
+  tag names and the dependency graph it actually needs.
+
+  **Rule #15 pre-flight at tag time (2026-04-17):**
+  - verified: `common v1.8.5 → 9204aef1db0077332ba0d8e20f36bfa02180e75c`
+               via `git ls-remote --tags origin refs/tags/v1.8.5`
 
 ### Fixed
 
