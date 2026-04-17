@@ -51,9 +51,14 @@ utilize automatically.
     - rate limit is handled in server side In-Tap-Handle
     - rate limit option configured via server config file
 - Logger
-    - TODO: Future Implementation for Cloud Logging to DynamoDB table as log destination
+    - Structured gRPC access logs via `adapters/logger` — unary and stream interceptors
+    - Legacy unstructured path (`LoggerUnaryInterceptor`, `LoggerStreamInterceptor`) kept for backward compatibility
+    - Recommended path: `NewLoggerInterceptors` backed by caller-provided `*data.ZapLog`, structured kv pairs, built-in redact denylist for common secret headers, extensible via `WithSensitiveHeaders`
+    - Error message bodies are truncated to bound log volume and prevent trace-string leakage
 - Monitoring
-    - TODO: Future Implementation
+    - Dependency-free metrics surface via `adapters/metrics` — `Sink` interface (counter + histogram) lets consumers plug any backend (Prometheus, StatsD, OpenTelemetry, CloudWatch EMF) without forcing those deps into the connector module
+    - `NewServerInterceptors` / `NewClientInterceptors` translate each RPC into request count, error count, and duration metrics
+    - Reference sinks: `NopSink` (discards — zero overhead default) and `MemorySink` (in-process atomic counters for tests)
 - Tracer
     - AWS XRay is used for distributed tracing
     - enabled via yaml config file for /service, /client, /notifiergateay, /notifierserver code
