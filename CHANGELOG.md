@@ -13,6 +13,154 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
+## [v1.8.5] — pending
+
+Patch release. Repairs the release-artifact discipline gap introduced at
+`v1.8.4` (CHANGELOG entry missing, `go.mod` still pinned
+`common v1.8.3`, sibling release narrative absent) and closes the
+remaining deep-review findings the `v1.8.4` audit surfaced after the
+tag was cut. This is a workspace **rule #15 / rule #16** remediation
+release — the code changes are low-risk, the CHANGELOG + `go.mod`
+changes are the load-bearing deliverables.
+
+No observable contract change from `v1.8.4`. Every public function
+signature is preserved. Consumers pinning `connector v1.8.4` should
+bump to `v1.8.5` as a drop-in for the documentation-correctness
+and sibling-pin alignment fixes below.
+
+### Changed — sibling pin bump
+
+- **`github.com/aldelo/common`** pin moved `v1.8.3 → v1.8.4` in
+  `connector/go.mod:6`. This alignment SHOULD have shipped with the
+  `v1.8.4` tag — the omission is the root cause of the pass-6 `C-2`
+  finding. The `v1.8.4` content already depended on features in
+  `common v1.8.4` (KMS deadline, DynamoDB WARN observability,
+  gin binding-error scrub), so `v1.8.5` restores parity between the
+  binary the tag names and the dependency graph it actually needs.
+
+### Fixed
+
+- **P2-N1 swallowed error at `client/client.go:2247`:**
+  `_ = resp.Body.Close()` in the health-check loop now logs close
+  errors at warn level. Matches the `common v1.8.4` P2-2 REST
+  Close-error pattern for workspace-wide consistency.
+- **P2-N6 stale README TODOs:** `README.md:54,56` "TODO: Future
+  Implementation" lines for Logger and Monitoring replaced with
+  current status. Logger is implemented via `zaplog` passthrough;
+  monitoring is out-of-repo via the operator's observability stack.
+- **P3-N4 soft-race sleeps in `service_test.go`:** Two
+  `time.Sleep(10ms)` "give the handler a moment" sleeps at lines
+  1589 and 1620 replaced with deterministic channel waits. Closes
+  the residual flakiness surfaced intermittently under high
+  parallel `go test ./...` load.
+
+## [v1.8.4] — 2026-04-16
+
+Patch release. Coordinated-sibling release with `common v1.8.4`.
+Closes the full **deep-review pass-3 (v1.8.3 post-remediation) +
+pass-2 full-codebase audit** findings: 14 commits resolving
+`connector`-side gaps across service lifecycle, adapter/client
+error paths, tests, dependencies, and documentation. Companion to
+the much larger `common v1.8.4` which carries the sibling's own
+20-commit patch series.
+
+> **⚠️ Release-artifact discipline note (added `v1.8.5`
+> retrospectively).** At the moment this tag was cut, (a) this
+> CHANGELOG entry was missing — the tag had no written release
+> narrative, and (b) `go.mod` still pinned `common v1.8.3` despite
+> the commits below depending on `common v1.8.4` features
+> (DynamoDB WARN observability, KMS deadline, gin binding-error
+> scrub). Both gaps are workspace rule #15 / rule #16 violations
+> that pass-6 `C-1` and `C-2` flagged. Consumers pulling `v1.8.4`
+> via `go get connector@v1.8.4` will observe the go.mod drift in
+> their vendored tree and should either update their own go.mod
+> to `common v1.8.4` via indirect pin, or upgrade to `v1.8.5`
+> where the drift is corrected at source. The v1.8.4 tag itself
+> is not re-tagged (immutable by convention) — v1.8.5 carries
+> the repair.
+
+No observable contract change from `v1.8.3`. Every public function
+signature is preserved. Consumers pinning `connector v1.8.3` should
+bump to `v1.8.4` as a drop-in for the fixes below.
+
+### Fixed — service lifecycle
+
+- **P1-2 time.Sleep → safego.GoWait migration (commit `00ddeb7`):**
+  13 `time.Sleep` sites in `connector/service` converted to
+  deterministic `safego.GoWait` channel waits. Test timing
+  improvements: safego 0.225s → 0.008s, notifierserver
+  0.237s → 0.015s. 10 remaining `time.Sleep` sites are retained
+  for race-detector probes, AWS-consistency waits, model delays,
+  and simulation loops — each documented in-place with rationale.
+- **AD-3 `Frozen()` lifecycle guard (commit `ebf5e5e`):**
+  `service.Frozen()` new method guards against post-`Serve`
+  mutation of `Service` struct fields. Complements the `v1.8.1`
+  `_sigHandlerReady` gate and `v1.8.3` `_cfgMu` rules.
+- **P2-3 self-SIGTERM delivery error logging (commit `cbc415d`):**
+  `os.FindProcess(pid).Signal(SIGTERM)` programmatic stop paths
+  now log signal-delivery errors instead of discarding. Matches
+  rule #14's "self-delivered OS signals gated on readiness flag".
+
+### Fixed — client / adapter / notifierserver
+
+- **EH-1 redundant `SetXRayServiceOn` removal (commit `e8309ae`):**
+  Three connector init callsites removed the post-`xray.Init()`
+  redundant `SetXRayServiceOn(true)` call — the `common v1.8.4`
+  EH-1 contract tests pinned that `Init` self-enables correctly.
+- **EH-2 `ZapLog.Init` error handling in circuit breaker
+  (commit `2d6227f`):** `client/` circuit breaker paths now
+  treat `ZapLog.Init()` failure as a hard init error instead of
+  silently proceeding with a nil logger. Prevents the
+  "circuit breaker trips with no audit trail" production incident
+  class.
+- **BL-1 `notifiergateway` DDB retry configurable
+  (commit `4e79f4b`):** `notifiergateway` DynamoDB endpoint retry
+  delay and max-attempts are now config-driven instead of
+  hard-coded. Operators can tune under SDK throttle pressure.
+- **BL-4 stale notifier goroutine in `client/`
+  (commit `9b3dc73`):** Stale notifier goroutine could previously
+  block a new `Client` lifecycle from starting. Fix ensures
+  the old goroutine is drained before the new lifecycle binds.
+- **P2-1 hash validation token xray redaction
+  (commit `f91ad83`):** `service/` xray metadata no longer
+  includes the raw hash-validation token — redacted at emit
+  site. Analogous to the `v1.8.2` A1-F3 SNS phone PII fix.
+- **P2-8 `log.Fatal` → `t.Fatal` in integration tests
+  (commit `8b65763`):** Integration tests used `log.Fatal`
+  which terminated the entire test process on assertion
+  failure. Replaced with `t.Fatal` so a failing integration
+  test marks that one test as failed without collateral
+  damage to siblings.
+
+### Added — test coverage
+
+- **P1-3 adapter + webserver package tests
+  (commits `fe9cdc2` + `b724ce2`):** 12 packages gained
+  ~163 tests across auth, loadbalancer, notification, queue,
+  circuitbreaker, ratelimiter, notifiergateway/config,
+  notifierserver/config, webserver, and 4 adapter subsystems.
+  Closes the P1-3 coverage gap from the deep-review.
+- **TQ-4 deterministic channel waits in `client/` tests
+  (commit `e80aaa7`):** `time.Sleep` sites in `client/` test
+  suite replaced with `safego.GoWait` channel-wait primitive.
+
+### Documented
+
+- **DOC-01 README Auth status (commit `86040d9`):** Stale "TODO:
+  Auth" line in `README.md` replaced with the implemented auth
+  status (JWT middleware via `gin-jwt/v2`, service-layer authz
+  check, audit logging). Closes the readme-drift flagged in
+  pass-2 review.
+
+### Dependency maintenance
+
+- **Quarterly dependency sweep (commit `fb73b62`):** 28 modules
+  updated to current-minor. `govulncheck` reports 0 active
+  vulnerabilities. See sibling `common v1.8.4` entry for
+  workspace-wide dependency discipline.
+
+---
+
 ## [v1.8.3] — 2026-04-16
 
 Patch release. Coordinated sibling to `common v1.8.3`. Closes all 22
