@@ -13,6 +13,69 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
+## [v1.8.7] — 2026-04-17
+
+Patch release. Two local defensive-logging improvements surfaced by the
+2026-04-17 full deep-review, plus the `common v1.8.6 → v1.8.7` sibling
+pin bump to adopt the matching batch of `common` safety fixes (gin
+type-assertion hardening, DynamoDB diagnostic-payload gate, hystrixgo
+stream-server panic recovery).
+
+No observable contract change from `v1.8.6`. Both local changes are
+logging-only; neither alters control flow, return values, or error
+semantics. The `common` pin bump pulls in opt-out behaviour for
+`DisableLastExecuteParamsPayload` (default `false` preserves the
+existing per-operation diagnostic payload; set `true` on hot-path
+DynamoDB wrappers to skip the `input.String()` allocation and mutex
+contention) — no consumer code must change for the default path.
+
+### Changed — sibling pin bump
+
+- **`github.com/aldelo/common`** pin moved `v1.8.6 → v1.8.7` in
+  `connector/go.mod:6` to pull in the sibling's P1-CMN-L2-1
+  (gin `c.Keys["JWT_PAYLOAD"]` comma-ok guard), P1-PERF-2 (DynamoDB
+  `DisableLastExecuteParamsPayload` opt-out), and P2-CMN-C2
+  (hystrixgo stream-server `ListenAndServe` panic recovery) fixes.
+  `common v1.8.7` is a drop-in replacement for `v1.8.6` — no public
+  signatures changed, default behaviour preserved.
+
+### Fixed
+
+- **P2-CONN-L2-1 silent `stopper.Shutdown` error** — `client/client.go:1106`:
+  the graceful-shutdown error return was discarded with `_ =
+  stopper.Shutdown(ctx)`, so a non-clean shutdown (context timeout,
+  pending connections, listener error) produced no signal. Now logs
+  the returned error with the configured timeout so operators can
+  distinguish a clean drain from a forced one. No control-flow change
+  (shutdown still proceeds); the error is observed, not acted on.
+
+- **P2-CONN-1 `sdMapMu` hot-path misuse warning** —
+  `notifiergateway/notifiergateway.go:1025`: added a doc-comment to
+  the `sdMapMu` declaration warning that the mutex is held across
+  CloudMap `DeregisterInstance` network I/O inside
+  `serviceDiscoveryRemoveHealthyServiceInstance`. The function must
+  not be called from a request-handler path — concurrent request
+  serialization would produce latency spikes bounded by the CloudMap
+  API round-trip. Documentation-only change; runtime behaviour
+  unchanged.
+
+### Rule #15 Pre-Flight Attestation (2026-04-17 UTC)
+
+- verified: `common v1.8.7 → a971b676d931dabc470f72fdad825c2c8e29b3c1`
+  via `git ls-remote --tags https://github.com/aldelo/common.git refs/tags/v1.8.7`
+- verified-at: 2026-04-17 09:05:11 UTC
+- sibling commit: `common@e964a57` (CHANGELOG for v1.8.7);
+  fix code at `common@3dd1c3d`
+
+### Verification
+
+- `go build ./...` clean; `go vet ./...` clean
+- `go test ./... -short -count=1` — 27/27 packages pass (zero
+  regressions vs `v1.8.6` baseline, both for the two local
+  logging/doc changes and for the `common v1.8.6 → v1.8.7` bump)
+- `go mod tidy` — `go.sum` updated to match `common v1.8.7` hashes
+  (2 lines); no transitive dependency drift
+
 ## [v1.8.6] — 2026-04-17
 
 Patch release. Error-wrapping hardening — completes the **P2-N5**
