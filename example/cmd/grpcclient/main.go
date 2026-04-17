@@ -52,8 +52,20 @@ func main() {
 	}
 	defer svc1Cli.Close()
 
+	// P3-CONN-L2-1: example goroutines must model best practice — a panic here
+	// would kill the entire example process. Recover logs-and-continues; the
+	// example remains usable for interactive testing even after a bug in the
+	// notifier alert path. Consumer code copying this pattern should do the same
+	// (or use connector/internal/safego.Go for named-goroutine post-mortems).
 	go func() {
-		_ = svc1Cli.DoNotifierAlertService()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("example grpcclient: DoNotifierAlertService panic recovered: %v", r)
+			}
+		}()
+		if err := svc1Cli.DoNotifierAlertService(); err != nil {
+			log.Printf("example grpcclient: DoNotifierAlertService error: %v", err)
+		}
 	}()
 
 	//

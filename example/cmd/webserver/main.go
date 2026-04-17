@@ -86,7 +86,14 @@ func main() {
 					Binding:         ginbindtype.UNKNOWN,
 					BindingInputPtr: &SimpleData{},
 					Handler: func(c *gin.Context, bindingInput interface{}) {
-						o := bindingInput.(*SimpleData)
+						// P3-CONN-L2-2: unchecked type assertion panics on bad wiring.
+						// Examples are templates — consumers who copy-paste should see
+						// the `, ok` idiom modelled. Never use raw `.(*T)` in handlers.
+						o, ok := bindingInput.(*SimpleData)
+						if !ok {
+							c.String(400, "bad binding: expected *SimpleData")
+							return
+						}
 
 						c.HTML(200, "index.html", gin.H{
 							"title": o.Line1 + " // " + o.Line2,

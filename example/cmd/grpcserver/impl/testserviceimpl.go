@@ -18,6 +18,7 @@ package impl
 
 import (
 	"context"
+	"log"
 	"time"
 
 	util "github.com/aldelo/common"
@@ -53,7 +54,12 @@ func (*TestServiceImpl) Greeting(ctx context.Context, q *testpb.Question) (*test
 			seg.Seg.TraceID,
 		},
 	}
-	_ = grpc.SendHeader(ctx, md)
+	// P3-CONN-L2-3: `_ =` on SendHeader masks transport failures in an example
+	// that consumers copy. Log so the pattern propagates correctly; don't return
+	// the error (the RPC itself should still attempt to reply with the answer).
+	if err := grpc.SendHeader(ctx, md); err != nil {
+		log.Printf("example grpcserver: SendHeader error: %v", err)
+	}
 
 	s := q.Question + " = " + "Reply OK"
 	return &testpb.Answer{
