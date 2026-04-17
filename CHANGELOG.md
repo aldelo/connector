@@ -13,6 +13,127 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
+## [v1.8.8] — 2026-04-17
+
+Patch release. Coordinated-sibling cycle with `common v1.8.8`. Three
+local hardening changes (atomic.Bool migration in notifierclient,
+concurrency/TOCTOU/initOnce documentation, example code hardening)
+plus the `common v1.8.7 → v1.8.8` pin bump to adopt the sibling's
+HTTP transport pooling, allocation-hygiene, and silent-failure cluster
+fixes.
+
+**No observable contract change** from v1.8.7 on any exported
+surface. The atomic.Bool migration preserves the prior `int32` 0/1
+semantics bit-for-bit (.Load() returns bool == prior `== 1`
+comparison); documentation-only edits in `notifierserver/impl` and
+`adapters/ratelimiter/ratelimitplugin`; example/ edits are additive
+safety (panic recovery, checked assertion, SendHeader error logging)
+that do not change the example's runtime behavior on the happy path.
+
+No new tests added — all changes are behavior-preserving
+(atomic-idiom upgrade / docs / example templates); the existing
+test suite guards the contract and continues to pass under
+`go test ./... -race -short -count=1` (0 failures) with the bumped
+`common v1.8.8` pin.
+
+### Changed — sibling pin bump
+
+- **`github.com/aldelo/common`** pin moved `v1.8.7 → v1.8.8` in
+  `connector/go.mod:6` to pull in:
+  - P1-PERF-1 (`rest/rest.go` HTTP transport pooling — 3–5×
+    latency improvement on back-to-back calls to the same host;
+    eliminates FD leak under burst traffic),
+  - P2-PERF-4/-5 (16 dynamodb capacity hints + UnmarshalResultItems
+    O(n·m) → O(n+m)),
+  - P3-PERF-7 (xray `_xrayServiceOn` atomic.Bool migration,
+    ~15× faster trace-enabled check),
+  - P3-L3-1/-2 (11 helper-str regexps lifted to package-level
+    `MustCompile`),
+  - Silent-failure cluster (tcpserver SetReadDeadline ×3, xray
+    Set/EnableTracing env-error logging, ginxray dead-call removal,
+    ParseFromExcelDate upper-bound guard).
+
+  `common v1.8.8` is a drop-in replacement for `v1.8.7` — no
+  public signatures changed, default behavior preserved on every
+  exported surface.
+
+### Refactor — thread-safety idiom
+
+- **P3-CONN-1 — `client/notifierclient.go`
+  `_notificationServicesStarted int32 → atomic.Bool`.** Migrated 14
+  `atomic.LoadInt32`/`StoreInt32` call sites to typed `atomic.Bool`
+  (Go 1.19+). Drops the "use int32 for atomic ops" workaround comment
+  — `atomic.Bool` expresses intent correctly. No behavior change;
+  prior `== 1` semantic preserved via `.Load()` returning `bool`.
+
+### Documentation
+
+- **P3-L3-C1 — `client/notifierclient.go` memory-ordering comment.**
+  Added block comment above `_notificationServicesStarted`
+  documenting Go's `sync/atomic` sequential-consistency guarantee
+  (since Go 1.19): Store(true) on one goroutine is immediately
+  observable to Load() on another without additional synchronization.
+  Guards against "simplify to plain bool" refactors by noting the
+  concurrent read/write access pattern.
+
+- **P2-CONN-2 — `notifierserver/impl/notifierimpl.go` `safeSend`
+  TOCTOU documentation.** Added comment explaining the race window
+  between `closeMux` release and the channel send is *intentional*:
+  holding the mutex across the select would serialize fan-out on a
+  single sender and deadlock under back-pressure. The deferred
+  `recover()` converts the rare send-on-closed panic into
+  `sent=false`. Future refactors must NOT extend the critical section.
+
+- **P3-CONN-2 — `adapters/ratelimiter/ratelimitplugin/ratelimitplugin.go`
+  initOnce reset documentation.** Added comment on the
+  `initOnce = new(sync.Once)` reset pattern explaining why resetting
+  the once-guard when the rateLimit pointer is swapped is required
+  (otherwise the new limiter's `Init()` would never run). Safe under
+  `p.mu`; removing would fail closed at first use of a replaced limiter.
+
+### Fixed — example code hardening
+
+- **P3-CONN-L2-1 — `example/cmd/grpcclient/main.go:55` goroutine
+  hardening.** The `go func()` calling `DoNotifierAlertService` now
+  wraps with `defer recover()` (logs r) and logs any returned error.
+  Examples are templates — consumers copy-paste verbatim, so silent
+  `_ =` patterns propagate at scale. Comment references
+  `connector/internal/safego.Go` as the production-grade alternative.
+
+- **P3-CONN-L2-2 — `example/cmd/webserver/main.go:89` checked type
+  assertion.** `o := bindingInput.(*SimpleData)` (panics on bad
+  wiring) replaced with `o, ok := ...; if !ok { c.String(400, ...);
+  return }`. Comment explicitly warns against raw assertions in
+  handlers.
+
+- **P3-CONN-L2-3 — `example/cmd/grpcserver/impl/testserviceimpl.go:56`
+  SendHeader error logging.** `_ = grpc.SendHeader(ctx, md)` now
+  logs non-nil error. Added `log` import. Comment notes the RPC
+  should still return the answer — SendHeader failure is
+  observable but non-fatal to the response.
+
+### Verification
+
+- `go build ./...` clean
+- `go vet ./...` clean
+- `go test ./... -race -short -count=1` — 0 failures on connector
+  with `common v1.8.8` pin resolved
+- No behavior change: atomic.Bool Load/Store matches prior int32
+  0/1 convention; doc-only edits in notifierimpl.go and
+  ratelimitplugin.go; example edits are additive safety.
+
+### Rule #15 Pre-Flight Attestation (2026-04-17 10:16:30 UTC)
+
+- verified: `common v1.8.8` → `2339b48802d3033bbfb7d0b639161b5983eb6b19`
+  at 2026-04-17 10:16:30 UTC
+- verified-by: `git ls-remote --tags https://github.com/aldelo/common.git refs/tags/v1.8.8`
+
+Consumer repos pinning `connector v1.8.8` will transitively resolve
+`common v1.8.8` which is guaranteed present on origin at the SHA above
+at the moment this release was tagged.
+
+---
+
 ## [v1.8.7] — 2026-04-17
 
 Patch release. Two local defensive-logging improvements surfaced by the
