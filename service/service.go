@@ -1251,7 +1251,11 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 				log.Printf("Serve gRPC Service %s on %s Failed: (Server Halt) %s", appName, s.LocalAddress(), serveErr.Error())
 				if s._sigHandlerReady.Load() {
 					if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
-						_ = p.Signal(syscall.SIGTERM)
+						if sigErr := p.Signal(syscall.SIGTERM); sigErr != nil {
+							// Signal delivery failure means awaitOsSigExit won't wake —
+							// fall through to the quit-channel send below as backup.
+							log.Printf("Serve: self-SIGTERM delivery failed: %v", sigErr)
+						}
 					}
 				} else {
 					// A2-P6-01 (2026-04-16): gRPC Serve failed before awaitOsSigExit
@@ -2831,7 +2835,11 @@ func (s *Service) GracefulStop() {
 		// they are not actually parked in awaitOsSigExit.
 		if s._sigHandlerReady.Load() {
 			if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
-				_ = p.Signal(syscall.SIGTERM)
+				if sigErr := p.Signal(syscall.SIGTERM); sigErr != nil {
+					// Signal delivery failure means awaitOsSigExit won't wake —
+					// the quit-channel send below still drives teardown.
+					log.Printf("GracefulStop: self-SIGTERM delivery failed: %v", sigErr)
+				}
 			}
 		}
 		// Non-blocking send: another path (signal demux / a prior
@@ -3012,7 +3020,11 @@ func (s *Service) ImmediateStop() {
 		// not terminate the test process.
 		if s._sigHandlerReady.Load() {
 			if p, findErr := os.FindProcess(os.Getpid()); findErr == nil {
-				_ = p.Signal(syscall.SIGTERM)
+				if sigErr := p.Signal(syscall.SIGTERM); sigErr != nil {
+					// Signal delivery failure means awaitOsSigExit won't wake —
+					// the quit-channel send below still drives teardown.
+					log.Printf("ImmediateStop: self-SIGTERM delivery failed: %v", sigErr)
+				}
 			}
 		}
 		select {
