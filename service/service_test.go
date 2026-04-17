@@ -1567,6 +1567,10 @@ func TestService_ShutdownCtx_HandlerObservingCtxExitsEarly(t *testing.T) {
 	// marker. Mirrors the godoc example pattern exactly.
 	handlerDone := make(chan int, 1)
 	startWork := make(chan struct{})
+	// P3-N4 (2026-04-17): deterministic "handler has begun meaningful work"
+	// signal, closed after the first chunk is processed. Replaces the prior
+	// time.Sleep(10ms) race that could flake under GC or scheduler pressure.
+	processedFirst := make(chan struct{})
 	safego.Go("svc-f5-test-handler", func() {
 		<-startWork
 		processed := 0
@@ -1578,6 +1582,9 @@ func TestService_ShutdownCtx_HandlerObservingCtxExitsEarly(t *testing.T) {
 			default:
 			}
 			processed++
+			if processed == 1 {
+				close(processedFirst)
+			}
 			// Tiny deterministic step so the test terminates even if
 			// cancel never arrives (failure will time out below).
 			time.Sleep(time.Millisecond)
@@ -1585,8 +1592,12 @@ func TestService_ShutdownCtx_HandlerObservingCtxExitsEarly(t *testing.T) {
 	})
 
 	close(startWork)
-	// Give the handler a moment to run meaningful iterations.
-	time.Sleep(10 * time.Millisecond)
+	// Deterministic wait: handler has processed ≥ 1 chunk before cancel fires.
+	select {
+	case <-processedFirst:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not process first chunk within 2s")
+	}
 
 	s.fireShutdownCancelIfPhase(ShutdownPhaseImmediate)
 
@@ -1610,14 +1621,24 @@ func TestService_ShutdownCtx_HandlerIgnoringCtxStillCompletes(t *testing.T) {
 
 	// Simulated handler: ignores ShutdownCtx, always returns success.
 	handlerResult := make(chan error, 1)
+	// P3-N4 (2026-04-17): deterministic "handler has started" signal, closed
+	// at handler entry. Replaces the prior time.Sleep(10ms) race — we need
+	// the cancel to fire WHILE the handler is mid-work, not potentially
+	// before the goroutine is even scheduled.
+	handlerStarted := make(chan struct{})
 	safego.Go("svc-f5-test-handler-ignoring", func() {
+		close(handlerStarted)
 		// No ShutdownCtx observation.
 		time.Sleep(50 * time.Millisecond)
 		handlerResult <- nil // "successful" RPC
 	})
 
-	// Fire the cancel while the handler is running.
-	time.Sleep(10 * time.Millisecond)
+	// Fire the cancel while the handler is running (after it has entered).
+	select {
+	case <-handlerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ignoring-ctx handler did not start within 2s")
+	}
 	s.fireShutdownCancelIfPhase(ShutdownPhaseImmediate)
 
 	select {
