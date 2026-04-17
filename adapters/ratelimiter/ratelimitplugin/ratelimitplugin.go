@@ -74,6 +74,13 @@ func (p *RateLimitPlugin) SetRateLimiter(rl *ratelimit.RateLimiter) {
 
 	p.mu.Lock()
 
+	// P3-CONN-2: `initOnce = new(sync.Once)` intentionally resets the once-guard when
+	// the rateLimit pointer is replaced. A fresh Once is required so the new limiter's
+	// Init() runs exactly once even though a previous one already fired on the old
+	// instance. This assignment is safe only because p.mu is held — any concurrent
+	// reader in ensureRateLimiter() serializes on the same mutex and will observe the
+	// new *sync.Once consistently. Do NOT remove this reset: without it, a swapped-in
+	// limiter would never call Init() and would fail closed at first use.
 	p.rateLimit = rl
 	p.initOnce = new(sync.Once)
 	p.lastInitTarget = rl

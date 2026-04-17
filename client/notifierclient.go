@@ -104,7 +104,15 @@ type NotifierClient struct {
 	_subscriberTopicArn          string
 	_subscribeCancel             context.CancelFunc // cancels the Subscribe gRPC stream
 	_subMu                       sync.Mutex         // protects _subscriberID, _subscriberTopicArn, and _subscribeCancel
-	_notificationServicesStarted int32              // Use int32 for atomic operations
+	// P3-L3-C1: atomic.Bool operations in this file rely on Go's sync/atomic
+	// sequential-consistency semantics (guaranteed since Go 1.19): any write
+	// happens-before every subsequent read of the same atomic across all goroutines.
+	// That means a Store(true) on one goroutine is immediately observable to a
+	// Load() on another without additional synchronization. No acquire/release
+	// fences needed at the call sites. Do NOT replace with a plain bool "for
+	// simplicity" — the state is read from ping/subscribe worker goroutines while
+	// being written from Start/Stop paths; a plain bool is a data race.
+	_notificationServicesStarted atomic.Bool        // true once notification listener+ping goroutines are up; cleared on teardown/error
 }
 
 // NewNotifierClient creates a new prepared notifier client for use in service discovery notification
@@ -254,7 +262,7 @@ func (n *NotifierClient) NotifierClientAlertServicesStarted() bool {
 		return false
 	}
 
-	return atomic.LoadInt32(&n._notificationServicesStarted) == 1
+	return n._notificationServicesStarted.Load()
 }
 
 // PurgeEndpointCache removes current client connection's service name ip port from cache,
@@ -360,7 +368,7 @@ func (n *NotifierClient) Dial() error {
 		n._grpcClient.StreamClientInterceptors = n.StreamClientInterceptorHandlers
 	}
 
-	atomic.StoreInt32(&n._notificationServicesStarted, 0)
+	n._notificationServicesStarted.Store(false)
 	n._subMu.Lock()
 	if n._subscribeCancel != nil {
 		n._subscribeCancel()
@@ -389,8 +397,8 @@ func (n *NotifierClient) Close() {
 		return
 	}
 
-	if atomic.LoadInt32(&n._notificationServicesStarted) == 1 {
-		atomic.StoreInt32(&n._notificationServicesStarted, 0)
+	if n._notificationServicesStarted.Load() {
+		n._notificationServicesStarted.Store(false)
 	}
 
 	// FIX #25: Cancel the subscribe stream context to stop the Recv loop
@@ -418,7 +426,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 	}
 
 	if n._grpcClient == nil {
-		atomic.StoreInt32(&n._notificationServicesStarted, 0)
+		n._notificationServicesStarted.Store(false)
 		n._subMu.Lock()
 		n._subscriberID = ""
 		n._subscriberTopicArn = ""
@@ -438,7 +446,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 	n._subMu.Unlock()
 
 	if util.LenTrim(topicArn) == 0 {
-		atomic.StoreInt32(&n._notificationServicesStarted, 0)
+		n._notificationServicesStarted.Store(false)
 		err = fmt.Errorf("Notifier Client Subscription Requires Target TopicARN")
 		return err
 	}
@@ -447,7 +455,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 	conn := n._grpcClient.ClientConnection()
 	if conn == nil {
-		atomic.StoreInt32(&n._notificationServicesStarted, 0)
+		n._notificationServicesStarted.Store(false)
 		err = fmt.Errorf("Notifier Client Subscribe Failed: gRPC client connection is nil")
 		return err
 	}
@@ -487,7 +495,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 		n._subscribeCancel = nil
 		n._subMu.Unlock()
 
-		atomic.StoreInt32(&n._notificationServicesStarted, 0)
+		n._notificationServicesStarted.Store(false)
 		n._grpcClient.ZLog().Errorf("!!! Notifier Client Subscribe to TopicArn Failed: " + err.Error() + " !!!")
 		err = fmt.Errorf("Notifier Client Subscribe to TopicArn Failed: %w", err)
 		return err
@@ -500,7 +508,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 
 	n._grpcClient.ZLog().Printf("+++ Notifier Client Subscribe TopicArn Success +++")
 
-	atomic.StoreInt32(&n._notificationServicesStarted, 1)
+	n._notificationServicesStarted.Store(true)
 	n._subMu.Lock()
 	n._subscriberID = sessionId
 	n._subscriberTopicArn = topicArn
@@ -714,7 +722,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 				// CL-F5: panic-safe dispatch to user callback.
 				n.callAlertStopped("Notification Alert Services Stopped")
 
-				atomic.StoreInt32(&n._notificationServicesStarted, 0)
+				n._notificationServicesStarted.Store(false)
 				n._subMu.Lock()
 				if n._subscribeCancel != nil {
 					n._subscribeCancel()
@@ -737,7 +745,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 				// CL-F5: panic-safe dispatch to user callback.
 				n.callAlertStopped("Alert Service Stopped Due To Notifier Server Stream EOF")
 
-				atomic.StoreInt32(&n._notificationServicesStarted, 0)
+				n._notificationServicesStarted.Store(false)
 				n._subMu.Lock()
 				if n._subscribeCancel != nil {
 					n._subscribeCancel()
@@ -756,7 +764,7 @@ func (n *NotifierClient) Subscribe(topicArn string) (err error) {
 				// CL-F5: panic-safe dispatch to user callback.
 				n.callAlertStopped("Alert Service Stopped Due To Notifier Server Stream Error: " + err.Error())
 
-				atomic.StoreInt32(&n._notificationServicesStarted, 0)
+				n._notificationServicesStarted.Store(false)
 				n._subMu.Lock()
 				if n._subscribeCancel != nil {
 					n._subscribeCancel()
@@ -787,8 +795,8 @@ func (n *NotifierClient) Unsubscribe() (err error) {
 	n._grpcClient.ZLog().Printf("Notifier Client Unsubscribe Started...")
 
 	// first, stop notification alert services
-	if atomic.LoadInt32(&n._notificationServicesStarted) == 1 {
-		atomic.StoreInt32(&n._notificationServicesStarted, 0)
+	if n._notificationServicesStarted.Load() {
+		n._notificationServicesStarted.Store(false)
 	}
 
 	// second, perform unsubscribe?

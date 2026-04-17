@@ -81,6 +81,13 @@ func (ep *clientEndpoint) safeSend(data *pb.NotificationData, timeout time.Durat
 		}
 	}()
 
+	// TOCTOU window (P2-CONN-2): between releasing closeMux below and the `ch <- data`
+	// select firing, another goroutine can acquire closeMux, set closed=true, and
+	// `close(ep.DataToSend)` — making our cached `ch` a closed channel. Sending on a
+	// closed channel panics. The deferred recover above converts that panic into
+	// `sent=false` and a log line. Do NOT hold closeMux across the select: a blocked
+	// sender would prevent any other subscribe/unsubscribe/disconnect from progressing.
+	// The recover-based idiom trades negligible recover cost for lock-free fan-out.
 	ep.closeMux.Lock()
 	if ep.closed {
 		ep.closeMux.Unlock()
