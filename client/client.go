@@ -1103,7 +1103,9 @@ func (c *Client) shutdownWebServerLocked(timeout time.Duration, callCleanup bool
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	if stopper, ok := interface{}(c.webServer).(interface{ Shutdown(context.Context) error }); ok {
-		_ = stopper.Shutdown(ctx)
+		if err := stopper.Shutdown(ctx); err != nil {
+			log.Printf("client web server shutdown returned error (timeout=%s): %v", timeout, err)
+		}
 	}
 	cancel()
 

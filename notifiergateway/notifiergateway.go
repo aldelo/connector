@@ -1022,6 +1022,21 @@ func unsubscribeSNS(notify *notification) {
 
 // FIX #4: Package-level mutex and sdMap to protect against concurrent access
 // from multiple goroutines (e.g. if RunStaleHealthReportRecordsRemoverService is called more than once).
+//
+// ⚠️ sdMapMu is held across CloudMap deregister network I/O in
+// removeInactiveInstancesFromServiceDiscovery and sdDeregisterInstance.
+// This is SAFE for the sole current caller (the single background goroutine
+// spawned by RunStaleHealthReportRecordsRemoverService), where concurrency
+// of at most one instance is guaranteed by construction.
+//
+// MUST NOT be called from a request-handler path or any other
+// request-scoped goroutine: holding a mutex across unbounded AWS
+// CloudMap I/O (≥ seconds under transient network failure) on the
+// request path would serialize all incoming requests and surface as
+// gateway-wide latency spikes. If a future caller needs request-path
+// access to sdMap, refactor to scope the lock to map read/write only
+// and perform deregister I/O outside the critical section.
+// P2-CONN-1 v1.8.7 — see _src/docs/repos/connector/reviews/deep-review-full-2026-04-17.md.
 var (
 	sdMap   map[string]*cloudmap.CloudMap
 	sdMapMu sync.Mutex
