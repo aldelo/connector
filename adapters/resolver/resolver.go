@@ -169,7 +169,7 @@ func normalizeAddresses(endpointAddrs []string, onEmpty error) ([]resolver.Addre
 			continue
 		} else if err != nil && likelyHostPort {
 			// Likely malformed host:port (e.g., missing port or bad IPv6 bracket)
-			return nil, fmt.Errorf("invalid endpoint address '%s': %v", addr, err)
+			return nil, fmt.Errorf("invalid endpoint address '%s': %w", addr, err)
 		}
 
 		// fail fast on bare IP literals that are missing a port.

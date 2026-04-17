@@ -2776,7 +2776,7 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 
 	host, portStr, err := net.SplitHostPort(directIpPort)
 	if err != nil {
-		return fmt.Errorf("Direct Connect target must include host and port (got %q): %v", directIpPort, err)
+		return fmt.Errorf("Direct Connect target must include host and port (got %q): %w", directIpPort, err)
 	}
 
 	host = strings.TrimSpace(host)
@@ -2786,7 +2786,7 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 
 	p, convErr := strconv.Atoi(strings.TrimSpace(portStr))
 	if convErr != nil {
-		return fmt.Errorf("Direct Connect port invalid (%q): %v", portStr, convErr)
+		return fmt.Errorf("Direct Connect port invalid (%q): %w", portStr, convErr)
 	}
 	if p <= 0 || p > 65535 {
 		return fmt.Errorf("Direct Connect port out of range (1-65535): %d", p)
