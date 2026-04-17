@@ -317,7 +317,7 @@ func TestCloudMap(t *testing.T) {
 	})
 
 	if e != nil {
-		log.Fatal(e)
+		t.Fatal(e) // P2-8: was log.Fatal — kills entire test binary
 	} else {
 		time.Sleep(3 * time.Second)
 	}
@@ -325,7 +325,7 @@ func TestCloudMap(t *testing.T) {
 	op, e2 := sd.GetOperation(opID)
 
 	if e2 != nil {
-		log.Fatal(e2)
+		t.Fatal(e2) // P2-8: was log.Fatal — kills entire test binary
 	}
 
 	id := op.Targets["INSTANCE"]
@@ -333,13 +333,13 @@ func TestCloudMap(t *testing.T) {
 	if util.LenTrim(*id) > 0 {
 		log.Println("Instance = " + *id)
 	} else {
-		log.Fatal("Instance empty")
+		t.Fatal("Instance empty") // P2-8: was log.Fatal — kills entire test binary
 	}
 
 	found, e3 := sd.DiscoverInstances(cfg.Namespace.Name, cfg.Service.Name, true, nil, nil)
 
 	if e3 != nil {
-		log.Fatal(e3)
+		t.Fatal(e3) // P2-8: was log.Fatal — kills entire test binary
 	}
 
 	for _, v := range found {
@@ -361,7 +361,7 @@ func TestDNSLookup(t *testing.T) {
 	ips, err := net.LookupIP("helloservice.example.private")
 
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err) // P2-8: was log.Fatal — kills entire test binary
 	}
 
 	for _, ip := range ips {
