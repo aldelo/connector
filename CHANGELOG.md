@@ -13,6 +13,64 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
+## [v1.8.6] — 2026-04-17
+
+Patch release. Error-wrapping hardening — completes the **P2-N5**
+deferral from the `v1.8.5` ship checkpoint. Coordinated-sibling
+release with `common v1.8.6` which carries the bulk of the
+migration (9 sites across 3 files); `connector` carries 3 sites
+across 2 files and picks up the sibling pin bump.
+
+No observable contract change from `v1.8.5`. `.Error()` string
+output is byte-identical at every converted site. `%w` rendering
+matches `%v` for a single wrapped error; consumers gain the ability
+to walk the error chain via `errors.Is` / `errors.As` at the
+converted sites.
+
+### Changed — sibling pin bump
+
+- **`github.com/aldelo/common`** pin moved `v1.8.5 → v1.8.6` in
+  `connector/go.mod:6` to pull in the sibling's matching P2-N5
+  error-chain migration. `common v1.8.6` is a drop-in replacement
+  for `v1.8.5` — no public signatures changed.
+
+### Fixed
+
+- **P2-N5 error-chain wrapping (3 sites across 2 files):** convert
+  `fmt.Errorf("...: %v", err)` → `fmt.Errorf("...: %w", err)` where
+  the formatted argument is a genuine Go `error` value. Sites:
+  - `adapters/resolver/resolver.go:172` — `net.SplitHostPort` error
+    on malformed endpoint `host:port`
+  - `client/client.go:2779` — `net.SplitHostPort` error on Direct
+    Connect target
+  - `client/client.go:2789` — `strconv.Atoi` error on Direct Connect
+    port
+
+  **Deliberately NOT converted** —
+  `adapters/loadbalancer/roundrobin.go:118`: the guard is a
+  compound condition `convErr != nil || p < 1 || p > 65535`, so
+  `convErr` can legitimately be `nil` when only the range check
+  triggers. `fmt.Errorf("...: %w", nil)` renders as the literal
+  `"%!w(<nil>)"` — unsafe output. Site stays `%v`.
+
+### Rule #15 Pre-Flight Attestation (2026-04-17 UTC)
+
+- verified: `common v1.8.6 → 63b0821c3d72eb7f7676f11b1e6ac112924db384`
+  via `git ls-remote --tags https://github.com/aldelo/common.git refs/tags/v1.8.6`
+- verified-at: 2026-04-17 (tag cut timestamp)
+- sibling commit: `common@1321f24` (CHANGELOG for v1.8.6);
+  P2-N5 code at `common@6febc97`
+
+### Verification
+
+- `go build ./...` clean; `go vet ./...` clean
+- `go test ./... -short -count=1` — 27/27 packages pass (zero
+  regressions vs `v1.8.5` baseline, both for the local 3-site
+  `%w` conversion and for the `common v1.8.5 → v1.8.6` bump)
+- `grep 'fmt.Errorf.*%v' $(git ls-files '*.go' | grep -v _test)` —
+  1 remaining site (`roundrobin.go:118`, intentionally skipped per
+  reasoning above)
+
 ## [v1.8.5] — 2026-04-17
 
 Patch release. Repairs the release-artifact discipline gap introduced at
