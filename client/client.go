@@ -2244,7 +2244,9 @@ func (c *Client) waitForWebServerReady(ctx context.Context, timeoutDuration ...t
 
 		resp, e := (&http.Client{Timeout: perAttempt}).Do(req)
 		if resp != nil {
-			_ = resp.Body.Close()
+			if cerr := resp.Body.Close(); cerr != nil {
+				warnf("Web Server Health Check Body.Close Failed: %s", cerr.Error())
+			}
 		}
 		cancel()
 
