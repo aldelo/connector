@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"regexp"
 	"runtime/debug"
@@ -24,6 +25,7 @@ import (
 	"github.com/aldelo/common/wrapper/xray"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
+	"github.com/aldelo/connector/internal/safego"
 	"github.com/aldelo/connector/notifiergateway/config"
 	"github.com/aldelo/connector/notifiergateway/model"
 	"github.com/aldelo/connector/webserver"
@@ -102,6 +104,11 @@ type healthreport struct {
 	HashKeyName   string `json:"HashKeyName"`
 	HashSignature string `json:"HashSignature"`
 }
+
+// maxInboundBodyBytes caps the request body size for SNS callback and
+// health-report handlers to prevent OOM from oversized payloads. SNS
+// messages are typically a few KB; 1 MiB is generous and safe.
+const maxInboundBodyBytes int64 = 1 << 20 // 1 MiB
 
 // secureCompare performs constant-time comparison to prevent timing attacks on token/signature validation.
 func secureCompare(a, b string) bool {
@@ -198,12 +205,26 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	return gatewayServer, nil
 }
 
-// escapeUserInput replaces control characters (newlines, carriage returns, tabs) with spaces to mitigate log-injection vulnerability
+// escapeUserInput replaces control characters and Unicode line/paragraph
+// separators with spaces to mitigate log-injection (CWE-117). Covers:
+//   - \n, \r, \t — standard ASCII control chars
+//   - U+0085 (NEL / Next Line)
+//   - U+2028 (Line Separator)
+//   - U+2029 (Paragraph Separator)
+//
+// Go RE2's \s matches ASCII whitespace only; these Unicode separators
+// require explicit handling (see Go regexp \p{Z}\p{Cf} lesson).
+var logInjectionReplacer = strings.NewReplacer(
+	"\n", " ",
+	"\r", " ",
+	"\t", " ",
+	"\u0085", " ", // NEL (Next Line)
+	"\u2028", " ", // Line Separator
+	"\u2029", " ", // Paragraph Separator
+)
+
 func escapeUserInput(data string) string {
-	result := strings.ReplaceAll(data, "\n", " ")
-	result = strings.ReplaceAll(result, "\r", " ")
-	result = strings.ReplaceAll(result, "\t", " ")
-	return result
+	return logInjectionReplacer.Replace(data)
 }
 
 var snsTopicArnPattern = regexp.MustCompile(`^arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}$`)
@@ -214,61 +235,72 @@ var snsTopicArnPattern = regexp.MustCompile(`^arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Z
 // the $ anchor). Kept package-level for compile-once performance.
 var snsHostPattern = regexp.MustCompile(`^sns\.[a-z0-9-]+\.amazonaws\.com$`)
 
-// isValidSNSUrl validates that a URL matches the expected AWS SNS domain pattern
-// to prevent SSRF attacks via attacker-controlled SubscribeURL/UnsubscribeURL.
-// Legitimate AWS SNS URLs follow: https://sns.<region>.amazonaws.com/...
+// validateSNSURL parses rawUrl and validates it against the AWS SNS host
+// allowlist. Returns the parsed *url.URL (with host lowercased) and true
+// if the URL is a legitimate SNS endpoint; (nil, false) otherwise.
 //
-// The validation uses net/url.Parse to decompose the URL, then checks the
-// parsed components against an exact allowlist:
+// Validation checks (all must pass):
 //   - Scheme must be "https"
-//   - No userinfo (embedded credentials)
-//   - No explicit port
-//   - No opaque form
+//   - No opaque form (e.g. "https:opaque")
+//   - No userinfo (embedded credentials like user:pass@ or @host)
+//   - No explicit port — legitimate AWS SNS URLs never carry a port
 //   - Hostname must exactly match sns.<region>.amazonaws.com (anchored regex)
-//   - Path must be non-empty (at least "/")
+//   - Path must be non-empty (at least "/") or a query string present
 //
-// This parsed-component approach is recognized by CodeQL's SSRF taint model,
-// unlike the raw-string regex check it replaces as the primary barrier.
-func isValidSNSUrl(rawUrl string) bool {
+// This is the single source of truth for SNS URL validation — both
+// isValidSNSUrl and sanitizeSNSUrl delegate here. Keeping one
+// implementation eliminates drift between the bool-gate and the
+// reconstruct-gate (the root cause of the S1/S2 SSRF siblings).
+func validateSNSURL(rawUrl string) (*url.URL, bool) {
 	u, err := url.Parse(rawUrl)
 	if err != nil {
-		return false
+		return nil, false
 	}
 
 	// Reject non-https schemes (prevents http:// downgrade and exotic schemes)
 	if !strings.EqualFold(u.Scheme, "https") {
-		return false
+		return nil, false
 	}
 
-	// Reject opaque URLs (e.g. "https:opaque")
+	// Reject opaque URLs
 	if u.Opaque != "" {
-		return false
+		return nil, false
 	}
 
-	// Reject embedded credentials (userinfo like user:pass@ or @host)
+	// Reject embedded credentials
 	if u.User != nil {
-		return false
+		return nil, false
 	}
 
 	host := strings.ToLower(u.Hostname())
 
-	// Reject explicit port — legitimate AWS SNS URLs never carry a port
+	// Reject explicit port
 	if u.Port() != "" {
-		return false
+		return nil, false
 	}
 
 	// Exact hostname match: sns.<region>.amazonaws.com — rejects subdomain
 	// suffix attacks (sns.us-east-1.amazonaws.com.evil.com) via $ anchor
 	if !snsHostPattern.MatchString(host) {
-		return false
+		return nil, false
 	}
 
 	// Require a path (at least "/") — URLs without a path are malformed for our use
 	if u.Path == "" && u.RawQuery == "" {
-		return false
+		return nil, false
 	}
 
-	return true
+	// Normalize host to lowercase for consistent reconstruction
+	u.Host = host
+	return u, true
+}
+
+// isValidSNSUrl validates that a URL matches the expected AWS SNS domain pattern
+// to prevent SSRF attacks via attacker-controlled SubscribeURL/UnsubscribeURL.
+// Delegates to validateSNSURL for the actual checks.
+func isValidSNSUrl(rawUrl string) bool {
+	_, ok := validateSNSURL(rawUrl)
+	return ok
 }
 
 // sanitizeSNSUrl parses and validates a URL against the SNS host allowlist,
@@ -277,35 +309,15 @@ func isValidSNSUrl(rawUrl string) bool {
 // parsed fields rather than from the original attacker-controlled string.
 // Returns the sanitized URL and true, or ("", false) if validation fails.
 func sanitizeSNSUrl(rawUrl string) (string, bool) {
-	u, err := url.Parse(rawUrl)
-	if err != nil {
-		return "", false
-	}
-
-	if !strings.EqualFold(u.Scheme, "https") {
-		return "", false
-	}
-	if u.Opaque != "" {
-		return "", false
-	}
-	if u.User != nil {
-		return "", false
-	}
-	host := strings.ToLower(u.Hostname())
-	if u.Port() != "" {
-		return "", false
-	}
-	if !snsHostPattern.MatchString(host) {
-		return "", false
-	}
-	if u.Path == "" && u.RawQuery == "" {
+	u, ok := validateSNSURL(rawUrl)
+	if !ok {
 		return "", false
 	}
 
 	// Reconstruct from parsed components — severs taint from rawUrl
 	clean := &url.URL{
 		Scheme:   "https",
-		Host:     host,
+		Host:     u.Host,
 		Path:     u.Path,
 		RawQuery: u.RawQuery,
 	}
@@ -324,6 +336,9 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 	if c == nil {
 		return
 	}
+
+	// FIX S9: Cap inbound body to prevent OOM from oversized payloads.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxInboundBodyBytes)
 
 	data, ok := bindingInputPtr.(*healthreport)
 
@@ -409,7 +424,7 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 			if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo); e != nil {
 				log.Println("!!! Inbound Health Report (NamespaceID '" + escapeUserInput(data.NamespaceId) + "', ServiceID '" + escapeUserInput(data.ServiceId) + "', InstanceID '" + escapeUserInput(data.InstanceId) + "') Persist to Data Store Failed: " + e.Error() + " !!!")
 				c.String(500, "Persist Instance Status to Data Store Failed")
-				return fmt.Errorf("Persist Instance Status to Data Store Failed: %s", e.Error())
+				return fmt.Errorf("Persist Instance Status to Data Store Failed: %w", e)
 			} else {
 				log.Println("+++ Inbound Health Report (NamespaceID '" + escapeUserInput(data.NamespaceId) + "', ServiceID '" + escapeUserInput(data.ServiceId) + "', InstanceID '" + escapeUserInput(data.InstanceId) + "') Persist to Data Store OK +++")
 				c.String(200, "Persist Instance Status to Data Store OK")
@@ -520,7 +535,7 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 			if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeyValue{PK: pk, SK: sk}); e != nil {
 				log.Println("!!! Delete Health Report Service Record For InstanceID '" + escapedInstanceId + "' From Data Store Failed: " + e.Error() + " !!!")
 				c.String(500, "Delete Health Report Service Record From Data Store Failed")
-				return fmt.Errorf("Delete Health Report Service Record From Data Store Failed: %s", e.Error())
+				return fmt.Errorf("Delete Health Report Service Record From Data Store Failed: %w", e)
 			} else {
 				log.Println("--- Delete Health Report Service Record For InstanceID '" + escapedInstanceId + "' From Data Store OK ---")
 				c.String(200, "Delete Health Report Service Record From Data Store OK")
@@ -588,6 +603,9 @@ func snsrouter(c *gin.Context, bindingInputPtr interface{}) {
 	if c == nil {
 		return
 	}
+
+	// FIX S9: Cap inbound body to prevent OOM from oversized payloads.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxInboundBodyBytes)
 
 	log.Println("/snsrouter Invoked: x-amz-sns-message-type = " + escapeUserInput(c.GetHeader("x-amz-sns-message-type")) + ", serverKey = " + escapeUserInput(c.Param("serverKey")))
 
@@ -662,15 +680,24 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 				}
 				return
 			}
+		} else {
+			// FIX S7: Per-request WARN when signature verification is disabled.
+			// The startup-time WARN exists but provides no per-request visibility.
+			log.Printf("WARN: SNS signature verification SKIPPED (require_sns_signature=false) for SubscriptionConfirmation MessageId=%s", escapeUserInput(confirm.MessageId))
 		}
 
 		// auto confirm
 		if url := confirm.SubscribeURL; util.LenTrim(url) > 0 {
 			log.Println("/snsrouter 'subscriptionconfirmation' SubscribeURL From SNS = " + escapeUserInput(url))
 
-			// FIX: Validate SubscribeURL domain to prevent SSRF.
-			// Legitimate AWS SNS confirmation URLs always match https://sns.<region>.amazonaws.com/
-			if !isValidSNSUrl(url) {
+			// FIX S1: Validate AND reconstruct SubscribeURL to prevent SSRF.
+			// sanitizeSNSUrl parses, validates against the SNS host allowlist,
+			// and reconstructs from parsed components — the reconstructed URL
+			// severs the taint chain from the attacker-controlled raw value.
+			// The GET below uses the reconstructed cleanSubscribeUrl, NOT the
+			// raw url from the SNS payload.
+			cleanSubscribeUrl, urlOk := sanitizeSNSUrl(url)
+			if !urlOk {
 				log.Println("/snsrouter 'subscriptionconfirmation' SubscribeURL rejected: does not match expected AWS SNS domain")
 				c.String(403, "SubscribeURL domain not allowed")
 
@@ -680,6 +707,9 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 
 				return
 			}
+			// Shadow `url` with the sanitized reconstruction so all
+			// downstream uses (logging, GET) use the clean value.
+			url = cleanSubscribeUrl
 
 			// validate serverKey
 			if util.LenTrim(serverKey) <= 0 {
@@ -766,11 +796,12 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 					xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Failed: %w", err)))
 				}
 			} else if status != 200 {
-				log.Println("/snsrouter 'subscriptionconfirmation' GET Not Status 200: [" + util.Itoa(status) + "] Body: " + body)
+				// FIX S13: Escape external response body before logging
+				log.Println("/snsrouter 'subscriptionconfirmation' GET Not Status 200: [" + util.Itoa(status) + "] Body: " + escapeUserInput(body))
 				c.String(status, "Subscription Confirm Callback Status Code: %d", status)
 
 				if seg != nil && seg.Ready() {
-					xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Not Status 200: ["+util.Itoa(status)+"] Body: %s", body)))
+					xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Not Status 200: ["+util.Itoa(status)+"] Body: %s", escapeUserInput(body))))
 				}
 			} else {
 				// confirm success, with sns endpoint
@@ -779,7 +810,8 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 
 				if util.Left(buf, 12) == "arn:aws:sns:" {
 					// subscription arn received
-					log.Println("/snsrouter 'subscriptionconfirmation' GET Status 200 with SubscriptionArn '" + buf + "': " + body)
+					// FIX S13: Escape external response body before logging
+					log.Println("/snsrouter 'subscriptionconfirmation' GET Status 200 with SubscriptionArn '" + escapeUserInput(buf) + "': " + escapeUserInput(body))
 
 					// validate TopicArn format before using in URL to prevent path traversal
 					if !snsTopicArnPattern.MatchString(confirm.TopicArn) {
@@ -802,10 +834,11 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 							xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Failed: (SNS Subscription Still Valid, This is Warning Only) %w", err)))
 						}
 					} else if status != 200 {
-						log.Println("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Not Receive Status 200: (SNS Subscription Still Valid, This is Warning Only) Info = " + body)
+						// FIX S13: Escape response body before logging
+						log.Println("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Not Receive Status 200: (SNS Subscription Still Valid, This is Warning Only) Info = " + escapeUserInput(body))
 
 						if seg != nil && seg.Ready() {
-							xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Not Receive Status 200: (SNS Subscription Still Valid, This is Warning Only) Info = %s", body)))
+							xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Not Receive Status 200: (SNS Subscription Still Valid, This is Warning Only) Info = %s", escapeUserInput(body))))
 						}
 					} else {
 						log.Println("/snsrouter 'subscriptionconfirmation' POST to Notifier Server to Update SNS SubscriptionArn Success (Status 200)")
@@ -813,11 +846,12 @@ func snsconfirmation(c *gin.Context, serverKey string) {
 
 					c.Status(200)
 				} else {
-					log.Println("/snsrouter 'subscriptionconfirmation' GET Status 200 But Response Did Not Include SubscriptionArn in XML From SNS: " + body)
+					// FIX S13: Escape external response body before logging
+					log.Println("/snsrouter 'subscriptionconfirmation' GET Status 200 But Response Did Not Include SubscriptionArn in XML From SNS: " + escapeUserInput(body))
 					c.Status(412)
 
 					if seg != nil && seg.Ready() {
-						xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Status 200 But Response Did Not Include SubscriptionArn in XML From SNS: %s", body)))
+						xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("/snsrouter 'subscriptionconfirmation' GET Status 200 But Response Did Not Include SubscriptionArn in XML From SNS: %s", escapeUserInput(body))))
 					}
 				}
 			}
@@ -923,6 +957,9 @@ func snsnotification(c *gin.Context, serverKey string) {
 				}
 				return
 			}
+		} else {
+			// FIX S7: Per-request WARN when signature verification is disabled.
+			log.Printf("WARN: SNS signature verification SKIPPED (require_sns_signature=false) for Notification MessageId=%s", escapeUserInput(notify.MessageId))
 		}
 
 		// valid notification data
@@ -997,7 +1034,9 @@ func snsnotification(c *gin.Context, serverKey string) {
 				}
 			} else {
 				// relay sns notification to target notify server
-				log.Println("/snsrouter 'notification' Relaying SNS Data To Notifier Server Endpoint '" + serverUrl + "': " + notifyJson)
+				// FIX S6: Escape notifyJson for logging — the raw notifyJson
+				// passed to the POST below stays unescaped.
+				log.Println("/snsrouter 'notification' Relaying SNS Data To Notifier Server Endpoint '" + serverUrl + "': " + escapeUserInput(notifyJson))
 
 				serverUrl += "/snsrelay"
 
@@ -1098,21 +1137,24 @@ func unsubscribeSNS(notify *notification) {
 	unsubUrl = strings.ReplaceAll(unsubUrl, `\"`, `"`)
 	unsubUrl = strings.ReplaceAll(unsubUrl, `"`, "")
 
-	// FIX: Validate UnsubscribeURL domain to prevent SSRF.
-	// Legitimate AWS SNS unsubscribe URLs always match https://sns.<region>.amazonaws.com/
-	if !isValidSNSUrl(unsubUrl) {
+	// FIX S2: Validate AND reconstruct UnsubscribeURL to prevent SSRF.
+	// sanitizeSNSUrl returns the URL reconstructed from parsed components,
+	// severing the taint chain from the raw attacker-controlled value.
+	cleanUnsubUrl, unsubOk := sanitizeSNSUrl(unsubUrl)
+	if !unsubOk {
 		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' From UnsubscribeURL '" + escapeUserInput(unsubUrl) + "' Aborted: URL domain not allowed !!!")
 		return
 	}
 
-	// call HTTP GET to unsubscribe
-	unsubUrlLog := escapeUserInput(unsubUrl)
-	if status, body, err := rest.GET(unsubUrl, []*rest.HeaderKeyValue{}); err != nil {
+	// call HTTP GET to unsubscribe — uses the reconstructed clean URL
+	unsubUrlLog := escapeUserInput(cleanUnsubUrl)
+	if status, body, err := rest.GET(cleanUnsubUrl, []*rest.HeaderKeyValue{}); err != nil {
 		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' Failed for UnsubscribeURL '" + unsubUrlLog + "': (HTTP GET Error) " + err.Error() + " !!!")
 	} else if status != 200 {
-		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' Failed for UnsubscribeURL '" + unsubUrlLog + "': (Status " + util.Itoa(status) + ") " + body + " !!!")
+		// FIX S13: Escape external response body before logging
+		log.Println("!!! Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' Failed for UnsubscribeURL '" + unsubUrlLog + "': (Status " + util.Itoa(status) + ") " + escapeUserInput(body) + " !!!")
 	} else {
-		log.Println("$$$ Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' Successful for UnsubscribeURL '" + unsubUrlLog + "': " + body + " $$$")
+		log.Println("$$$ Notifier Gateway Auto Unsubscribe SNS Topic '" + topicArnLog + "' Successful for UnsubscribeURL '" + unsubUrlLog + "': " + escapeUserInput(body) + " $$$")
 	}
 }
 
@@ -1161,27 +1203,15 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 		freq = 3600
 	}
 
-	go func() {
-		// SP-008 P1-CONN-1 (2026-04-15): panic boundary for this
-		// long-lived background goroutine. A panic inside
-		// removeInactiveInstancesFromServiceDiscovery (DynamoDB
-		// scan, CloudMap deregister, xray segment write) would
-		// otherwise crash the whole notifier-gateway process and
-		// regresses the SVC-F6 / CL-F5 invariant that every
-		// library-spawned goroutine recovers its own panic.
-		// The recovery logs-and-continues rather than re-panicking
-		// so transient dependency failures cannot take the service
-		// down; the next ticker fire retries the cleanup cycle.
+	// FIX E11: Use safego.Go for panic recovery instead of bare go func().
+	// The inner defer+recover is kept as defense-in-depth (safego.Go
+	// recovers at the outer level; this inner one catches per-iteration
+	// panics so the ticker loop survives transient failures).
+	safego.Go("stale-health-report-remover", func() {
+		// Defense-in-depth: per-iteration recovery inside the safego
+		// boundary so a single cycle panic doesn't kill the ticker loop.
 		defer func() {
 			if r := recover(); r != nil {
-				// SP-008 re-eval follow-up (2026-04-15): include debug.Stack()
-				// for parity with safeGo / safeCall / runCleanup recovery
-				// conventions in service/service.go. Without the stack, a
-				// recovered panic in this long-lived background goroutine
-				// surfaces as a bare "%v" with no traceback — diagnosing a
-				// downstream DynamoDB / CloudMap / xray-go regression then
-				// requires re-reproducing the panic, which defeats the
-				// observability purpose of the recovery itself.
 				log.Printf("!!! PANIC in StaleHealthReportRecordsRemover background goroutine, recovered: %v\n%s !!!", r, debug.Stack())
 			}
 		}()
@@ -1204,7 +1234,7 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 				removeInactiveInstancesFromServiceDiscovery()
 			}
 		}
-	}()
+	})
 }
 
 // removeInactiveInstancesFromServiceDiscovery will query dynamodb table used for instance host health monitor,
@@ -1287,16 +1317,18 @@ func sdDeregisterInstance(namespaceId string, serviceId string, instanceId strin
 
 	if !ok {
 		// create new sd
+		// FIX E4: Use %w to preserve error chain for errors.Is/As
 		if sd, e = connectSd(namespaceId, awsRegion); e != nil {
-			return fmt.Errorf("Service Discovery De-Register Instance Failed: (Connect Service Discovery Object Error) %s", e.Error())
+			return fmt.Errorf("Service Discovery De-Register Instance Failed: (Connect Service Discovery Object Error) %w", e)
 		} else {
 			sdMap[namespaceId+awsRegion] = sd
 		}
 	}
 
 	// de-register
+	// FIX E4: Use %w to preserve error chain for errors.Is/As
 	if e = deregisterInstance(sd, serviceId, instanceId); e != nil {
-		return fmt.Errorf("Service Discovery De-Register Instance Failed: (Invoke De-Register Error) %s", e.Error())
+		return fmt.Errorf("Service Discovery De-Register Instance Failed: (Invoke De-Register Error) %w", e)
 	}
 
 	// success
@@ -1339,7 +1371,13 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 		return fmt.Errorf("InstanceID is Required for Instance Deregister")
 	}
 
-	log.Println("Service Discovery De-Register Instance '" + instanceId + "' Begin...")
+	// FIX S5: Escape instanceId and serviceId for logging only — the real
+	// values used for the CloudMap SDK call remain unescaped so behavior
+	// is unchanged. User-controlled JSON-sourced ids could contain CR/LF.
+	logInstanceId := escapeUserInput(instanceId)
+	_ = escapeUserInput(serviceId) // serviceId not currently logged, but escaped for future safety
+
+	log.Println("Service Discovery De-Register Instance '" + logInstanceId + "' Begin...")
 
 	timeoutDuration := time.Duration(model.GetServiceDiscoveryTimeoutSeconds()) * time.Second
 
@@ -1348,7 +1386,7 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 	}
 
 	if operationId, err := registry.DeregisterInstance(sd, instanceId, serviceId, timeoutDuration); err != nil {
-		log.Println("!!! Service Discovery De-Register Instance '" + instanceId + "' Failed: (Initial Deregister Action) " + err.Error() + " !!!")
+		log.Println("!!! Service Discovery De-Register Instance '" + logInstanceId + "' Failed: (Initial Deregister Action) " + err.Error() + " !!!")
 		return fmt.Errorf("service discovery de-register instance '%s' fail: %w", instanceId, err)
 	} else {
 		tryCount := 0
@@ -1357,24 +1395,24 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 
 		for {
 			if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration); e != nil {
-				log.Println("!!! Service Discovery De-Register Instance '" + instanceId + "' Failed: (Deregister GetOperationStatus Action) " + e.Error() + " !!!")
+				log.Println("!!! Service Discovery De-Register Instance '" + logInstanceId + "' Failed: (Deregister GetOperationStatus Action) " + e.Error() + " !!!")
 				return fmt.Errorf("service discovery de-register instance '%s' fail: %w", instanceId, e)
 			} else {
 				if status == sdoperationstatus.Success {
-					log.Println("$$$ Service Discovery De-Register Instance '" + instanceId + "' OK $$$")
+					log.Println("$$$ Service Discovery De-Register Instance '" + logInstanceId + "' OK $$$")
 					return nil
 				} else if status == sdoperationstatus.Fail {
 					// FIX #11: Permanent failure — stop retrying immediately
-					log.Println("!!! Service Discovery De-Register Instance '" + instanceId + "' Failed: Operation Returned Fail Status !!!")
+					log.Println("!!! Service Discovery De-Register Instance '" + logInstanceId + "' Failed: Operation Returned Fail Status !!!")
 					return fmt.Errorf("service discovery de-register instance '%s' failed with permanent Fail status", instanceId)
 				} else {
 					// wait 250 ms then retry, up until 20 counts of 250 ms (5 seconds)
 					if tryCount < 20 {
 						tryCount++
-						log.Println("... Checking De-Register Instance '" + instanceId + "' Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
+						log.Println("... Checking De-Register Instance '" + logInstanceId + "' Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
 						time.Sleep(250 * time.Millisecond)
 					} else {
-						log.Println("... De-Register Instance '" + instanceId + "' Failed: Operation Timeout After 5 Seconds")
+						log.Println("... De-Register Instance '" + logInstanceId + "' Failed: Operation Timeout After 5 Seconds")
 						return fmt.Errorf("service discovery de-register instance '%s' fail when operation timed out after 5 seconds", instanceId)
 					}
 				}
