@@ -13,6 +13,36 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
+## [v1.8.11] — 2026-06-14
+
+Security maintenance release. Raises the `go` directive to **1.26.4** (8 fixed Go
+standard-library advisories) and moves the `common` pin to **v1.8.11**. No
+exported-API change; no observable contract change. Coordinated-sibling release
+with `common v1.8.11`.
+
+**`go build/vet ./...` clean, `gofmt` clean, `go test ./... -race -short` all-pass
+(0 races, 0 fail) under Go 1.26.4, and `govulncheck ./...` reports `No
+vulnerabilities found` (0 affected).**
+
+### Security
+
+- **`go` directive `1.26.2 → 1.26.4`.** Building with the Go 1.26.4 toolchain
+  fixes the standard-library advisories govulncheck flagged at 1.26.2 — including
+  **GO-2026-5037** (`crypto/x509`) and GO-2026-5039 / GO-2026-4986 / GO-2026-4982
+  / GO-2026-4980 / GO-2026-4977 / GO-2026-4971 (and the `net/http`-path advisories
+  on the SNS cert code path). **Integrator impact:** consumers building this
+  module now require a Go 1.26.4+ toolchain. With the default `GOTOOLCHAIN=auto`
+  this is transparent (the `go` command fetches 1.26.4 automatically) and
+  `go mod tidy` raises the consumer's own `go` directive to 1.26.4; environments
+  pinned to `GOTOOLCHAIN=local` or air-gapped CI must pre-install Go 1.26.4.
+
+### Dependencies
+
+- **`github.com/aldelo/common` pin `v1.8.10 → v1.8.11`** — adopts the sibling's
+  `go 1.26.4` bump and its `golang.org/x/net 0.53.0 → 0.55.0` (GO-2026-5026)
+  fix. `golang.org/x/net` resolves to v0.55.0 in the build graph (connector
+  already shipped this in v1.8.10 via the deep-review remediation).
+
 ## [v1.8.10] — 2026-06-14
 
 Security + reliability hardening cycle (coordinated-sibling with `common
