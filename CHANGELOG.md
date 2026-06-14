@@ -13,6 +13,75 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
+## [Unreleased]
+
+Security + reliability hardening cycle (coordinated-sibling with `common
+v1.8.10`). Two GitHub CodeQL/Dependabot remediation PRs, the periodic
+endpoint-refresh feature, and a 5-dimension adversarial deep code review
+(concurrency, security, error-handling, API-stability, test-quality) with
+remediation of every P0/P1 it surfaced.
+
+**No observable contract change on any exported surface** — every new
+symbol (`sanitizeSNSUrl`, `validateSNSURL`, `verifyCertChain`,
+`SdEndpointRefreshSeconds`/`SetSdEndpointRefreshSeconds`, the
+endpoint-refresh helpers) is unexported or additive; `isValidSNSUrl`'s
+signature is unchanged. Verified `go build/vet ./...` clean, `go test
+./... -race` 0 failures, the previously-flaky `service` package now
+deterministic (0 fail over `-count=50`).
+
+### Security — fixed
+- **SSRF (CodeQL `go/request-forgery`, critical #36):** SNS signing-cert
+  fetch now routes the cert URL through `sanitizeSNSUrl` (`net/url.Parse`
+  + exact-host allowlist `^sns\.<region>\.amazonaws\.com$` + URL
+  reconstruction) instead of a raw-string regex barrier.
+- **Sibling SSRF sinks (deep-review P0):** the SubscribeURL-confirmation
+  and UnsubscribeURL GET paths now also use the `sanitizeSNSUrl`
+  reconstructed URL, not the raw attacker-influenced string.
+- **Log-injection (CodeQL `go/log-injection` #8–#11 + deep-review
+  siblings):** user-derived values (`instanceId`, notification JSON,
+  external response bodies) are escaped via `escapeUserInput` at all log
+  sites; `escapeUserInput` now also strips U+0085/U+2028/U+2029.
+- **SNS cert-chain verification (defense-in-depth):** `defaultFetchSNSCert`
+  now chain-verifies the signing cert (injectable verifier; WARN-and-proceed
+  on failure pending empirical confirmation against a live AWS SNS cert
+  before hard-reject).
+- **Inbound body size cap** on SNS/health endpoints; **per-request WARN**
+  when `require_sns_signature=false` skips verification.
+
+### Dependencies — security
+- **`common` pin `v1.8.8 → v1.8.10`** (`go mod tidy`), which transitively
+  selects **`quic-go v0.59.0 → v0.59.1`** (`GHSA-vvgj-x9jq-8cj9`,
+  Dependabot #16).
+- **`golang.org/x/net v0.53.0 → v0.55.0`** (`GO-2026-5026`).
+- _Follow-up (coordinated `go` directive bump, deferred):_ govulncheck
+  reports 8 remaining Go **stdlib** advisories (incl. `crypto/x509`,
+  `net/http` — both on the SNS cert path) fixed in Go 1.26.4. Building
+  with Go ≥1.26.4 picks these up; a coordinated `go 1.26.2 → 1.26.4`
+  directive bump across `common`+`connector` is recommended.
+
+### Added
+- **Default-on periodic endpoint refresh** for load-balanced clients
+  (`target.sd_endpoint_refresh_seconds`, default 30s) — keeps the
+  round-robin endpoint set fleet-current independently of the SNS
+  notifier (which could die silently). Wrapped in `safego.Go` for panic
+  recovery. **Behavior note for integrators:** every `UseLoadBalancer`
+  client now issues a Cloud Map `DiscoverInstances` call every ~30s; set
+  `sd_endpoint_refresh_seconds` higher to reduce frequency. No off-switch
+  by design (it is the safety net behind the notifier).
+
+### Fixed — reliability
+- **Error chains preserved** (`%w` instead of `%s`+`.Error()`) on the SQS
+  queue and Cloud Map register/deregister/health paths, restoring
+  `errors.Is/As` retry classification.
+- **Deterministic test:** root-caused and fixed the flaky
+  `TestGRPCServeError_PreSignalHandler_QuitsCleanly_A2P601` (a competing
+  `quit`-channel reader) — now waits on the production `quitDone` contract.
+- Insecure-transport (no-TLS) fallback now logs **WARN**; `config.Save()`
+  no longer races the lock that guarded the preceding mutation; tracer
+  panic-recover preserves the stack when X-Ray is disabled.
+
+---
+
 ## [v1.8.8] — 2026-04-17
 
 Patch release. Coordinated-sibling cycle with `common v1.8.8`. Three
