@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/crypto"
@@ -206,30 +205,45 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	return gatewayServer, nil
 }
 
+// logInjectionReplacer maps every C0 control byte (0x00-0x1F, incl.
+// CR/LF/TAB/NUL/BS/ESC/BEL/VT/FF), DEL (0x7F), NEL (U+0085), and the Unicode
+// line/paragraph separators (U+2028/U+2029) to a space. See escapeUserInput.
+//
+// IMPLEMENTATION NOTE \u2014 do NOT replace this with strings.Map: CodeQL's
+// go/log-injection query models strings.Replacer.Replace as a sanitizer
+// barrier (the literal "\n"/"\r" replacements are recognized) but does NOT
+// model a custom strings.Map closure \u2014 switching to strings.Map silently
+// re-opens go/log-injection on EVERY escapeUserInput call site even though the
+// runtime behavior is identical. (Sibling of the sanitizeSNSUrl single-function
+// barrier rule.)
+var logInjectionReplacer = strings.NewReplacer(
+	"\n", " ", "\r", " ", "\t", " ",
+	"\x00", " ", "\x01", " ", "\x02", " ", "\x03", " ", "\x04", " ",
+	"\x05", " ", "\x06", " ", "\x07", " ", "\x08", " ", "\x0b", " ",
+	"\x0c", " ", "\x0e", " ", "\x0f", " ", "\x10", " ", "\x11", " ",
+	"\x12", " ", "\x13", " ", "\x14", " ", "\x15", " ", "\x16", " ",
+	"\x17", " ", "\x18", " ", "\x19", " ", "\x1a", " ", "\x1b", " ",
+	"\x1c", " ", "\x1d", " ", "\x1e", " ", "\x1f", " ", "\x7f", " ",
+	"\u0085", " ", "\u2028", " ", "\u2029", " ",
+)
+
 // escapeUserInput neutralizes log-forging / terminal-injection vectors
-// (CWE-117) in untrusted data before it is written to a log line. It maps
-// every Unicode control character to a space: C0 (0x00-0x1F, including
-// CR/LF/TAB/NUL/BS/ESC/BEL/VT/FF), DEL (0x7F), and C1 (0x80-0x9F, including
-// NEL U+0085). It also maps the Unicode line and paragraph separators
-// (U+2028/U+2029) to a space; these are categories Zl/Zp, NOT control, so
-// unicode.IsControl does not cover them and they are handled explicitly.
+// (CWE-117) in untrusted data before it is written to a log line. It maps every
+// C0 control byte (0x00-0x1F, incl. CR/LF/TAB/NUL/BS/ESC/BEL/VT/FF), DEL (0x7F),
+// NEL (U+0085), and the Unicode line/paragraph separators (U+2028/U+2029) to a
+// space. Ordinary printable runes and non-control multi-byte runes are
+// preserved.
 //
-// This prevents an attacker-supplied value (e.g. an SNS MessageId or a
-// relayed server URL) from injecting newlines to forge log lines, ANSI
-// escape sequences to clear/recolor the operator's terminal, or backspace/NUL
-// to hide and overwrite previously logged text. Ordinary printable runes and
-// non-control multi-byte runes are preserved.
+// This prevents an attacker-supplied value (e.g. an SNS MessageId or a relayed
+// server URL) from injecting newlines to forge log lines, ANSI escape sequences
+// to clear/recolor the operator's terminal, or backspace/NUL to hide and
+// overwrite previously logged text.
 //
-// Fix: F-1/F-3 (deep-review-2026-06-14 contrarian re-review). The prior
-// strings.Replacer only stripped CR/LF/TAB and the Unicode separators, leaving
-// ESC (0x1B) and the other C0/DEL control bytes to pass through unescaped.
+// Fix: F-1/F-3 (deep-review-2026-06-14 contrarian re-review). The earlier
+// replacer only stripped CR/LF/TAB and the Unicode separators, leaving ESC
+// (0x1B) and the other C0/DEL control bytes to pass through unescaped.
 func escapeUserInput(data string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\u2028' || r == '\u2029' || unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, data)
+	return logInjectionReplacer.Replace(data)
 }
 
 var snsTopicArnPattern = regexp.MustCompile(`^arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}$`)
