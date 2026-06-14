@@ -790,29 +790,27 @@ func TestCertChainVerification_FailureIsWarnNotReject(t *testing.T) {
 }
 
 // =========================================================================
-// Group G — DRY refactor: validateSNSURL regression
+// Group G — DRY: sanitizeSNSUrl is the single self-contained validator/
+// reconstructor; isValidSNSUrl delegates to it (no separate validateSNSURL —
+// splitting it across functions reintroduced CodeQL SSRF #37).
 // =========================================================================
 
-// TestValidateSNSURL_ReturnsParsedURL verifies that validateSNSURL returns
-// the parsed *url.URL with lowercase host (the DRY refactor's core output).
-func TestValidateSNSURL_ReturnsParsedURL(t *testing.T) {
-	u, ok := validateSNSURL("https://SNS.us-east-1.AMAZONAWS.COM/cert.pem")
+// TestSanitizeSNSUrl_NormalizesAndReconstructs verifies sanitizeSNSUrl
+// lowercases the host and reconstructs a clean https URL (the canonical
+// validation output that both isValidSNSUrl and the GET sites rely on).
+func TestSanitizeSNSUrl_NormalizesAndReconstructs(t *testing.T) {
+	clean, ok := sanitizeSNSUrl("https://SNS.us-east-1.AMAZONAWS.COM/cert.pem")
 	if !ok {
 		t.Fatal("expected valid URL to pass validation")
 	}
-	if u.Host != "sns.us-east-1.amazonaws.com" {
-		t.Errorf("expected lowercase host, got %q", u.Host)
-	}
-	if u.Scheme != "https" {
-		t.Errorf("expected https scheme, got %q", u.Scheme)
-	}
-	if u.Path != "/cert.pem" {
-		t.Errorf("expected /cert.pem path, got %q", u.Path)
+	if clean != "https://sns.us-east-1.amazonaws.com/cert.pem" {
+		t.Errorf("expected reconstructed lowercase https URL, got %q", clean)
 	}
 }
 
-// TestValidateSNSURL_RejectsAttack verifies validateSNSURL rejects attack vectors.
-func TestValidateSNSURL_RejectsAttack(t *testing.T) {
+// TestSanitizeSNSUrl_RejectsAttack verifies the canonical validator rejects
+// attack vectors (via both sanitizeSNSUrl and the isValidSNSUrl delegate).
+func TestSanitizeSNSUrl_RejectsAttack(t *testing.T) {
 	attacks := []string{
 		"https://attacker.example.com/cert.pem",
 		"http://sns.us-east-1.amazonaws.com/cert.pem",
@@ -821,8 +819,11 @@ func TestValidateSNSURL_RejectsAttack(t *testing.T) {
 		"",
 	}
 	for _, url := range attacks {
-		if _, ok := validateSNSURL(url); ok {
-			t.Errorf("validateSNSURL(%q) should have been rejected", url)
+		if _, ok := sanitizeSNSUrl(url); ok {
+			t.Errorf("sanitizeSNSUrl(%q) should have been rejected", url)
+		}
+		if isValidSNSUrl(url) {
+			t.Errorf("isValidSNSUrl(%q) should have been rejected", url)
 		}
 	}
 }
