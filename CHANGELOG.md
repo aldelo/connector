@@ -39,8 +39,13 @@ deterministic (0 fail over `-count=50`).
   reconstructed URL, not the raw attacker-influenced string.
 - **Log-injection (CodeQL `go/log-injection` #8–#11 + deep-review
   siblings):** user-derived values (`instanceId`, notification JSON,
-  external response bodies) are escaped via `escapeUserInput` at all log
-  sites; `escapeUserInput` now also strips U+0085/U+2028/U+2029.
+  external response bodies, the DynamoDB-sourced relay `serverUrl`) are
+  escaped via `escapeUserInput` at all log sites. `escapeUserInput` now
+  neutralizes **every** C0 control byte (`0x00–0x1F`, incl. CR/LF/TAB/NUL/
+  BS/ESC/BEL/VT/FF), DEL (`0x7F`), NEL (`U+0085`), and `U+2028`/`U+2029`
+  — closing an ANSI/control-byte terminal-injection vector reachable on the
+  signature-failed log path with no valid SNS signature (blind contrarian
+  re-review F-1/F-3).
 - **SNS cert-chain verification (defense-in-depth):** `defaultFetchSNSCert`
   now chain-verifies the signing cert (injectable verifier; WARN-and-proceed
   on failure pending empirical confirmation against a live AWS SNS cert
@@ -79,6 +84,30 @@ deterministic (0 fail over `-count=50`).
 - Insecure-transport (no-TLS) fallback now logs **WARN**; `config.Save()`
   no longer races the lock that guarded the preceding mutation; tracer
   panic-recover preserves the stack when X-Ray is disabled.
+
+### Engineering note — keep log/SSRF sanitizers in a CodeQL-recognized form
+A log-injection or SSRF sanitizer must stay in a form CodeQL's taint
+queries model as a **barrier** — for `go/log-injection` that is
+`strings.Replacer.Replace` / `strings.ReplaceAll` carrying literal
+`"\n"`/`"\r"` replacements; for `go/request-forgery` it is the
+parse → host-allowlist → URL-reconstruction kept **inside one function**
+(see `sanitizeSNSUrl`). During this cycle `escapeUserInput` was briefly
+rewritten as a `strings.Map` closure: runtime behavior was identical and
+every local gate (build, vet, `-race`, unit tests, `golangci-lint`) plus
+the pull-request `Analyze (go)` check was green — yet the **post-merge
+CodeQL re-scan on `master` opened 43 new `go/log-injection` alerts**, one
+per call site, because CodeQL does not model a custom `strings.Map` closure
+as a sanitizer and taint flowed straight through. It was reverted to an
+**expanded `strings.Replacer`** that keeps both the wider control-byte
+coverage and the recognized barrier. Two durable rules:
+1. **Never swap a recognized sanitizer (`strings.Replacer`, the
+   single-function URL reconstructor) for an equivalent-but-unmodeled form**
+   (`strings.Map`, an extracted returning validator — cf. CodeQL #37). A code
+   comment at `escapeUserInput`/`sanitizeSNSUrl` records this.
+2. **The authoritative security gate is the CodeQL re-scan on `master`,
+   re-queried after it completes — not the PR check** (which does not fail on
+   newly-introduced alerts). Confirm a fix by querying the alert delta on the
+   analyzed ref before relying on it.
 
 ---
 
