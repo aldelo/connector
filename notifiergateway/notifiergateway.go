@@ -185,8 +185,8 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 				{
 					RelativePath:    "/reporthealth",
 					Method:          ginhttpmethod.POST,
-					Binding:         ginbindtype.BindJson,
-					BindingInputPtr: &healthreport{},
+					Binding:         ginbindtype.UNKNOWN,
+					BindingInputPtr: nil,
 					Handler:         healthreporter,
 				},
 				{
@@ -337,12 +337,15 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 		return
 	}
 
-	// FIX S9: Cap inbound body to prevent OOM from oversized payloads.
+	// Cap inbound body BEFORE deserialization to prevent pre-auth OOM.
+	// The route is registered with Binding=UNKNOWN so the gin wrapper does
+	// NOT read the body — MaxBytesReader is effective here (unlike the
+	// prior BindJson registration where the wrapper consumed the body
+	// before the handler ran, making the cap dead code).
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxInboundBodyBytes)
 
-	data, ok := bindingInputPtr.(*healthreport)
-
-	if !ok || data == nil {
+	var data healthreport
+	if err := c.ShouldBindJSON(&data); err != nil {
 		log.Println("!!! Inbound Health Report Payload Missing or Malformed From " + escapeUserInput(c.ClientIP()) + " !!!")
 		c.String(400, "Inbound Health Report Payload Missing or Malformed")
 		return
@@ -1371,11 +1374,11 @@ func deregisterInstance(sd *cloudmap.CloudMap, serviceId string, instanceId stri
 		return fmt.Errorf("InstanceID is Required for Instance Deregister")
 	}
 
-	// FIX S5: Escape instanceId and serviceId for logging only — the real
-	// values used for the CloudMap SDK call remain unescaped so behavior
-	// is unchanged. User-controlled JSON-sourced ids could contain CR/LF.
+	// FIX S5: Escape instanceId for logging only — the real value used for
+	// the CloudMap SDK call remains unescaped so behavior is unchanged.
+	// User-controlled JSON-sourced ids could contain CR/LF.
+	// Note: serviceId is not logged in this function, so no escape needed.
 	logInstanceId := escapeUserInput(instanceId)
-	_ = escapeUserInput(serviceId) // serviceId not currently logged, but escaped for future safety
 
 	log.Println("Service Discovery De-Register Instance '" + logInstanceId + "' Begin...")
 
