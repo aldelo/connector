@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/crypto"
@@ -205,26 +206,30 @@ func NewNotifierGateway(appName string, configFileNameWebServer string, configFi
 	return gatewayServer, nil
 }
 
-// escapeUserInput replaces control characters and Unicode line/paragraph
-// separators with spaces to mitigate log-injection (CWE-117). Covers:
-//   - \n, \r, \t — standard ASCII control chars
-//   - U+0085 (NEL / Next Line)
-//   - U+2028 (Line Separator)
-//   - U+2029 (Paragraph Separator)
+// escapeUserInput neutralizes log-forging / terminal-injection vectors
+// (CWE-117) in untrusted data before it is written to a log line. It maps
+// every Unicode control character to a space: C0 (0x00-0x1F, including
+// CR/LF/TAB/NUL/BS/ESC/BEL/VT/FF), DEL (0x7F), and C1 (0x80-0x9F, including
+// NEL U+0085). It also maps the Unicode line and paragraph separators
+// (U+2028/U+2029) to a space; these are categories Zl/Zp, NOT control, so
+// unicode.IsControl does not cover them and they are handled explicitly.
 //
-// Go RE2's \s matches ASCII whitespace only; these Unicode separators
-// require explicit handling (see Go regexp \p{Z}\p{Cf} lesson).
-var logInjectionReplacer = strings.NewReplacer(
-	"\n", " ",
-	"\r", " ",
-	"\t", " ",
-	"\u0085", " ", // NEL (Next Line)
-	"\u2028", " ", // Line Separator
-	"\u2029", " ", // Paragraph Separator
-)
-
+// This prevents an attacker-supplied value (e.g. an SNS MessageId or a
+// relayed server URL) from injecting newlines to forge log lines, ANSI
+// escape sequences to clear/recolor the operator's terminal, or backspace/NUL
+// to hide and overwrite previously logged text. Ordinary printable runes and
+// non-control multi-byte runes are preserved.
+//
+// Fix: F-1/F-3 (deep-review-2026-06-14 contrarian re-review). The prior
+// strings.Replacer only stripped CR/LF/TAB and the Unicode separators, leaving
+// ESC (0x1B) and the other C0/DEL control bytes to pass through unescaped.
 func escapeUserInput(data string) string {
-	return logInjectionReplacer.Replace(data)
+	return strings.Map(func(r rune) rune {
+		if r == '\u2028' || r == '\u2029' || unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, data)
 }
 
 var snsTopicArnPattern = regexp.MustCompile(`^arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}$`)
@@ -1025,7 +1030,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 		} else {
 			// perform sns notification routing task
 			if notifyJson, err := util.MarshalJSONCompact(notify); err != nil {
-				log.Printf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error())
+				log.Printf("Server Key %s at Host %s Marshal Notification Data to JSON Failed: %s", escapeUserInput(serverKey), escapeUserInput(serverUrl), err.Error())
 				c.String(412, "Notification Marshal Failed")
 
 				if seg != nil && seg.Ready() {
@@ -1035,7 +1040,7 @@ func snsnotification(c *gin.Context, serverKey string) {
 				// relay sns notification to target notify server
 				// FIX S6: Escape notifyJson for logging — the raw notifyJson
 				// passed to the POST below stays unescaped.
-				log.Println("/snsrouter 'notification' Relaying SNS Data To Notifier Server Endpoint '" + serverUrl + "': " + escapeUserInput(notifyJson))
+				log.Println("/snsrouter 'notification' Relaying SNS Data To Notifier Server Endpoint '" + escapeUserInput(serverUrl) + "': " + escapeUserInput(notifyJson))
 
 				serverUrl += "/snsrelay"
 
@@ -1045,21 +1050,21 @@ func snsnotification(c *gin.Context, serverKey string) {
 						Value: "application/json",
 					},
 				}, notifyJson); err != nil {
-					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", escapeUserInput(serverKey), serverUrl, err.Error())
+					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %s", escapeUserInput(serverKey), escapeUserInput(serverUrl), err.Error())
 					c.String(412, "Route Notification to Internal Host Failed")
 
 					if seg != nil && seg.Ready() {
 						xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Failed: %w", escapeUserInput(serverKey), serverUrl, err)))
 					}
 				} else if statusCode != 200 {
-					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", escapeUserInput(serverKey), serverUrl, statusCode)
+					log.Printf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", escapeUserInput(serverKey), escapeUserInput(serverUrl), statusCode)
 					c.Status(statusCode)
 
 					if seg != nil && seg.Ready() {
 						xray.LogXrayAddFailure("NotifierGateway", seg.SafeAddError(fmt.Errorf("Server Key %s at Host %s Route Notification From SNS to Internal Host Did Not Yield Status Code 200: Actual Code = %d", escapeUserInput(serverKey), serverUrl, statusCode)))
 					}
 				} else {
-					log.Printf("Server Key %s at Host %s Route Notification Complete", escapeUserInput(serverKey), serverUrl)
+					log.Printf("Server Key %s at Host %s Route Notification Complete", escapeUserInput(serverKey), escapeUserInput(serverUrl))
 					c.Status(200)
 				}
 			}
