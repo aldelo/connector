@@ -235,9 +235,20 @@ var snsTopicArnPattern = regexp.MustCompile(`^arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Z
 // the $ anchor). Kept package-level for compile-once performance.
 var snsHostPattern = regexp.MustCompile(`^sns\.[a-z0-9-]+\.amazonaws\.com$`)
 
-// validateSNSURL parses rawUrl and validates it against the AWS SNS host
-// allowlist. Returns the parsed *url.URL (with host lowercased) and true
-// if the URL is a legitimate SNS endpoint; (nil, false) otherwise.
+// sanitizeSNSUrl parses rawUrl, validates it against the AWS SNS host
+// allowlist, and reconstructs a clean URL from the validated components.
+// It is the single source of truth for SNS URL validation — isValidSNSUrl
+// delegates here — so the bool-gate and the reconstruct-gate can never drift
+// (the root cause of the S1/S2 SSRF siblings).
+//
+// The parse, the allowlist check, and the reconstruction are deliberately
+// kept in ONE function (rather than returning a *url.URL across a function
+// boundary): a regex MatchString alone is not a CodeQL-recognized
+// request-forgery barrier, but the in-function parse→allowlist→reconstruct
+// flow — building a fresh url.URL with a constant https scheme and a host
+// that just passed the allowlist — is what severs CodeQL's taint chain from
+// the attacker-controlled rawUrl. Splitting it across functions reintroduces
+// the SSRF alert (CodeQL #37). Do not re-extract a returning validator.
 //
 // Validation checks (all must pass):
 //   - Scheme must be "https"
@@ -247,81 +258,66 @@ var snsHostPattern = regexp.MustCompile(`^sns\.[a-z0-9-]+\.amazonaws\.com$`)
 //   - Hostname must exactly match sns.<region>.amazonaws.com (anchored regex)
 //   - Path must be non-empty (at least "/") or a query string present
 //
-// This is the single source of truth for SNS URL validation — both
-// isValidSNSUrl and sanitizeSNSUrl delegate here. Keeping one
-// implementation eliminates drift between the bool-gate and the
-// reconstruct-gate (the root cause of the S1/S2 SSRF siblings).
-func validateSNSURL(rawUrl string) (*url.URL, bool) {
+// Returns the sanitized (reconstructed) URL and true, or ("", false) on
+// validation failure.
+func sanitizeSNSUrl(rawUrl string) (string, bool) {
 	u, err := url.Parse(rawUrl)
 	if err != nil {
-		return nil, false
+		return "", false
 	}
 
 	// Reject non-https schemes (prevents http:// downgrade and exotic schemes)
 	if !strings.EqualFold(u.Scheme, "https") {
-		return nil, false
+		return "", false
 	}
 
-	// Reject opaque URLs
+	// Reject opaque URLs (e.g. "https:opaque")
 	if u.Opaque != "" {
-		return nil, false
+		return "", false
 	}
 
-	// Reject embedded credentials
+	// Reject embedded credentials (user:pass@ or @host)
 	if u.User != nil {
-		return nil, false
+		return "", false
 	}
 
 	host := strings.ToLower(u.Hostname())
 
-	// Reject explicit port
+	// Reject explicit port — legitimate AWS SNS URLs never carry a port
 	if u.Port() != "" {
-		return nil, false
-	}
-
-	// Exact hostname match: sns.<region>.amazonaws.com — rejects subdomain
-	// suffix attacks (sns.us-east-1.amazonaws.com.evil.com) via $ anchor
-	if !snsHostPattern.MatchString(host) {
-		return nil, false
-	}
-
-	// Require a path (at least "/") — URLs without a path are malformed for our use
-	if u.Path == "" && u.RawQuery == "" {
-		return nil, false
-	}
-
-	// Normalize host to lowercase for consistent reconstruction
-	u.Host = host
-	return u, true
-}
-
-// isValidSNSUrl validates that a URL matches the expected AWS SNS domain pattern
-// to prevent SSRF attacks via attacker-controlled SubscribeURL/UnsubscribeURL.
-// Delegates to validateSNSURL for the actual checks.
-func isValidSNSUrl(rawUrl string) bool {
-	_, ok := validateSNSURL(rawUrl)
-	return ok
-}
-
-// sanitizeSNSUrl parses and validates a URL against the SNS host allowlist,
-// then reconstructs it from the parsed components. The reconstructed URL
-// severs the CodeQL taint chain because it is derived from validated,
-// parsed fields rather than from the original attacker-controlled string.
-// Returns the sanitized URL and true, or ("", false) if validation fails.
-func sanitizeSNSUrl(rawUrl string) (string, bool) {
-	u, ok := validateSNSURL(rawUrl)
-	if !ok {
 		return "", false
 	}
 
-	// Reconstruct from parsed components — severs taint from rawUrl
+	// Exact hostname match: sns.<region>.amazonaws.com — rejects subdomain
+	// suffix attacks (sns.us-east-1.amazonaws.com.evil.com) via the $ anchor.
+	if !snsHostPattern.MatchString(host) {
+		return "", false
+	}
+
+	// Require a path (at least "/") or a query — URLs without either are
+	// malformed for our use.
+	if u.Path == "" && u.RawQuery == "" {
+		return "", false
+	}
+
+	// Reconstruct from the validated components. `host` has just passed the
+	// allowlist; a fresh url.URL with a constant https scheme severs the taint.
 	clean := &url.URL{
 		Scheme:   "https",
-		Host:     u.Host,
+		Host:     host,
 		Path:     u.Path,
 		RawQuery: u.RawQuery,
 	}
 	return clean.String(), true
+}
+
+// isValidSNSUrl reports whether rawUrl is a legitimate AWS SNS endpoint, to
+// prevent SSRF via attacker-controlled SubscribeURL/UnsubscribeURL. It
+// delegates to sanitizeSNSUrl (discarding the reconstructed URL) so the
+// bool-gate and the reconstruct-gate share one implementation.
+func isValidSNSUrl(rawUrl string) bool {
+	_, ok := sanitizeSNSUrl(rawUrl)
+	return ok
 }
 
 // healthreporter handles client reporting to host health status of the client,
