@@ -374,6 +374,70 @@ func TestEscapeUserInput_StripsCRLF(t *testing.T) {
 	}
 }
 
+// TestEscapeUserInput_StripsControlBytesAndANSI is the regression test for
+// F-1 (deep-review-2026-06-14 contrarian re-review). The prior strings.Replacer
+// only stripped CR/LF/TAB and the Unicode separators, so ESC (0x1B), backspace,
+// NUL, BEL, VT, FF and DEL passed through unescaped — letting an attacker inject
+// ANSI terminal-escape sequences (clear screen / recolor) or overwrite already
+// logged text via backspace. Every byte below must be neutralized to a space
+// while ordinary printable and non-control multi-byte runes are preserved.
+func TestEscapeUserInput_StripsControlBytesAndANSI(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"escape_clear_screen", "a\x1b[2Jb", "a [2Jb"},
+		{"ansi_color_sequence", "\x1b[31mRED\x1b[0m", " [31mRED [0m"},
+		{"osc_set_title", "x\x1b]2;evil\x07y", "x ]2;evil y"},
+		{"backspace_overwrite", "admin\x08\x08\x08\x08\x08guest", "admin     guest"},
+		{"null_byte", "a\x00b", "a b"},
+		{"bell", "a\x07b", "a b"},
+		{"vertical_tab", "a\x0bb", "a b"},
+		{"form_feed", "a\x0cb", "a b"},
+		{"del", "a\x7fb", "a b"},
+		{"printable_url_preserved", "https://sns.us-east-1.amazonaws.com/x?a=b", "https://sns.us-east-1.amazonaws.com/x?a=b"},
+		{"ascii_space_preserved", "a b c", "a b c"},
+		{"non_control_unicode_preserved", "café-日本", "café-日本"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := escapeUserInput(tc.input)
+			if got != tc.want {
+				t.Errorf("escapeUserInput(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+			if strings.ContainsRune(got, '\x1b') {
+				t.Errorf("escapeUserInput(%q) left a raw ESC byte in output: %q", tc.input, got)
+			}
+		})
+	}
+}
+
+// TestLogInjection_ServerUrl_Escaped is the regression test for F-3
+// (deep-review-2026-06-14). The DynamoDB-sourced serverUrl is relayed into the
+// /snsrouter 'notification' log lines; it is now wrapped with escapeUserInput so
+// a malformed/compromised data-store value cannot inject ANSI escapes or forged
+// log lines into operator logs.
+func TestLogInjection_ServerUrl_Escaped(t *testing.T) {
+	maliciousServerURL := "http://10.0.0.5:8080\x1b[2J\n2026-06-14 CRITICAL: forged entry"
+
+	var buf bytes.Buffer
+	origOutput := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(origOutput) })
+
+	// Same shape as the /snsrouter 'notification' relay log site, with the fix.
+	log.Println("/snsrouter 'notification' Relaying SNS Data To Notifier Server Endpoint '" + escapeUserInput(maliciousServerURL) + "': {}")
+
+	output := buf.String()
+	if strings.ContainsRune(output, '\x1b') {
+		t.Errorf("log output contains raw ESC byte from serverUrl:\n%q", output)
+	}
+	if strings.Contains(output, "\n2026-06-14 CRITICAL") {
+		t.Errorf("log output contains forged newline-injected entry:\n%q", output)
+	}
+}
+
 // TestLogInjection_InstanceIdEscaped_Regression verifies that logging an
 // instanceId containing CR/LF through the escapeUserInput wrapper produces
 // output with NO raw control characters. This is the regression test for
