@@ -91,7 +91,7 @@ func NewWebServer(appName string, configFileName string, customConfigPath string
 	// load config
 	c, e := readConfig(appName, configFileName, customConfigPath)
 	if e != nil {
-		return nil, fmt.Errorf("Create Web Server Failed: %s", e.Error())
+		return nil, fmt.Errorf("Create Web Server Failed: %w", e)
 	}
 
 	var gz *ginw.GinZap

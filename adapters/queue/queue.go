@@ -290,7 +290,7 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 	if !notFound {
 		// found queue
 		if queueArn, e := q.GetQueueArnFromQueue(queueUrl, timeoutDuration...); e != nil {
-			return "", "", fmt.Errorf("GetQueue Failed: (%s) %s", "Get Queue ARN From Attribute Error", e.Error())
+			return "", "", fmt.Errorf("GetQueue Failed: (Get Queue ARN From Attribute Error) %w", e)
 		} else {
 			// if caller asked for a specific retention, apply it to existing queue as well.
 			if messageRetentionSeconds > 0 {
@@ -302,7 +302,7 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 				if errAttr := q.SetQueueAttributes(queueUrl, map[sqssetqueueattribute.SQSSetQueueAttribute]string{
 					sqssetqueueattribute.MessageRetentionPeriod: util.UintToStr(messageRetentionSeconds),
 				}, timeoutDuration...); errAttr != nil {
-					return "", "", fmt.Errorf("GetQueue Failed: (Set MessageRetentionPeriod Error) %s", errAttr.Error())
+					return "", "", fmt.Errorf("GetQueue Failed: (Set MessageRetentionPeriod Error) %w", errAttr)
 				}
 			}
 
@@ -344,7 +344,7 @@ func GetQueue(q *sqs.SQS, queueName string, messageRetentionSeconds uint, snsTop
 			queueArn, e := q.GetQueueArnFromQueue(queueUrl, timeoutDuration...)
 
 			if e != nil {
-				return "", "", fmt.Errorf("CreateQueue Failed: (%s) %s", "Get Queue ARN From Attribute Error", e.Error())
+				return "", "", fmt.Errorf("CreateQueue Failed: (Get Queue ARN From Attribute Error) %w", e)
 			}
 
 			// apply SNS policy using merge helper (safe even if future defaults add a policy)
@@ -433,7 +433,7 @@ func SendMessageFIFO(
 	// use wrapper FIFO helper instead of nonexistent q.SqsClient
 	res, sendErr := q.SendMessageFifo(queueUrl, messageDeduplicationId, messageGroupId, messageBody, messageAttributes, timeoutDuration...)
 	if sendErr != nil {
-		return "", fmt.Errorf("SendMessageFIFO Failed: %s", sendErr.Error())
+		return "", fmt.Errorf("SendMessageFIFO Failed: %w", sendErr)
 	}
 	if res == nil {
 		return "", fmt.Errorf("SendMessageFIFO succeeded but result is nil")

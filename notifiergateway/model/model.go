@@ -44,7 +44,7 @@ var (
 	requireSNSSignature = true
 	// BL-1: configurable DDB endpoint lookup retry parameters for SNS
 	// subscription confirmation. Defaults match prior hardcoded behavior.
-	endpointRetryDelayMs    uint = 250
+	endpointRetryDelayMs     uint = 250
 	endpointRetryMaxAttempts uint = 3
 )
 

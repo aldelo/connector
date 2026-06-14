@@ -46,6 +46,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -54,6 +55,30 @@ import (
 // snsCertFetcher resolves a signing certificate URL into a parsed x509
 // certificate. Tests override this variable to inject a stub fetcher.
 var snsCertFetcher = defaultFetchSNSCert
+
+// verifyCertChain is the injectable x509 chain verification function.
+// Production default verifies against system roots. Tests override this
+// to supply a test root pool or a no-op verifier for self-signed fixtures.
+//
+// S3 DECISION: WARN-and-proceed on verify failure rather than hard-reject.
+// Rationale: we cannot empirically confirm that AWS's SNS signing cert
+// chains cleanly to a Go system root in every deployment environment
+// (Alpine, distroless, custom CA bundles). A hard-reject that breaks
+// legitimate SNS in a production deployment with a non-standard trust
+// store is worse than a WARN. The WARN surfaces the gap in logs so
+// operators can investigate. When AWS cert chain verification can be
+// empirically proven (with a real SNS cert), upgrade to hard-reject.
+var verifyCertChain = func(cert *x509.Certificate, intermediates []*x509.Certificate) error {
+	opts := x509.VerifyOptions{
+		// System roots (nil = Go's default system root pool)
+		Intermediates: x509.NewCertPool(),
+	}
+	for _, ic := range intermediates {
+		opts.Intermediates.AddCert(ic)
+	}
+	_, err := cert.Verify(opts)
+	return err
+}
 
 // certCacheMax caps the in-process SNS signing cert cache at a small
 // LRU.
@@ -234,6 +259,13 @@ func verifyAWSSNSSignature(payload, signature, signatureVersion, signingCertURL 
 	switch signatureVersion {
 	case "", "1":
 		// AWS default is SignatureVersion 1 (SHA1) when the field is absent.
+		// S4 NOTE: SHA1 is deprecated for new SNS topics (AWS supports
+		// per-topic opt-in to SignatureVersion 2 / SHA256), but AWS SNS
+		// still signs with v1/SHA1 by default. Hard-rejecting v1 would
+		// break all integrators whose topics haven't opted into v2.
+		// Accepting v1 is a deliberate decision — see validation-not-
+		// stricter-than-runtime rule. Operators should migrate their
+		// topics to SignatureVersion 2 for stronger digest security.
 		h := sha1.Sum([]byte(payload))
 		digest = h[:]
 		hashFunc = crypto.SHA1
@@ -289,7 +321,7 @@ func defaultFetchSNSCert(certURL string) (*x509.Certificate, error) {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
-	block, _ := pem.Decode(body)
+	block, rest := pem.Decode(body)
 	if block == nil {
 		return nil, fmt.Errorf("invalid PEM in cert response")
 	}
@@ -297,6 +329,25 @@ func defaultFetchSNSCert(certURL string) (*x509.Certificate, error) {
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse x509: %w", err)
+	}
+
+	// FIX S3: Parse any additional PEM blocks as intermediates and
+	// verify the leaf cert's chain via the injectable verifyCertChain.
+	// WARN-and-proceed on failure (see verifyCertChain godoc for rationale).
+	var intermediates []*x509.Certificate
+	for {
+		var iBlock *pem.Block
+		iBlock, rest = pem.Decode(rest)
+		if iBlock == nil {
+			break
+		}
+		ic, icErr := x509.ParseCertificate(iBlock.Bytes)
+		if icErr == nil {
+			intermediates = append(intermediates, ic)
+		}
+	}
+	if verifyErr := verifyCertChain(cert, intermediates); verifyErr != nil {
+		log.Printf("WARN: SNS signing cert chain verification failed (cert URL: %s): %s — proceeding (see S3 rationale)", certURL, verifyErr.Error())
 	}
 
 	certCache.Put(certURL, cert)

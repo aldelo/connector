@@ -405,10 +405,10 @@ func TestValidateInstancePrefix(t *testing.T) {
 
 func TestSanitizeMaxResults(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    *int64
-		wantNil  bool
-		wantVal  int64
+		name    string
+		input   *int64
+		wantNil bool
+		wantVal int64
 	}{
 		// nil input → nil output
 		{name: "nil input", input: nil, wantNil: true},
