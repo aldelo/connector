@@ -85,6 +85,35 @@ func TestRunEndpointRefreshLoop_StopsWhenClientClosed(t *testing.T) {
 	}
 }
 
+// TestRunEndpointRefreshLoop_MarkClosedTerminatesViaRealWiring proves the real
+// resetClosedCh→getClosedCh→markClosedCh lifecycle wiring terminates the loop.
+// The existing tests inject an explicit stop channel; this test exercises the
+// actual Client channel infrastructure that startEndpointRefreshLoop relies on.
+// Deterministic: no sleep, no NumGoroutine — select-on-done with failsafe timeout.
+func TestRunEndpointRefreshLoop_MarkClosedTerminatesViaRealWiring(t *testing.T) {
+	c := &Client{}
+	c.resetClosedCh()
+	stop := c.getClosedCh()
+
+	tick := make(chan time.Time)
+	done := make(chan struct{})
+
+	go func() {
+		c.runEndpointRefreshLoop(stop, tick, func() error { return nil })
+		close(done)
+	}()
+
+	// Close the channel via the real wiring — this is what Close() calls.
+	c.markClosedCh()
+
+	select {
+	case <-done:
+		// pass — loop exited promptly when markClosedCh closed the channel
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not exit after markClosedCh — real wiring broken")
+	}
+}
+
 func TestEffectiveEndpointRefreshInterval(t *testing.T) {
 	// nil config => 30s default (default-on)
 	if got := (&Client{}).effectiveEndpointRefreshInterval(); got != 30*time.Second {

@@ -1788,18 +1788,18 @@ func (c *Client) effectiveEndpointRefreshInterval() time.Duration {
 }
 
 // startEndpointRefreshLoop launches the periodic, notifier-independent endpoint refresh.
-// It is bound to the current connection generation via getClosedCh so that Close() (or a
-// re-Dial that supersedes the channel) cleanly retires the goroutine instead of leaking it.
+// It is bound to the current connection generation via getClosedCh so that Close()
+// cleanly retires the goroutine instead of leaking it.
 func (c *Client) startEndpointRefreshLoop() {
 	t := time.NewTicker(c.effectiveEndpointRefreshInterval())
 	stop := c.getClosedCh()
-	go func() {
+	safego.Go("endpoint-refresh-loop", func() {
 		defer t.Stop()
 		c.runEndpointRefreshLoop(stop, t.C, func() error {
 			_, err := c.GetLiveEndpointsCount(true)
 			return err
 		})
-	}()
+	})
 }
 
 // runEndpointRefreshLoop is the testable core of the periodic refresh. On each tick it
@@ -1822,7 +1822,11 @@ func (c *Client) runEndpointRefreshLoop(stop <-chan struct{}, tick <-chan time.T
 				if cfg := c.getConfig(); cfg != nil {
 					svc, ns = cfg.Target.ServiceName, cfg.Target.NamespaceName
 				}
-				log.Printf("[WARN] connector periodic endpoint refresh failed for %s.%s: %s", svc, ns, err.Error())
+				if z := c.ZLog(); z != nil {
+					z.Warnf("connector periodic endpoint refresh failed for %s.%s: %s", svc, ns, err.Error())
+				} else {
+					log.Printf("connector periodic endpoint refresh failed for %s.%s: %s", svc, ns, err.Error())
+				}
 			}
 		}
 	}
