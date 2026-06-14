@@ -13,13 +13,24 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
-## [Unreleased]
+## [v1.8.10] — 2026-06-14
 
 Security + reliability hardening cycle (coordinated-sibling with `common
 v1.8.10`). Two GitHub CodeQL/Dependabot remediation PRs, the periodic
 endpoint-refresh feature, and a 5-dimension adversarial deep code review
 (concurrency, security, error-handling, API-stability, test-quality) with
-remediation of every P0/P1 it surfaced.
+remediation of every P0/P1 it surfaced — followed by a blind contrarian
+security re-review (no P0/P1; F-1/F-3 log-injection hardening landed).
+
+**Rule #15 Pre-Flight Attestation (2026-06-14 06:28:52 UTC):**
+- verified: `common v1.8.10` → `5d97bc3bc1b6f7c4389159b4d5a100762e685b75`
+  via `git ls-remote --tags https://github.com/aldelo/common.git refs/tags/v1.8.10`
+  (pin already set in `go.mod`).
+- gates: `go build/vet ./...` clean, `gofmt` clean, `go test ./... -race -short`
+  **27 ok / 0 fail / 0 races**, `golangci-lint` delta vs prior master = 0,
+  GitHub code-scanning **0 open**, Dependabot **0 open**.
+- version: skips `v1.8.9` (never cut on the connector side) to align the patch
+  number with the `common v1.8.10` sibling.
 
 **No observable contract change on any exported surface** — every new
 symbol (`sanitizeSNSUrl`, `validateSNSURL`, `verifyCertChain`,
