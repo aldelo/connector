@@ -99,11 +99,11 @@ type NotifierClient struct {
 	ServiceHostOnlineHandler   func(host string, port uint)
 	ServiceHostOfflineHandler  func(host string, port uint)
 
-	_grpcClient                  *Client
-	_subscriberID                string
-	_subscriberTopicArn          string
-	_subscribeCancel             context.CancelFunc // cancels the Subscribe gRPC stream
-	_subMu                       sync.Mutex         // protects _subscriberID, _subscriberTopicArn, and _subscribeCancel
+	_grpcClient         *Client
+	_subscriberID       string
+	_subscriberTopicArn string
+	_subscribeCancel    context.CancelFunc // cancels the Subscribe gRPC stream
+	_subMu              sync.Mutex         // protects _subscriberID, _subscriberTopicArn, and _subscribeCancel
 	// P3-L3-C1: atomic.Bool operations in this file rely on Go's sync/atomic
 	// sequential-consistency semantics (guaranteed since Go 1.19): any write
 	// happens-before every subsequent read of the same atomic across all goroutines.
@@ -112,7 +112,7 @@ type NotifierClient struct {
 	// fences needed at the call sites. Do NOT replace with a plain bool "for
 	// simplicity" — the state is read from ping/subscribe worker goroutines while
 	// being written from Start/Stop paths; a plain bool is a data race.
-	_notificationServicesStarted atomic.Bool        // true once notification listener+ping goroutines are up; cleared on teardown/error
+	_notificationServicesStarted atomic.Bool // true once notification listener+ping goroutines are up; cleared on teardown/error
 }
 
 // NewNotifierClient creates a new prepared notifier client for use in service discovery notification

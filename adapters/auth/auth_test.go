@@ -206,13 +206,13 @@ func TestAuthenticate_NoValidatorConfigured(t *testing.T) {
 
 func TestAuthenticate_TableDriven(t *testing.T) {
 	tests := []struct {
-		name          string
-		validator     func(string) bool
-		authHeader    string
-		noMetadata    bool
-		wantCode      codes.Code
-		wantNilErr    bool
-		wantToken     string // expected token passed to validator ("" = don't check)
+		name       string
+		validator  func(string) bool
+		authHeader string
+		noMetadata bool
+		wantCode   codes.Code
+		wantNilErr bool
+		wantToken  string // expected token passed to validator ("" = don't check)
 	}{
 		{
 			name:       "no metadata",

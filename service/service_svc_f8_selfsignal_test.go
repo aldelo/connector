@@ -112,14 +112,14 @@ func waitForSigHandlerReady(t *testing.T, s *Service, timeout time.Duration) {
 // cannot:
 //   - SVC-F8 self-signal removed or gated on the wrong condition
 //     → awaitOsSigExit never wakes, GracefulStop blocks forever,
-//       test fails on the 5s deadline.
+//     test fails on the 5s deadline.
 //   - _sigHandlerReady.Store(true) moved BEFORE signal.Notify
 //     → the self-signal hits the Go runtime default handler and
-//       terminates the test binary (`go test` exits with "signal:
-//       terminated").
+//     terminates the test binary (`go test` exits with "signal:
+//     terminated").
 //   - signal.Stop removed from awaitOsSigExit
 //     → _sigHandlerReady cleanup check at the end fails; also
-//       contaminates subsequent tests in the binary.
+//     contaminates subsequent tests in the binary.
 //   - SIGTERM sent to the wrong pid (e.g., getppid instead of
 //     getpid) → awaitOsSigExit never wakes, 5s deadline fires.
 func TestService_AwaitOsSigExit_WokenByGracefulStopSelfSignal(t *testing.T) {
@@ -281,7 +281,6 @@ func TestService_AwaitOsSigExit_WokenByImmediateStopSelfSignal(t *testing.T) {
 		t.Fatal("ImmediateStop did not set _immediateStopRequested — legacy fallback taken instead of unified SVC-F7 routing")
 	}
 }
-
 
 // TestSigHandlerReadyChannel_ClosedAfterNotify validates that the
 // REM-4 channel-based readiness mechanism fires correctly: start

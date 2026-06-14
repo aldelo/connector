@@ -46,7 +46,6 @@ import (
 	"github.com/aldelo/common/wrapper/sqs"
 	"github.com/aldelo/common/wrapper/xray"
 	"github.com/aldelo/connector/adapters/health"
-	"github.com/aldelo/connector/internal/safego"
 	"github.com/aldelo/connector/adapters/notification"
 	"github.com/aldelo/connector/adapters/queue"
 	"github.com/aldelo/connector/adapters/ratelimiter"
@@ -54,6 +53,7 @@ import (
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"github.com/aldelo/connector/adapters/tracer"
+	"github.com/aldelo/connector/internal/safego"
 	"github.com/aldelo/connector/service/grpc_recovery"
 	ws "github.com/aldelo/connector/webserver"
 	sns2 "github.com/aws/aws-sdk-go/service/sns"
@@ -741,7 +741,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 			if tc, e := tls.GetServerTlsConfig(s._config.Grpc.ServerCertFile, s._config.Grpc.ServerKeyFile, clientCACerts); e != nil {
 				// FIX #5: Was log.Fatal which calls os.Exit(1) and bypasses all deferred
 				// cleanup (listener close, SD deregister, etc.). Return error instead.
-				return nil, "", 0, fmt.Errorf("Setup gRPC Server TLS Failed: %s", e.Error())
+				return nil, "", 0, fmt.Errorf("Setup gRPC Server TLS Failed: %w", e)
 			} else {
 				if len(s._config.Grpc.ClientCACertFiles) == 0 {
 					log.Println("^^^ Server On TLS ^^^")
@@ -752,7 +752,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 				opts = append(opts, grpc.Creds(credentials.NewTLS(tc)))
 			}
 		} else {
-			log.Println("~~~ Server Unsecured, Not On TLS ~~~")
+			log.Println("WARN: ~~~ Server Unsecured, Not On TLS — traffic is unencrypted ~~~")
 		}
 
 		// FIX #6: Original condition `KeepAliveMinWait >= 0` is always true for uint.
@@ -936,7 +936,7 @@ func (s *Service) setupServer() (lis net.Listener, ip string, port uint, err err
 		// leak — pre-SVC-F2-extension siblings (FavorPublicIP error
 		// returns) leak too, but new code should not.
 		if regErr := s.runRegisterHandlers(s.RegisterServiceHandlers); regErr != nil {
-			_ = lis.Close()
+			_ = lis.Close() // best-effort listener cleanup on handler-registration failure; close error is non-actionable here
 			return nil, "", 0, regErr
 		}
 
@@ -1393,9 +1393,10 @@ func (s *Service) startServer(lis net.Listener, quit chan bool, quitDone chan st
 
 									s._mu.Lock()
 									s._config.SetSnsDiscoverySubscriptionArn(subId)
+									cfgSnapshot := s._config // snapshot pointer under lock; Save() is lock-independent
 									s._mu.Unlock()
 
-									if cErr := s._config.Save(); cErr != nil {
+									if cErr := cfgSnapshot.Save(); cErr != nil {
 										log.Println("!!! Service Discovery Push Notification Skipped - Instance Queue Topic Subscription Persist To Config Failed: " + cErr.Error() + " !!!")
 
 										if uErr := notification.Unsubscribe(snsLocal, subId, time.Duration(cfgSdTimeout)*time.Second); uErr != nil {
@@ -1920,7 +1921,7 @@ func (s *Service) deleteServiceHealthReportFromDataStore(instanceId string) (err
 	}
 
 	if e != nil {
-		err = fmt.Errorf("Delete Health Report Service Record Failed: %s", e.Error())
+		err = fmt.Errorf("Delete Health Report Service Record Failed: %w", e)
 		return err
 	}
 
@@ -2047,7 +2048,7 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 	jsonData, e := util.MarshalJSONCompact(data)
 
 	if e != nil {
-		err = fmt.Errorf("Set Service Health Report Update To Data Store Failed: %s", e.Error())
+		err = fmt.Errorf("Set Service Health Report Update To Data Store Failed: %w", e)
 		log.Println(err.Error())
 		return false // stop the ticker loop — marshal failure is deterministic and will repeat
 	}
@@ -2456,10 +2457,13 @@ func (s *Service) autoCreateService() error {
 						svcId = buf
 						log.Println("Auto Create Service OK: (Found Existing SvcID) " + svcId + " - " + name)
 
+						s._mu.Lock()
 						s._config.SetServiceId(svcId)
 						s._config.SetServiceName(name)
+						cfgSnapshot := s._config // snapshot pointer under lock; Save() is lock-independent
+						s._mu.Unlock()
 
-						if e := s._config.Save(); e != nil {
+						if e := cfgSnapshot.Save(); e != nil {
 							return e
 						} else {
 							return nil
@@ -2475,10 +2479,13 @@ func (s *Service) autoCreateService() error {
 			} else {
 				log.Println("Auto Create Service OK: " + svcId + " - " + name)
 
+				s._mu.Lock()
 				s._config.SetServiceId(svcId)
 				s._config.SetServiceName(name)
+				cfgSnapshot := s._config // snapshot pointer under lock; Save() is lock-independent
+				s._mu.Unlock()
 
-				if e := s._config.Save(); e != nil {
+				if e := cfgSnapshot.Save(); e != nil {
 					return e
 				} else {
 					return nil
@@ -2538,7 +2545,7 @@ func (s *Service) registerInstance(ip string, port uint, healthy bool, version s
 
 					if e2 := cfg.Save(); e2 != nil {
 						log.Println("... Update Config with Registered Instance Failed: " + e2.Error())
-						return fmt.Errorf("Register Instance Fail When Save Config Errored: %s", e2.Error())
+						return fmt.Errorf("Register Instance Fail When Save Config Errored: %w", e2)
 					} else {
 						log.Println("... Update Config with Registered Instance OK")
 						return nil
@@ -2640,7 +2647,7 @@ func (s *Service) doDeregisterInstance() error {
 		for {
 			if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration...); e != nil {
 				log.Println("... De-Register Instance Failed: " + e.Error())
-				return fmt.Errorf("De-Register Instance Fail: %s", e.Error())
+				return fmt.Errorf("De-Register Instance Fail: %w", e)
 			} else {
 				if status == sdoperationstatus.Success {
 					log.Println("... De-Register Instance OK")
@@ -2649,7 +2656,7 @@ func (s *Service) doDeregisterInstance() error {
 
 					if e2 := cfg.Save(); e2 != nil {
 						log.Println("... Update Config with De-Registered Instance Failed: " + e2.Error())
-						return fmt.Errorf("De-Register Instance Fail When Save Config Errored: %s", e2.Error())
+						return fmt.Errorf("De-Register Instance Fail When Save Config Errored: %w", e2)
 					} else {
 						log.Println("... Update Config with De-Registered Instance OK")
 						return nil

@@ -877,7 +877,7 @@ func (c *Client) readConfig() error {
 	}
 	if e := c._z.Init(); e != nil {
 		c.zMu.Unlock()
-		return fmt.Errorf("Init ZapLog Failed: %s", e.Error())
+		return fmt.Errorf("Init ZapLog Failed: %w", e)
 	}
 	c.zMu.Unlock()
 
@@ -916,12 +916,13 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 	if util.LenTrim(cfg.Grpc.ServerCACertFiles) > 0 {
 		tls := new(tlsconfig.TlsConfig)
 		if tc, e := tls.GetClientTlsConfig(strings.Split(cfg.Grpc.ServerCACertFiles, ","), cfg.Grpc.ClientCertFile, cfg.Grpc.ClientKeyFile); e != nil {
-			return []grpc.DialOption{}, fmt.Errorf("Set Dial Option Client TLS Failed: %s", e.Error())
+			return []grpc.DialOption{}, fmt.Errorf("Set Dial Option Client TLS Failed: %w", e)
 		} else {
 			opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
 		}
 	} else {
 		// if not tls secured, use inSecure dial option
+		log.Println("WARN: gRPC client connecting WITHOUT TLS — traffic is unencrypted (no ServerCACertFiles configured)")
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 

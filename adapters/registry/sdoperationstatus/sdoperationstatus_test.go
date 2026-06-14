@@ -6,9 +6,9 @@ import (
 
 func TestConstantValues(t *testing.T) {
 	tests := []struct {
-		name     string
-		val      SdOperationStatus
-		wantInt  int
+		name    string
+		val     SdOperationStatus
+		wantInt int
 	}{
 		{"UNKNOWN", UNKNOWN, 0},
 		{"Submitted", Submitted, 1},
@@ -97,9 +97,9 @@ func TestDescriptionConstants(t *testing.T) {
 
 func TestString(t *testing.T) {
 	tests := []struct {
-		name     string
-		val      SdOperationStatus
-		wantStr  string
+		name    string
+		val     SdOperationStatus
+		wantStr string
 	}{
 		{"UNKNOWN", UNKNOWN, "UNKNOWN"},
 		{"Submitted", Submitted, "Submitted"},

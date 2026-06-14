@@ -19,6 +19,7 @@ package tracer
 import (
 	"context"
 	"fmt"
+	"log"
 	"runtime/debug"
 	"strings"
 
@@ -81,6 +82,8 @@ func TracerUnaryClientInterceptor(serviceName string) grpc.UnaryClientIntercepto
 					seg.Close()
 				} else if segCtx := awsxray.GetSegment(ctx); segCtx != nil {
 					xray.LogXrayAddFailure("Tracer", segCtx.AddError(traceErr))
+				} else {
+					log.Printf("!!! tracer unary client interceptor panic recovered: %v\n%s !!!", r, debug.Stack())
 				}
 				err = status.Error(codes.Internal, clientErr.Error())
 				return
@@ -146,6 +149,8 @@ func TracerUnaryServerInterceptor(serviceName string) grpc.UnaryServerIntercepto
 				if seg != nil && seg.Seg != nil {
 					xray.LogXrayAddFailure("Tracer", seg.SafeAddError(traceErr))
 					seg.Close()
+				} else {
+					log.Printf("!!! tracer unary server interceptor panic recovered: %v\n%s !!!", r, debug.Stack())
 				}
 				err = status.Error(codes.Internal, clientErr.Error())
 				return

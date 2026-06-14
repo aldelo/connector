@@ -33,18 +33,18 @@ package service
 //   - A pre-closed net.Listener that will make grpcSrv.Serve() fail
 //     immediately with "use of closed network connection"
 //
-// Calls the real startServer method. The "grpc-server" goroutine
-// inside startServer calls grpcSrv.Serve(closedLis), which fails.
-// With _sigHandlerReady=false, the A2-P6-01 else branch sends on
-// quit. A fake quit handler (same pattern as SVC-F7 tests) receives
-// the send and closes _quitDone.
+// Calls the real startServer method. startServer spawns its own
+// internal "quit-handler" goroutine that reads from quit and closes
+// quitDone on completion. The test waits on quitDone closing — this
+// is the production contract and avoids the prior flake where a
+// test-spawned competing quit reader raced the production handler.
 //
 // Mutation probe (SP-010 protocol):
 //   1. Delete the `else { select { case quit <- true: ... } }` branch
 //      from service.go ~L1198
 //   2. Run: go test -run TestGRPCServeError_PreSignalHandler ./service/...
-//   3. Expected: test times out — quit channel never receives, fake
-//      quit handler never runs, exited channel never closes
+//   3. Expected: test times out — quit channel never receives, internal
+//      quit handler never runs, quitDone never closes
 //   4. Restore the else branch
 //   5. Rerun: GREEN
 
@@ -53,7 +53,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aldelo/connector/internal/safego"
 	"google.golang.org/grpc"
 )
 
@@ -78,16 +77,6 @@ func TestGRPCServeError_PreSignalHandler_QuitsCleanly_A2P601(t *testing.T) {
 		t.Fatal("precondition: _sigHandlerReady must be false (A2-P6-01 setup wrong)")
 	}
 
-	// Start a fake quit handler — same pattern as SVC-F7 tests.
-	// It blocks on _quit, then closes _quitDone. We use a simple
-	// version here since we only care about the quit send arriving.
-	exited := make(chan struct{})
-	safego.Go("a2p601-test-quit-handler", func() {
-		defer close(exited)
-		<-s._quit
-		close(s._quitDone)
-	})
-
 	// Create a listener and immediately close it. When grpcSrv.Serve()
 	// is called with this listener, it fails with "use of closed
 	// network connection" (or similar), which triggers the error branch
@@ -98,26 +87,31 @@ func TestGRPCServeError_PreSignalHandler_QuitsCleanly_A2P601(t *testing.T) {
 	}
 	_ = lis.Close()
 
-	// Call the real startServer. It launches the "grpc-server" goroutine
-	// asynchronously and returns nil (the goroutine error is not propagated
-	// to the startServer return value — it routes through the quit channel
-	// or self-SIGTERM instead). The goroutine calls grpcSrv.Serve(closedLis),
-	// which fails immediately. With _sigHandlerReady=false, the A2-P6-01
-	// else branch sends on quit.
+	// Call the real startServer. It launches:
+	//   1. The "startup-orchestrator" goroutine which spawns "grpc-server"
+	//   2. The "quit-handler" goroutine (reads from quit, closes quitDone)
+	//
+	// The grpc-server goroutine calls grpcSrv.Serve(closedLis), which
+	// fails immediately. With _sigHandlerReady=false, the A2-P6-01
+	// else branch sends on quit. The internal quit-handler receives
+	// and closes quitDone.
 	quit := s._quit
 	quitDone := s._quitDone
 	_ = s.startServer(lis, quit, quitDone)
 
-	// Primary assertion: the fake quit handler must have received the
-	// quit send and exited within a bounded deadline. If the A2-P6-01
-	// else branch is deleted, quit never receives, the fake handler
-	// stays parked, and this times out.
+	// Primary assertion: the production quit-handler must have received
+	// the quit send and closed quitDone within a bounded deadline.
+	// If the A2-P6-01 else branch is deleted, quit never receives,
+	// the internal quit handler stays parked, and this times out.
+	//
+	// The happy path returns immediately when quitDone closes;
+	// time.After is only a failsafe, not the timing mechanism.
 	select {
-	case <-exited:
-		// ok — the quit-channel fallback fired, quit handler ran
+	case <-quitDone:
+		// ok — the quit-channel fallback fired, production quit handler ran and closed quitDone
 	case <-time.After(3 * time.Second):
-		t.Fatal("A2-P6-01 regression: quit handler did not run within 3s — " +
-			"gRPC Serve failure with _sigHandlerReady=false did not send on quit channel (zombie process)")
+		t.Fatal("A2-P6-01 regression: quitDone not closed within 3s — " +
+			"Serve failure with _sigHandlerReady=false did not send on quit (zombie process)")
 	}
 
 	// Clean up the gRPC server to avoid goroutine leaks.
