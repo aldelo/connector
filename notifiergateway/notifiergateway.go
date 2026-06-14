@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"runtime/debug"
 	"strconv"
@@ -205,15 +206,110 @@ func escapeUserInput(data string) string {
 	return result
 }
 
+var snsTopicArnPattern = regexp.MustCompile(`^arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}$`)
+
+// snsHostPattern matches only the exact hostname shape: sns.<region>.amazonaws.com
+// Anchored (^...$) and applied to the parsed hostname, so attacker subdomains
+// like sns.us-east-1.amazonaws.com.evil.com are rejected (they don't match
+// the $ anchor). Kept package-level for compile-once performance.
+var snsHostPattern = regexp.MustCompile(`^sns\.[a-z0-9-]+\.amazonaws\.com$`)
+
 // isValidSNSUrl validates that a URL matches the expected AWS SNS domain pattern
 // to prevent SSRF attacks via attacker-controlled SubscribeURL/UnsubscribeURL.
 // Legitimate AWS SNS URLs follow: https://sns.<region>.amazonaws.com/...
-// The regex ensures the domain ends with .amazonaws.com (no attacker subdomains).
-var snsUrlPattern = regexp.MustCompile(`^https://sns\.[a-z0-9-]+\.amazonaws\.com/`)
-var snsTopicArnPattern = regexp.MustCompile(`^arn:aws:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]{1,256}$`)
-
+//
+// The validation uses net/url.Parse to decompose the URL, then checks the
+// parsed components against an exact allowlist:
+//   - Scheme must be "https"
+//   - No userinfo (embedded credentials)
+//   - No explicit port
+//   - No opaque form
+//   - Hostname must exactly match sns.<region>.amazonaws.com (anchored regex)
+//   - Path must be non-empty (at least "/")
+//
+// This parsed-component approach is recognized by CodeQL's SSRF taint model,
+// unlike the raw-string regex check it replaces as the primary barrier.
 func isValidSNSUrl(rawUrl string) bool {
-	return snsUrlPattern.MatchString(strings.ToLower(rawUrl))
+	u, err := url.Parse(rawUrl)
+	if err != nil {
+		return false
+	}
+
+	// Reject non-https schemes (prevents http:// downgrade and exotic schemes)
+	if !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+
+	// Reject opaque URLs (e.g. "https:opaque")
+	if u.Opaque != "" {
+		return false
+	}
+
+	// Reject embedded credentials (userinfo like user:pass@ or @host)
+	if u.User != nil {
+		return false
+	}
+
+	host := strings.ToLower(u.Hostname())
+
+	// Reject explicit port — legitimate AWS SNS URLs never carry a port
+	if u.Port() != "" {
+		return false
+	}
+
+	// Exact hostname match: sns.<region>.amazonaws.com — rejects subdomain
+	// suffix attacks (sns.us-east-1.amazonaws.com.evil.com) via $ anchor
+	if !snsHostPattern.MatchString(host) {
+		return false
+	}
+
+	// Require a path (at least "/") — URLs without a path are malformed for our use
+	if u.Path == "" && u.RawQuery == "" {
+		return false
+	}
+
+	return true
+}
+
+// sanitizeSNSUrl parses and validates a URL against the SNS host allowlist,
+// then reconstructs it from the parsed components. The reconstructed URL
+// severs the CodeQL taint chain because it is derived from validated,
+// parsed fields rather than from the original attacker-controlled string.
+// Returns the sanitized URL and true, or ("", false) if validation fails.
+func sanitizeSNSUrl(rawUrl string) (string, bool) {
+	u, err := url.Parse(rawUrl)
+	if err != nil {
+		return "", false
+	}
+
+	if !strings.EqualFold(u.Scheme, "https") {
+		return "", false
+	}
+	if u.Opaque != "" {
+		return "", false
+	}
+	if u.User != nil {
+		return "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if u.Port() != "" {
+		return "", false
+	}
+	if !snsHostPattern.MatchString(host) {
+		return "", false
+	}
+	if u.Path == "" && u.RawQuery == "" {
+		return "", false
+	}
+
+	// Reconstruct from parsed components — severs taint from rawUrl
+	clean := &url.URL{
+		Scheme:   "https",
+		Host:     host,
+		Path:     u.Path,
+		RawQuery: u.RawQuery,
+	}
+	return clean.String(), true
 }
 
 // healthreporter handles client reporting to host health status of the client,
@@ -409,6 +505,10 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 	pk := model.BuildHealthPK()
 	sk := model.BuildHealthSK(instanceId)
 
+	// FIX: CodeQL #8/#9/#10/#11 — wrap user-controlled instanceId with
+	// escapeUserInput before logging to prevent CR/LF log-forgery (CWE-117).
+	escapedInstanceId := escapeUserInput(instanceId)
+
 	if xray.XRayServiceOn() {
 		trace := xray.NewSegmentFromHeader(c.Request)
 		if !trace.Ready() {
@@ -418,11 +518,11 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 
 		trace.Capture("healthReporter.deleteFromDataStore", func() error {
 			if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeyValue{PK: pk, SK: sk}); e != nil {
-				log.Println("!!! Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store Failed: " + e.Error() + " !!!")
+				log.Println("!!! Delete Health Report Service Record For InstanceID '" + escapedInstanceId + "' From Data Store Failed: " + e.Error() + " !!!")
 				c.String(500, "Delete Health Report Service Record From Data Store Failed")
 				return fmt.Errorf("Delete Health Report Service Record From Data Store Failed: %s", e.Error())
 			} else {
-				log.Println("--- Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store OK ---")
+				log.Println("--- Delete Health Report Service Record For InstanceID '" + escapedInstanceId + "' From Data Store OK ---")
 				c.String(200, "Delete Health Report Service Record From Data Store OK")
 				return nil
 			}
@@ -434,10 +534,10 @@ func healthreporterdelete(c *gin.Context, bindingInputPtr interface{}) {
 		})
 	} else {
 		if _, e := model.DeleteInstanceHealthFromDataStore(&dynamodb.DynamoDBTableKeyValue{PK: pk, SK: sk}); e != nil {
-			log.Println("!!! Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store Failed: " + e.Error() + " !!!")
+			log.Println("!!! Delete Health Report Service Record For InstanceID '" + escapedInstanceId + "' From Data Store Failed: " + e.Error() + " !!!")
 			c.String(500, "Delete Health Report Service Record From Data Store Failed")
 		} else {
-			log.Println("--- Delete Health Report Service Record For InstanceID '" + instanceId + "' From Data Store OK ---")
+			log.Println("--- Delete Health Report Service Record For InstanceID '" + escapedInstanceId + "' From Data Store OK ---")
 			c.String(200, "Delete Health Report Service Record From Data Store OK")
 		}
 	}

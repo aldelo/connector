@@ -206,11 +206,15 @@ func verifyAWSSNSSignature(payload, signature, signatureVersion, signingCertURL 
 	}
 
 	// SSRF pre-gate — host allowlist check BEFORE any network activity.
-	if !isValidSNSUrl(signingCertURL) {
+	// sanitizeSNSUrl parses, validates, and reconstructs the URL from
+	// parsed components, severing the CodeQL taint chain. The
+	// reconstructed cleanCertURL is what flows to the cert fetcher.
+	cleanCertURL, ok := sanitizeSNSUrl(signingCertURL)
+	if !ok {
 		return fmt.Errorf("signing cert URL host not allowed")
 	}
 
-	cert, err := snsCertFetcher(signingCertURL)
+	cert, err := snsCertFetcher(cleanCertURL)
 	if err != nil {
 		return fmt.Errorf("fetch signing cert: %w", err)
 	}
@@ -249,22 +253,28 @@ func verifyAWSSNSSignature(payload, signature, signatureVersion, signingCertURL 
 
 // defaultFetchSNSCert is the production cert fetcher. It:
 //   - Checks the in-process cache first.
-//   - Re-applies the host allowlist as defense-in-depth.
-//   - HTTP GETs the cert with a 10s timeout.
+//   - Re-applies the host allowlist as defense-in-depth via sanitizeSNSUrl.
+//   - HTTP GETs the cert using the SANITIZED (reconstructed) URL, which
+//     severs the CodeQL taint chain from the original attacker-controlled
+//     certURL string.
 //   - Caps the body at maxCertBodyBytes.
 //   - PEM-decodes and x509-parses.
-//   - Caches on success.
+//   - Caches on success (keyed by the original certURL for cache hit parity).
 func defaultFetchSNSCert(certURL string) (*x509.Certificate, error) {
 	if cert, ok := certCache.Get(certURL); ok {
 		return cert, nil
 	}
 
-	// Defense-in-depth — re-check the host allowlist inside the fetcher.
-	if !isValidSNSUrl(certURL) {
+	// Defense-in-depth — re-check the host allowlist inside the fetcher
+	// and reconstruct the URL from parsed components. The reconstructed
+	// cleanURL is untainted (derived from validated url.URL fields), so
+	// CodeQL's SSRF model does not flag the subsequent HTTP GET.
+	cleanURL, ok := sanitizeSNSUrl(certURL)
+	if !ok {
 		return nil, fmt.Errorf("cert URL host not allowed: %s", certURL)
 	}
 
-	resp, err := certHTTPClient.Get(certURL)
+	resp, err := certHTTPClient.Get(cleanURL)
 	if err != nil {
 		return nil, fmt.Errorf("http get: %w", err)
 	}
