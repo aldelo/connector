@@ -50,10 +50,17 @@ type targetData struct {
 	SdTimeout              uint   `mapstructure:"sd_timeout"`
 	SdEndpointCacheExpires uint   `mapstructure:"sd_endpoint_cache_expires"`
 	SdInstanceMaxResult    uint   `mapstructure:"sd_instance_max_result"`
-	TraceUseXRay           bool   `mapstructure:"trace_use_xray"`
-	ZapLogEnabled          bool   `mapstructure:"zaplog_enabled"`
-	ZapLogOutputConsole    bool   `mapstructure:"zaplog_output_console"`
-	RestTargetCACertFiles  string `mapstructure:"rest_target_ca_cert_files"`
+	// SdEndpointRefreshSeconds is the notifier-independent periodic interval at which a
+	// load-balanced client force-refreshes its round-robin endpoint set from Cloud Map
+	// (pushing the fresh address list into the live ClientConn via UpdateState — no
+	// re-dial, no in-flight RPC drop). 0/unset => default 30s. There is intentionally no
+	// off-switch: the refresh is the safety net behind the SNS notifier, which can die
+	// silently. Set a larger value to slow it; add a dedicated bool later if a kill is needed.
+	SdEndpointRefreshSeconds uint   `mapstructure:"sd_endpoint_refresh_seconds"`
+	TraceUseXRay             bool   `mapstructure:"trace_use_xray"`
+	ZapLogEnabled            bool   `mapstructure:"zaplog_enabled"`
+	ZapLogOutputConsole      bool   `mapstructure:"zaplog_output_console"`
+	RestTargetCACertFiles    string `mapstructure:"rest_target_ca_cert_files"`
 }
 
 type queuesData struct {
@@ -161,6 +168,13 @@ func (c *config) SetSdInstanceMaxResult(i uint) {
 	if c._v != nil {
 		c._v.Set("target.sd_instance_max_result", i)
 		c.Target.SdInstanceMaxResult = i
+	}
+}
+
+func (c *config) SetSdEndpointRefreshSeconds(i uint) {
+	if c._v != nil {
+		c._v.Set("target.sd_endpoint_refresh_seconds", i)
+		c.Target.SdEndpointRefreshSeconds = i
 	}
 }
 

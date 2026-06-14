@@ -41,7 +41,6 @@ import (
 	"github.com/aldelo/common/wrapper/xray"
 	data "github.com/aldelo/common/wrapper/zap"
 	"github.com/aldelo/connector/adapters/circuitbreaker"
-	"github.com/aldelo/connector/internal/safego"
 	"github.com/aldelo/connector/adapters/circuitbreaker/plugins"
 	"github.com/aldelo/connector/adapters/health"
 	"github.com/aldelo/connector/adapters/loadbalancer"
@@ -49,6 +48,7 @@ import (
 	"github.com/aldelo/connector/adapters/registry"
 	res "github.com/aldelo/connector/adapters/resolver"
 	"github.com/aldelo/connector/adapters/tracer"
+	"github.com/aldelo/connector/internal/safego"
 	ws "github.com/aldelo/connector/webserver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -77,9 +77,9 @@ const (
 	// goroutine from a prior lifecycle to drain. Should be longer than
 	// a single DoNotifierAlertService attempt (which has its own SDK
 	// timeout). 5s matches defaultNotifierReconnectDelay.
-	notifierReconnectDrainTimeout   = 5 * time.Second
-	webServerShutdownTimeout    = 5 * time.Second
-	webServerStopChannelTimeout = 6 * time.Second
+	notifierReconnectDrainTimeout = 5 * time.Second
+	webServerShutdownTimeout      = 5 * time.Second
+	webServerStopChannelTimeout   = 6 * time.Second
 )
 
 // client side cache
@@ -1765,7 +1765,70 @@ func (c *Client) Dial(ctx context.Context) error {
 		cleanupSd = false
 		cleanupSqs = false
 		dialSuccess = true
+
+		// Start the notifier-independent periodic endpoint refresh (default-on for
+		// load-balanced clients) so the round-robin endpoint set tracks fleet scale
+		// changes even if the SNS notifier dies silently. See runEndpointRefreshLoop.
+		if cfg := c.getConfig(); cfg != nil && cfg.Grpc.UseLoadBalancer {
+			c.startEndpointRefreshLoop()
+		}
+
 		return nil
+	}
+}
+
+// effectiveEndpointRefreshInterval returns the periodic resolver-refresh interval,
+// defaulting to 30s when unset/0.
+func (c *Client) effectiveEndpointRefreshInterval() time.Duration {
+	secs := uint(30)
+	if cfg := c.getConfig(); cfg != nil && cfg.Target.SdEndpointRefreshSeconds > 0 {
+		secs = cfg.Target.SdEndpointRefreshSeconds
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// startEndpointRefreshLoop launches the periodic, notifier-independent endpoint refresh.
+// It is bound to the current connection generation via getClosedCh so that Close()
+// cleanly retires the goroutine instead of leaking it.
+func (c *Client) startEndpointRefreshLoop() {
+	t := time.NewTicker(c.effectiveEndpointRefreshInterval())
+	stop := c.getClosedCh()
+	safego.Go("endpoint-refresh-loop", func() {
+		defer t.Stop()
+		c.runEndpointRefreshLoop(stop, t.C, func() error {
+			_, err := c.GetLiveEndpointsCount(true)
+			return err
+		})
+	})
+}
+
+// runEndpointRefreshLoop is the testable core of the periodic refresh. On each tick it
+// force-refreshes the round-robin endpoint set (GetLiveEndpointsCount(true) pushes the
+// fresh address list into the live ClientConn via UpdateState — no re-dial). A refresh
+// error is logged but does NOT abort the loop (a silent refresh failure is exactly the
+// gap that freezes the endpoint set and pins all load onto one host). It returns when
+// stop is closed or the client is marked closed.
+func (c *Client) runEndpointRefreshLoop(stop <-chan struct{}, tick <-chan time.Time, refresh func() error) {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick:
+			if c.closed.Load() {
+				return
+			}
+			if err := refresh(); err != nil {
+				svc, ns := "", ""
+				if cfg := c.getConfig(); cfg != nil {
+					svc, ns = cfg.Target.ServiceName, cfg.Target.NamespaceName
+				}
+				if z := c.ZLog(); z != nil {
+					z.Warnf("connector periodic endpoint refresh failed for %s.%s: %s", svc, ns, err.Error())
+				} else {
+					log.Printf("connector periodic endpoint refresh failed for %s.%s: %s", svc, ns, err.Error())
+				}
+			}
+		}
 	}
 }
 
