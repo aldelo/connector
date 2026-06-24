@@ -368,6 +368,15 @@ type Client struct {
 	// indicate if after dial, client will wait for target service health probe success before continuing to allow rpc
 	WaitForServerReady bool
 
+	// DebugCircuitBreaker gates the per-call circuit-breaker trace logging
+	// (the INFO "In - ... Handler", "Run ... Action", cache create/hit lines)
+	// emitted on every unary/stream RPC by the CB handlers. It defaults to
+	// false (silent) because those lines are on the hot path: a single
+	// starved task produced ~380K INFO lines in 20 minutes, burning CPU.
+	// Set true only for transient debugging. ERROR/WARN logging is never
+	// gated by this flag and remains unconditional.
+	DebugCircuitBreaker bool
+
 	// P2-14: ConnectionCloseDelay controls how long setConnection waits
 	// before closing a replaced gRPC connection, allowing in-flight RPCs
 	// to drain. Zero or negative falls back to the 100ms default
@@ -1232,6 +1241,24 @@ func (c *Client) logWarn(msg string) {
 	} else {
 		log.Printf("%s", msg)
 	}
+}
+
+// cbTraceSink is the indirection cbTrace dispatches to once the
+// DebugCircuitBreaker gate passes. It defaults to logLine (the real INFO
+// sink); tests swap it to observe the gating decision deterministically,
+// since logLine's underlying ZapLog sink is a no-op when disabled and
+// otherwise writes to its own console and is not unit-capturable.
+var cbTraceSink = (*Client).logLine
+
+// cbTrace gates per-call circuit-breaker trace logging behind
+// DebugCircuitBreaker. It is the single seam through which every hot-path
+// CB INFO line flows, so the ~380K-lines-in-20-min incident is silenced
+// by default (zero-value flag) without touching ERROR/WARN visibility.
+func (c *Client) cbTrace(msg string) {
+	if c == nil || !c.DebugCircuitBreaker {
+		return
+	}
+	cbTraceSink(c, msg)
 }
 
 // PreloadConfigData will load the config data before Dial()
@@ -3149,12 +3176,12 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 	// use a literal-string fast-path so `%` in messages can't be misread as
 	// format specifiers.
 
-	c.logLine("In - Unary Circuit Breaker Handler: " + method)
+	c.cbTrace("In - Unary Circuit Breaker Handler: " + method)
 
 	cb := c.getCircuitBreaker(method)
 
 	if cb == nil {
-		c.logLine("... Creating Circuit Breaker for: " + method)
+		c.cbTrace("... Creating Circuit Breaker for: " + method)
 
 		z := &data.ZapLog{
 			DisableLogger:   false,
@@ -3181,20 +3208,20 @@ func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, 
 
 		c.setCircuitBreaker(method, cb)
 
-		c.logLine("... Circuit Breaker Created for: " + method)
+		c.cbTrace("... Circuit Breaker Created for: " + method)
 	} else {
-		c.logLine("... Using Cached Circuit Breaker Command: " + method)
+		c.cbTrace("... Using Cached Circuit Breaker Command: " + method)
 	}
 
 	_, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		c.logLine("Run Circuit Breaker Action for: " + method + "...")
+		c.cbTrace("Run Circuit Breaker Action for: " + method + "...")
 
 		err = invoker(ctx, method, req, reply, cc, opts...)
 
 		if err != nil {
 			c.logErr("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
 		} else {
-			c.logLine("... Circuit Breaker Action for " + method + " Invoked")
+			c.cbTrace("... Circuit Breaker Action for " + method + " Invoked")
 		}
 		return nil, err
 
@@ -3240,12 +3267,12 @@ func (c *Client) streamCircuitBreakerHandler(
 	// unaryCircuitBreakerHandler — closures replaced with *Client methods
 	// to eliminate per-stream allocations (~600-900 B + 8-12 allocs).
 
-	c.logLine("In - Stream Circuit Breaker Handler: " + method)
+	c.cbTrace("In - Stream Circuit Breaker Handler: " + method)
 
 	cb := c.getCircuitBreaker(method)
 
 	if cb == nil {
-		c.logLine("... Creating Circuit Breaker for: " + method)
+		c.cbTrace("... Creating Circuit Breaker for: " + method)
 
 		z := &data.ZapLog{
 			DisableLogger:   false,
@@ -3273,20 +3300,20 @@ func (c *Client) streamCircuitBreakerHandler(
 
 		c.setCircuitBreaker(method, cb)
 
-		c.logLine("... Circuit Breaker Created for: " + method)
+		c.cbTrace("... Circuit Breaker Created for: " + method)
 	} else {
-		c.logLine("... Using Cached Circuit Breaker Command: " + method)
+		c.cbTrace("... Using Cached Circuit Breaker Command: " + method)
 	}
 
 	gres, gerr := cb.Exec(true, func(dataIn interface{}, ctx1 ...context.Context) (dataOut interface{}, err error) {
-		c.logLine("Run Circuit Breaker Action for: " + method + "...")
+		c.cbTrace("Run Circuit Breaker Action for: " + method + "...")
 
 		dataOut, err = streamer(ctx, desc, cc, method, opts...)
 
 		if err != nil {
 			c.logErr("!!! Circuit Breaker Action for " + method + " Failed: " + err.Error() + " !!!")
 		} else {
-			c.logLine("... Circuit Breaker Action for " + method + " Invoked")
+			c.cbTrace("... Circuit Breaker Action for " + method + " Invoked")
 		}
 		return dataOut, err
 	}, func(dataIn interface{}, errIn error, ctx1 ...context.Context) (dataOut interface{}, err error) {
