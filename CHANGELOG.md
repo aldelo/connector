@@ -37,18 +37,25 @@ below (a forced refresh now reconciles removed endpoints out, with grace).
     `Cache.ReconcileServiceEndpoints`, which is **version-scoped** and applies
     **per-endpoint grace/hysteresis**:
     - **Version-scoped** — the process-global endpoint cache is keyed by
-      `service.namespace` *without* version, and API discovery is version-filtered
-      (`INSTANCE_VERSION`). Reconcile only touches entries of the version being
-      refreshed, so two in-process clients pinning different versions of the same
-      service no longer wipe each other's entries.
+      `service.namespace` *without* version, and API discovery can be version-filtered
+      (`INSTANCE_VERSION`). A **version-filtered** reconcile (non-empty
+      `instance_version`) touches only that version's entries, so two in-process
+      clients pinning different versions of the same service no longer wipe each
+      other's entries. An **unfiltered** reconcile (empty `instance_version`, the
+      default) is authoritative for the **whole service** and prunes/refreshes across
+      all versions — so a default-config client still prunes removed instances even
+      though servers register a concrete `INSTANCE_VERSION`.
     - **Grace/hysteresis** — an endpoint absent from a discovery result is dropped
       only after `SdEndpointReconcileGraceCycles` (default **3**) consecutive
       absences. A transient partial result (health-check flap, Cloud Map eventual
       consistency, or a result truncated at `SdInstanceMaxResult`) therefore does
       **not** shrink the resolver on a single blip; a genuinely removed instance
       still leaves within ~grace × refresh (~90s at defaults) — well under the old
-      300s and independent of SNS delivery. A rotating >`SdInstanceMaxResult` fleet
-      accumulates to its full set instead of churning.
+      300s and independent of SNS delivery. In-grace (kept-but-absent) endpoints have
+      their `CacheExpire` refreshed each cycle so a short `SdEndpointCacheExpires`
+      cannot TTL-prune them before grace elapses. A rotating >`SdInstanceMaxResult`
+      fleet accumulates toward its full set instead of churning (raise
+      `SdInstanceMaxResult` above the fleet size for full coverage).
   - The resolver is never actively pushed an empty address set: an empty/failed
     discovery fails fast and the resolver is left at last-known-good (frozen), not
     zeroed — so this change can shrink capacity transiently but cannot cause a

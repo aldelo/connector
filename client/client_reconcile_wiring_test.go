@@ -148,6 +148,45 @@ func TestWiring_TransientPartialDoesNotShrinkResolverUntilGrace(t *testing.T) {
 	}
 }
 
+// DEFAULT config: client scope version="" (instance_version unset) but instances registered with
+// a real version (v1.0.0). The removed instance must still prune after grace — i.e. an unfiltered
+// discovery is authoritative for the whole service. This is the end-to-end guard for the P1 the
+// re-review found (all prior wiring tests used empty-version instances and hid it).
+func TestWiring_VersionedInstancesEmptyScopePruneAfterGrace(t *testing.T) {
+	ClearEndpointCache()
+	calls := 0
+	full := []*registry.InstanceInfo{iinfo("10.0.0.1", 8080, "v1.0.0"), iinfo("10.0.0.2", 8080, "v1.0.0")}
+	only1 := []*registry.InstanceInfo{iinfo("10.0.0.1", 8080, "v1.0.0")}
+	current := full
+	orig := discoverInstancesFn
+	discoverInstancesFn = func(sd *cloudmap.CloudMap, s, n string, h bool, a map[string]string, m *int64, to ...time.Duration) ([]*registry.InstanceInfo, error) {
+		calls++
+		return current, nil
+	}
+	defer func() { discoverInstancesFn = orig }()
+
+	c := newApiClient()
+	exp := time.Now().Add(5 * time.Minute)
+	force := func() {
+		if err := c.setApiDiscoveredIpPorts(exp, "svc", "ns", "", 100, 0, true, 3); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+	}
+
+	force() // {1,2}
+	current = only1
+	force()
+	force()
+	force() // 3 consecutive absences of .2 at grace=3
+	got := hostSet(c.endpointsSnapshot())
+	if got["10.0.0.2"] {
+		t.Fatalf("default-scope client must prune a removed versioned instance after grace; got %v", got)
+	}
+	if len(got) != 1 || !got["10.0.0.1"] {
+		t.Fatalf("expected only 10.0.0.1, got %v", got)
+	}
+}
+
 func TestWiring_EmptyDiscoveryDoesNotShrinkResolver(t *testing.T) {
 	ClearEndpointCache()
 	calls := 0

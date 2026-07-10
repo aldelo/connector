@@ -261,6 +261,10 @@ func (c *Cache) ReconcileServiceEndpoints(serviceName string, version string, fr
 	result := make([]*serviceEndpoint, 0, len(existing)+len(freshOrder))
 	placed := make(map[string]bool, len(existing)+len(freshOrder))
 	pruned := 0
+	// Refresh in-grace (kept-but-absent) endpoints to the current batch's expiry so a short
+	// SdEndpointCacheExpires can't TTL-prune them before grace elapses (grace is the sole prune
+	// path). All fresh endpoints in a cycle share the discovery-computed expiry.
+	keepExpire := freshOrder[0].CacheExpire
 
 	for _, e := range existing {
 		if e == nil {
@@ -273,7 +277,10 @@ func (c *Cache) ReconcileServiceEndpoints(serviceName string, version string, fr
 		eVer := strings.ToLower(strings.TrimSpace(e.Version))
 		k := endpointKey(host, e.Port, eVer)
 
-		if eVer != versionNorm { // different version scope -> preserve as-is
+		// Preserve-as-is ONLY for a specific (non-empty) scope that differs — that is the
+		// version-thrash guard. An EMPTY scope means the discovery was unfiltered and is
+		// authoritative for the WHOLE service, so every version is in scope (prune/grace absent).
+		if versionNorm != "" && eVer != versionNorm {
 			result = append(result, e)
 			placed[k] = true
 			continue
@@ -283,13 +290,14 @@ func (c *Cache) ReconcileServiceEndpoints(serviceName string, version string, fr
 			placed[k] = true
 			continue
 		}
-		// absent from fresh within this version scope -> grace
+		// absent within scope -> grace
 		e.missingCount++
 		if e.missingCount >= graceCycles {
 			pruned++
 			continue // dropped
 		}
-		result = append(result, e) // kept during grace (expiry unchanged)
+		e.CacheExpire = keepExpire // refresh so TTL doesn't pre-empt grace
+		result = append(result, e)
 		placed[k] = true
 	}
 

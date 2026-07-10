@@ -18,6 +18,7 @@ package client
 
 import (
 	"testing"
+	"time"
 )
 
 // ReconcileServiceEndpoints reconciles the cached set for a service to the freshly discovered
@@ -162,6 +163,54 @@ func TestReconcile_EmptyServiceNameIsNoop(t *testing.T) {
 	c.ReconcileServiceEndpoints("   ", "v1", []*serviceEndpoint{ep("10.0.0.1", 8080, "v1", live())}, 1)
 	if got := c.GetServiceEndpoints("   "); len(got) != 0 {
 		t.Fatalf("empty service name must be a no-op, got %d", len(got))
+	}
+}
+
+// DEFAULT-CONFIG case: the client filters with an empty version scope (instance_version unset),
+// but the servers register a real version (e.g. v1.0.0). An unfiltered ("") discovery is
+// authoritative for the WHOLE service, so a removed instance must still prune after grace —
+// regardless of the version its endpoints carry. (Regression guard for the empty-scope bug.)
+func TestReconcile_EmptyScopePrunesVersionedInstances(t *testing.T) {
+	c := newCache()
+	c.AddServiceEndpoints("svc-a", []*serviceEndpoint{
+		ep("10.0.0.1", 8080, "v1.0.0", live()),
+		ep("10.0.0.2", 8080, "v1.0.0", live()),
+	})
+	// unfiltered discovery (scope "") returns only .1; both instances carry their real version.
+	for cycle := 1; cycle <= 3; cycle++ {
+		c.ReconcileServiceEndpoints("svc-a", "", []*serviceEndpoint{ep("10.0.0.1", 8080, "v1.0.0", live())}, 3)
+	}
+	got := hostSet(c.GetServiceEndpoints("svc-a"))
+	if got["10.0.0.2"] {
+		t.Fatalf("empty scope must prune a removed versioned instance after grace, still present: %v", got)
+	}
+	if len(got) != 1 || !got["10.0.0.1"] {
+		t.Fatalf("expected only 10.0.0.1 to survive, got %v", got)
+	}
+}
+
+// An in-grace (absent-but-kept) endpoint must have its CacheExpire refreshed to the fresh batch's
+// expiry, so a short SdEndpointCacheExpires cannot TTL-prune it before grace elapses.
+func TestReconcile_InGraceEndpointExpiryIsRefreshed(t *testing.T) {
+	c := newCache()
+	soon := time.Now().Add(40 * time.Millisecond) // A is about to expire
+	c.AddServiceEndpoints("svc-a", []*serviceEndpoint{
+		ep("10.0.0.1", 8080, "v1", live()),
+		ep("10.0.0.2", 8080, "v1", soon),
+	})
+	// .2 is absent this cycle (grace=3 keeps it); fresh batch carries a long expiry.
+	c.ReconcileServiceEndpoints("svc-a", "v1", []*serviceEndpoint{ep("10.0.0.1", 8080, "v1", live())}, 3)
+	var two *serviceEndpoint
+	for _, e := range c.GetServiceEndpoints("svc-a") {
+		if e.Host == "10.0.0.2" {
+			two = e
+		}
+	}
+	if two == nil {
+		t.Fatalf("in-grace endpoint 10.0.0.2 must be retained")
+	}
+	if !two.CacheExpire.After(time.Now().Add(30 * time.Minute)) {
+		t.Fatalf("in-grace endpoint's CacheExpire must be refreshed to the fresh batch expiry, got %v", two.CacheExpire)
 	}
 }
 

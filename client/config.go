@@ -410,6 +410,7 @@ func (c *config) Read() error {
 		"target.sd_endpoint_cache_expires", 300).Default(
 		"target.sd_instance_max_result", 100).Default(
 		"target.sd_endpoint_refresh_seconds", 0).Default(
+		"target.sd_endpoint_reconcile_grace_cycles", 0).Default(
 		"target.trace_use_xray", false).Default(
 		"target.zaplog_enabled", false).Default(
 		"target.zaplog_output_console", true).Default(
