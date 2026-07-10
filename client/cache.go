@@ -183,72 +183,134 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	c.serviceEndpoints[serviceName] = merged
 }
 
-// ReplaceServiceEndpoints reconciles the cached set for serviceName to EXACTLY the given
-// endpoints — additive AddServiceEndpoints keeps merging, so an instance removed from Cloud
-// Map would linger in cache (and keep being pushed to the resolver) until its TTL lapses.
-// Replace drops anything absent from the fresh discovery result, so a forced refresh prunes
-// dead endpoints and the client stops dialing them. Atomic: the swap happens under one lock.
+// endpointKey builds the identity key host:port|version used to match endpoints across cycles.
+func endpointKey(host string, port uint, version string) string {
+	return strings.ToLower(strings.TrimSpace(host)) + ":" + util.UintToStr(port) + "|" +
+		strings.ToLower(strings.TrimSpace(version))
+}
+
+// ReconcileServiceEndpoints reconciles the cached set for serviceName to the freshly discovered
+// set `fresh`, but scoped to a single `version` and with per-endpoint grace/hysteresis:
 //
-// An empty (or fully-invalid) endpoint set deletes the key. serviceName = lowercase of
+//   - Entries of a DIFFERENT version are preserved untouched. The cache is a process-global
+//     singleton keyed by service.namespace WITHOUT version, so a version-filtered discovery
+//     (INSTANCE_VERSION) from one client must not wipe another client's version.
+//   - An existing entry of THIS version that is absent from `fresh` is not dropped immediately;
+//     its missing-counter is incremented and it is kept until it has been absent for
+//     `graceCycles` consecutive reconciles. This absorbs a transient partial discovery result
+//     (health-check flap, Cloud Map eventual consistency, >MaxResults truncation) so the
+//     resolver is never shrunk on a single blip. A reappearing endpoint resets its counter.
+//   - Endpoints present in `fresh` are refreshed (counter reset).
+//
+// `graceCycles` < 1 is treated as 1 (drop-absent-immediately within scope). An empty/fully
+// invalid `fresh` is a no-op — the discovery caller fails fast on empty before reconciling, and
+// reconcile must never shrink on empty. Atomic under one lock. serviceName = lowercase of
 // servicename.namespacename.
-func (c *Cache) ReplaceServiceEndpoints(serviceName string, eps []*serviceEndpoint) {
+func (c *Cache) ReconcileServiceEndpoints(serviceName string, version string, fresh []*serviceEndpoint, graceCycles int) {
 	if c == nil {
 		return
 	}
 
-	serviceName = normalizeServiceName(serviceName) // normalize once up front
-	if serviceName == "" {                          // guard empty normalized name early
+	serviceName = normalizeServiceName(serviceName)
+	if serviceName == "" {
 		return
 	}
-
+	if graceCycles < 1 {
+		graceCycles = 1
+	}
+	versionNorm := strings.ToLower(strings.TrimSpace(version))
 	now := time.Now()
 
-	// sanitize + dedup incoming (same rules as AddServiceEndpoints): drop nil / empty host /
-	// zero port / already-expired, and collapse duplicate host:port|version.
-	seen := make(map[string]int, len(eps))
-	sanitized := make([]*serviceEndpoint, 0, len(eps))
-	for _, v := range eps {
+	// sanitize + dedup the fresh set (same rules as AddServiceEndpoints), keyed for matching.
+	freshByKey := make(map[string]*serviceEndpoint, len(fresh))
+	freshOrder := make([]*serviceEndpoint, 0, len(fresh))
+	for _, v := range fresh {
 		if v == nil {
 			continue
 		}
 		cp := *v
 		cp.Host = strings.ToLower(strings.TrimSpace(cp.Host))
 		cp.Version = strings.ToLower(strings.TrimSpace(cp.Version))
-		if cp.Host == "" || cp.Port == 0 { // drop invalid
+		if cp.Host == "" || cp.Port == 0 {
 			continue
 		}
-		if !cp.CacheExpire.IsZero() && cp.CacheExpire.Before(now) { // drop expired
+		if !cp.CacheExpire.IsZero() && cp.CacheExpire.Before(now) {
 			continue
 		}
-		k := cp.Host + ":" + util.UintToStr(cp.Port) + "|" + cp.Version
-		if idx, exists := seen[k]; exists {
-			sanitized[idx] = &cp // last one wins (freshest attributes)
+		cp.missingCount = 0
+		k := endpointKey(cp.Host, cp.Port, cp.Version)
+		if _, exists := freshByKey[k]; exists {
+			freshByKey[k] = &cp // last one wins
 			continue
 		}
-		seen[k] = len(sanitized)
-		sanitized = append(sanitized, &cp)
+		freshByKey[k] = &cp
+		freshOrder = append(freshOrder, &cp)
+	}
+
+	if len(freshByKey) == 0 { // never shrink on an empty/invalid fresh result
+		return
 	}
 
 	c._mu.Lock()
 	defer c._mu.Unlock()
-
-	if len(sanitized) == 0 { // reconciled to nothing -> drop the key, don't leave a stale slice
-		if c.serviceEndpoints != nil {
-			delete(c.serviceEndpoints, serviceName)
-		}
-		if !c.DisableLogging {
-			log.Println("Replaced Service Endpoints for " + serviceName + ": None (key dropped)")
-		}
-		return
-	}
-
 	if c.serviceEndpoints == nil {
 		c.serviceEndpoints = make(map[string][]*serviceEndpoint)
 	}
-	c.serviceEndpoints[serviceName] = sanitized
+
+	existing := c.serviceEndpoints[serviceName]
+	result := make([]*serviceEndpoint, 0, len(existing)+len(freshOrder))
+	placed := make(map[string]bool, len(existing)+len(freshOrder))
+	pruned := 0
+
+	for _, e := range existing {
+		if e == nil {
+			continue
+		}
+		host := strings.ToLower(strings.TrimSpace(e.Host))
+		if host == "" || e.Port == 0 {
+			continue // drop unusable
+		}
+		eVer := strings.ToLower(strings.TrimSpace(e.Version))
+		k := endpointKey(host, e.Port, eVer)
+
+		if eVer != versionNorm { // different version scope -> preserve as-is
+			result = append(result, e)
+			placed[k] = true
+			continue
+		}
+		if f, ok := freshByKey[k]; ok { // still present -> take the fresh copy (counter reset)
+			result = append(result, f)
+			placed[k] = true
+			continue
+		}
+		// absent from fresh within this version scope -> grace
+		e.missingCount++
+		if e.missingCount >= graceCycles {
+			pruned++
+			continue // dropped
+		}
+		result = append(result, e) // kept during grace (expiry unchanged)
+		placed[k] = true
+	}
+
+	for _, f := range freshOrder { // brand-new endpoints not already carried over
+		k := endpointKey(f.Host, f.Port, f.Version)
+		if placed[k] {
+			continue
+		}
+		result = append(result, f)
+		placed[k] = true
+	}
+
+	if len(result) == 0 {
+		delete(c.serviceEndpoints, serviceName)
+	} else {
+		c.serviceEndpoints[serviceName] = result
+	}
 
 	if !c.DisableLogging {
-		log.Println("Replaced Service Endpoints for " + serviceName + ": " + util.Itoa(len(sanitized)) + " endpoint(s)")
+		log.Println("Reconciled Service Endpoints for " + serviceName + " (version '" + versionNorm +
+			"'): " + util.Itoa(len(result)) + " kept, " + util.Itoa(pruned) + " pruned")
 	}
 }
 
