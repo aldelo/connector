@@ -56,11 +56,19 @@ type targetData struct {
 	// re-dial, no in-flight RPC drop). 0/unset => default 30s. There is intentionally no
 	// off-switch: the refresh is the safety net behind the SNS notifier, which can die
 	// silently. Set a larger value to slow it; add a dedicated bool later if a kill is needed.
-	SdEndpointRefreshSeconds uint   `mapstructure:"sd_endpoint_refresh_seconds"`
-	TraceUseXRay             bool   `mapstructure:"trace_use_xray"`
-	ZapLogEnabled            bool   `mapstructure:"zaplog_enabled"`
-	ZapLogOutputConsole      bool   `mapstructure:"zaplog_output_console"`
-	RestTargetCACertFiles    string `mapstructure:"rest_target_ca_cert_files"`
+	SdEndpointRefreshSeconds uint `mapstructure:"sd_endpoint_refresh_seconds"`
+	// SdEndpointReconcileGraceCycles is the per-endpoint hysteresis used when a forced refresh
+	// reconciles the discovered set into the cache/resolver: an endpoint absent from discovery
+	// is dropped only after it has been missing this many consecutive forced refreshes. This
+	// absorbs a transient partial discovery result (health-check flap, Cloud Map eventual
+	// consistency, >SdInstanceMaxResult truncation) so the round-robin set is never shrunk on a
+	// single blip; a genuinely removed instance still leaves within grace*refresh (~90s at
+	// defaults). 0/unset => default 3. 1 => reconcile-immediately (no grace).
+	SdEndpointReconcileGraceCycles uint   `mapstructure:"sd_endpoint_reconcile_grace_cycles"`
+	TraceUseXRay                   bool   `mapstructure:"trace_use_xray"`
+	ZapLogEnabled                  bool   `mapstructure:"zaplog_enabled"`
+	ZapLogOutputConsole            bool   `mapstructure:"zaplog_output_console"`
+	RestTargetCACertFiles          string `mapstructure:"rest_target_ca_cert_files"`
 }
 
 type queuesData struct {
@@ -175,6 +183,13 @@ func (c *config) SetSdEndpointRefreshSeconds(i uint) {
 	if c._v != nil {
 		c._v.Set("target.sd_endpoint_refresh_seconds", i)
 		c.Target.SdEndpointRefreshSeconds = i
+	}
+}
+
+func (c *config) SetSdEndpointReconcileGraceCycles(i uint) {
+	if c._v != nil {
+		c._v.Set("target.sd_endpoint_reconcile_grace_cycles", i)
+		c.Target.SdEndpointReconcileGraceCycles = i
 	}
 }
 
@@ -395,6 +410,7 @@ func (c *config) Read() error {
 		"target.sd_endpoint_cache_expires", 300).Default(
 		"target.sd_instance_max_result", 100).Default(
 		"target.sd_endpoint_refresh_seconds", 0).Default(
+		"target.sd_endpoint_reconcile_grace_cycles", 0).Default(
 		"target.trace_use_xray", false).Default(
 		"target.zaplog_enabled", false).Default(
 		"target.zaplog_output_console", true).Default(

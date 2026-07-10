@@ -72,6 +72,7 @@ const (
 	defaultNotifierReconnectDelay = 5 * time.Second
 	maxTCPPort                    = 65535
 	defaultMaxDiscoveryResults    = 100
+	defaultReconcileGraceCycles   = 3
 	connectionCloseDelay          = 100 * time.Millisecond
 	// P2-13: max time Dial() will wait for a stale notifier reconnect
 	// goroutine from a prior lifecycle to drain. Should be longer than
@@ -86,6 +87,14 @@ const (
 var (
 	_cache  *Cache
 	cacheMu sync.RWMutex
+)
+
+// Service-discovery seams — indirection so the setApi/setDns wiring (forced-refresh bypass +
+// reconcile) is exercisable in unit tests with a fake discoverer, without an AWS Cloud Map
+// client. Production code path is unchanged (these hold the real registry functions).
+var (
+	discoverInstancesFn = registry.DiscoverInstances
+	discoverDnsIpsFn    = registry.DiscoverDnsIps
 )
 
 func init() {
@@ -117,6 +126,18 @@ func cacheAddServiceEndpoints(key string, eps []*serviceEndpoint) {
 	defer cacheMu.Unlock()
 	if _cache != nil {
 		_cache.AddServiceEndpoints(key, eps)
+	}
+}
+
+// cacheReconcileServiceEndpoints reconciles the cached set for key to the freshly discovered
+// eps within a single version scope, with per-endpoint grace — used on a forced/fresh discovery
+// so deregistered instances are pruned (after grace) rather than merged-and-kept forever, while
+// a transient partial result does not shrink the set. See Cache.ReconcileServiceEndpoints.
+func cacheReconcileServiceEndpoints(key, version string, eps []*serviceEndpoint, graceCycles int) {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if _cache != nil {
+		_cache.ReconcileServiceEndpoints(key, version, eps, graceCycles)
 	}
 }
 
@@ -790,6 +811,14 @@ type serviceEndpoint struct {
 	Version    string
 
 	CacheExpire time.Time
+
+	// missingCount is cache-internal hysteresis bookkeeping for ReconcileServiceEndpoints:
+	// the number of consecutive forced discoveries in which this endpoint was absent. It is
+	// dropped only after missingCount reaches the grace threshold, so a transient partial
+	// discovery result (health-check flap, Cloud Map eventual consistency, >MaxResults
+	// truncation) does not immediately shrink the resolver. Reset to 0 whenever the endpoint
+	// reappears. Not part of any external contract.
+	missingCount int
 }
 
 // NewClient constructs a Client with only AppName / ConfigFileName /
@@ -2833,6 +2862,11 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 
 	cacheExpires := time.Now().Add(time.Duration(cacheExpSeconds) * time.Second)
 
+	graceCycles := int(cfg.Target.SdEndpointReconcileGraceCycles)
+	if graceCycles <= 0 {
+		graceCycles = defaultReconcileGraceCycles
+	}
+
 	var err error
 	switch cfg.Target.ServiceDiscoveryType {
 	case "direct":
@@ -2841,10 +2875,10 @@ func (c *Client) discoverEndpoints(forceRefresh bool) error {
 		fallthrough
 	case "a":
 		err = c.setDnsDiscoveredIpPorts(cacheExpires, cfg.Target.ServiceDiscoveryType == "srv", cfg.Target.ServiceName,
-			cfg.Target.NamespaceName, cfg.Target.InstancePort, forceRefresh)
+			cfg.Target.NamespaceName, cfg.Target.InstancePort, forceRefresh, graceCycles)
 	case "api":
 		err = c.setApiDiscoveredIpPorts(cacheExpires, cfg.Target.ServiceName, cfg.Target.NamespaceName, cfg.Target.InstanceVersion,
-			int64(cfg.Target.SdInstanceMaxResult), cfg.Target.SdTimeout, forceRefresh)
+			int64(cfg.Target.SdInstanceMaxResult), cfg.Target.SdTimeout, forceRefresh, graceCycles)
 	default:
 		err = fmt.Errorf("unexpected service discovery type: %s", cfg.Target.ServiceDiscoveryType)
 	}
@@ -2897,7 +2931,7 @@ func (c *Client) setDirectConnectEndpoint(cacheExpires time.Time, directIpPort s
 	return nil
 }
 
-func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, serviceName string, namespaceName string, instancePort uint, forceRefresh bool) error {
+func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, serviceName string, namespaceName string, instancePort uint, forceRefresh bool, graceCycles int) error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
@@ -2929,25 +2963,30 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	//
 	// check for existing cache
 	//
-	found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, "", forceRefresh))
-	if len(found) > 0 {
-		c.setEndpoints(found)
-		if z != nil {
-			z.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
-		} else {
-			log.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
+	// A forced refresh must actually re-query DNS/Cloud Map — serving the still-warm cache
+	// here is why a deregistered instance kept being dialed for up to the cache TTL. Only take
+	// the cache short-circuit when NOT forcing (normal TTL-served read).
+	if !forceRefresh {
+		found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, "", false))
+		if len(found) > 0 {
+			c.setEndpoints(found)
+			if z != nil {
+				z.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
+			} else {
+				log.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
+			}
+			for _, v := range c.endpointsSnapshot() {
+				printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
+			}
+			return nil
 		}
-		for _, v := range c.endpointsSnapshot() {
-			printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
-		}
-		return nil
 	}
 
 	//
 	// acquire dns ip port from service discovery
 	//
 	log.Printf("Start DiscoverDnsIps %s.%s SRV=%v", serviceName, namespaceName, srv)
-	ipList, err := registry.DiscoverDnsIps(serviceName+"."+namespaceName, srv)
+	ipList, err := discoverDnsIpsFn(serviceName+"."+namespaceName, srv)
 	if err != nil {
 		return fmt.Errorf("service discovery by DNS failed: %w", err)
 	}
@@ -3026,13 +3065,17 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 		return fmt.Errorf("Service Discovery By DNS returned no endpoints for %s.%s (srv=%v)", serviceName, namespaceName, srv)
 	}
 
-	c.setEndpoints(live)
-	cacheAddServiceEndpoints(serviceName+"."+namespaceName, live)
+	// Reconcile with grace + version scope, then drive the resolver from the reconciled set.
+	// DNS discovery is not version-filtered, so the scope is the empty version (""), matching
+	// how these endpoints are cached. See setApiDiscoveredIpPorts for the rationale.
+	key := serviceName + "." + namespaceName
+	cacheReconcileServiceEndpoints(key, "", live, graceCycles)
+	c.setEndpoints(pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(key, "", false)))
 
 	return nil
 }
 
-func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint, forceRefresh bool) error {
+func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName string, namespaceName string, version string, maxCount int64, timeoutSeconds uint, forceRefresh bool, graceCycles int) error {
 	if c == nil {
 		return fmt.Errorf("Client Object Nil")
 	}
@@ -3073,14 +3116,19 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	//
 	// check for existing cache
 	//
-	found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, version, forceRefresh))
-	if len(found) > 0 {
-		c.setEndpoints(found)
-		printf("%s", "Using API Discovered Cache Hosts: (Service) "+serviceName+"."+namespaceName)
-		for _, v := range c.endpointsSnapshot() {
-			printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
+	// A forced refresh must actually re-query Cloud Map — serving the still-warm cache here
+	// is why a deregistered instance kept being dialed for up to the cache TTL. Only take the
+	// cache short-circuit when NOT forcing (normal TTL-served read).
+	if !forceRefresh {
+		found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, version, false))
+		if len(found) > 0 {
+			c.setEndpoints(found)
+			printf("%s", "Using API Discovered Cache Hosts: (Service) "+serviceName+"."+namespaceName)
+			for _, v := range c.endpointsSnapshot() {
+				printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
+			}
+			return nil
 		}
-		return nil
 	}
 
 	//
@@ -3103,7 +3151,7 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	}
 
 	log.Printf("Start DiscoverInstances %s.%s attr=%v count=%d", serviceName, namespaceName, customAttr, maxCount)
-	instanceList, err := registry.DiscoverInstances(sd, serviceName, namespaceName, true, customAttr, &maxCount, timeoutDuration...)
+	instanceList, err := discoverInstancesFn(sd, serviceName, namespaceName, true, customAttr, &maxCount, timeoutDuration...)
 	if err != nil {
 		return fmt.Errorf("service discovery by API failed: %w", err)
 	}
@@ -3143,8 +3191,15 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 		return fmt.Errorf("Service Discovery By API returned no endpoints for %s.%s (version=%s)", serviceName, namespaceName, version)
 	}
 
-	c.setEndpoints(live)
-	cacheAddServiceEndpoints(serviceName+"."+namespaceName, live)
+	// Reconcile (not blind merge, not blind replace): a fresh discovery is the authoritative
+	// fleet snapshot for THIS version, so drop instances it no longer contains — but only after
+	// grace, so a transient partial result (health flap / eventual consistency / >maxCount
+	// truncation) doesn't shrink the resolver. Version-scoped so a version-filtered result never
+	// wipes another version's entries on the process-global cache. Then drive the resolver from
+	// the reconciled set (fresh + still-in-grace), never from the raw `live` alone.
+	key := serviceName + "." + namespaceName
+	cacheReconcileServiceEndpoints(key, version, live, graceCycles)
+	c.setEndpoints(pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(key, version, false)))
 
 	return nil
 }

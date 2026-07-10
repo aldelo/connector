@@ -13,6 +13,79 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
+## [v1.8.13] — 2026-07-10
+
+Reliability fix for client-side service discovery. No exported-type/signature
+change for consumers; the observable-contract change is intentional and documented
+below (a forced refresh now reconciles removed endpoints out, with grace).
+
+**`go build/vet ./...` clean, `gofmt` clean, and `go test ./client/... -race` all-pass
+under Go 1.26.4** (excluding the two pre-existing env-flaky tests `TestClient_Dial` and
+`TestCL_F5_*SurvivesPanicHandler`, which fail identically on `master` — tracked in #52).
+Taken through three rounds of blind + contrarian review to a zero-P0/P1/P2 verdict.
+
+### Fixed
+
+- **Client kept dialing endpoints removed from Cloud Map (stale until cache TTL).**
+  A forced endpoint refresh did not actually re-query service discovery: the
+  `forceRefresh` flag was passed only as the cache's `ignoreExpired` argument, so a
+  still-warm cache short-circuited the Cloud Map / DNS query
+  (`setApiDiscoveredIpPorts`, `setDnsDiscoveredIpPorts`). Compounding this,
+  discovery results were *merged* into the cache (`AddServiceEndpoints`), never
+  pruned — so an instance deregistered from Cloud Map lingered and was re-pushed
+  into the live round-robin resolver every refresh, up to `SdEndpointCacheExpires`
+  (default 300s) or until an SNS "offline" push arrived. Clients dialing the dead IP
+  saw `connection refused` / timeouts.
+  - Forced refresh now **bypasses the cache short-circuit** and re-queries service
+    discovery; the non-forced (TTL-served) read path is unchanged.
+  - A fresh discovery is now **reconciled** into the cache and resolver via the new
+    `Cache.ReconcileServiceEndpoints`, which is **version-scoped** and applies
+    **per-endpoint grace/hysteresis**:
+    - **Version-scoped** — the process-global endpoint cache is keyed by
+      `service.namespace` *without* version, and API discovery can be version-filtered
+      (`INSTANCE_VERSION`). A **version-filtered** reconcile (non-empty
+      `instance_version`) touches only that version's entries, so two in-process
+      clients pinning different versions of the same service no longer wipe each
+      other's entries. An **unfiltered** reconcile (empty `instance_version`, the
+      default) is authoritative for the **whole service** and prunes/refreshes across
+      all versions — so a default-config client still prunes removed instances even
+      though servers register a concrete `INSTANCE_VERSION`.
+    - **Grace/hysteresis** — an endpoint absent from a discovery result is dropped
+      only after `SdEndpointReconcileGraceCycles` (default **3**) consecutive
+      absences. A transient partial result (health-check flap, Cloud Map eventual
+      consistency, or a result truncated at `SdInstanceMaxResult`) therefore does
+      **not** shrink the resolver on a single blip; a genuinely removed instance
+      still leaves within ~grace × refresh (~90s at defaults) — well under the old
+      300s and independent of SNS delivery. In-grace (kept-but-absent) endpoints have
+      their `CacheExpire` refreshed each cycle so a short `SdEndpointCacheExpires`
+      cannot TTL-prune them before grace elapses. A rotating >`SdInstanceMaxResult`
+      fleet accumulates toward its full set instead of churning (raise
+      `SdInstanceMaxResult` above the fleet size for full coverage).
+  - The resolver is never actively pushed an empty address set: an empty/failed
+    discovery fails fast and the resolver is left at last-known-good (frozen), not
+    zeroed — so this change can shrink capacity transiently but cannot cause a
+    zero-endpoint outage.
+  - New config `SdEndpointReconcileGraceCycles` (`sd_endpoint_reconcile_grace_cycles`;
+    default 3, `1` = reconcile-immediately). New `Cache.ReconcileServiceEndpoints`
+    plus wiring integration tests (`setApiDiscoveredIpPorts` driven through a fake
+    discoverer) covering forced-bypass, non-forced-cache-serve, transient-partial
+    retention, and empty-result no-shrink. Additive `AddServiceEndpoints` behavior is
+    unchanged for all other callers.
+
+### Notes / trade-offs
+
+- Forced refresh now issues a real `DiscoverInstances`/DNS query on every periodic
+  tick (`SdEndpointRefreshSeconds`, default 30s) for load-balanced clients, instead
+  of being cache-served for `SdEndpointCacheExpires`. This raises discovery-call
+  volume (≈10× at defaults; `DiscoverInstances` is data-plane, not billed). Raise
+  `SdEndpointRefreshSeconds` to reduce it. `SdEndpointCacheExpires` no longer rate-
+  limits forced refreshes.
+- The periodic refresh (and therefore the ~30s prune) applies only to clients with
+  `UseLoadBalancer=true`; other clients still force-refresh at dial time only.
+- Scale-to-zero (last instance removed) is not pruned by reconcile — an empty
+  discovery fails fast to preserve last-known-good — and continues to rely on the SNS
+  offline push for targeted removal.
+
 ## [v1.8.11] — 2026-06-14
 
 Security maintenance release. Raises the `go` directive to **1.26.4** (8 fixed Go

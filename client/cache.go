@@ -183,6 +183,145 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	c.serviceEndpoints[serviceName] = merged
 }
 
+// endpointKey builds the identity key host:port|version used to match endpoints across cycles.
+func endpointKey(host string, port uint, version string) string {
+	return strings.ToLower(strings.TrimSpace(host)) + ":" + util.UintToStr(port) + "|" +
+		strings.ToLower(strings.TrimSpace(version))
+}
+
+// ReconcileServiceEndpoints reconciles the cached set for serviceName to the freshly discovered
+// set `fresh`, but scoped to a single `version` and with per-endpoint grace/hysteresis:
+//
+//   - Entries of a DIFFERENT version are preserved untouched. The cache is a process-global
+//     singleton keyed by service.namespace WITHOUT version, so a version-filtered discovery
+//     (INSTANCE_VERSION) from one client must not wipe another client's version.
+//   - An existing entry of THIS version that is absent from `fresh` is not dropped immediately;
+//     its missing-counter is incremented and it is kept until it has been absent for
+//     `graceCycles` consecutive reconciles. This absorbs a transient partial discovery result
+//     (health-check flap, Cloud Map eventual consistency, >MaxResults truncation) so the
+//     resolver is never shrunk on a single blip. A reappearing endpoint resets its counter.
+//   - Endpoints present in `fresh` are refreshed (counter reset).
+//
+// `graceCycles` < 1 is treated as 1 (drop-absent-immediately within scope). An empty/fully
+// invalid `fresh` is a no-op — the discovery caller fails fast on empty before reconciling, and
+// reconcile must never shrink on empty. Atomic under one lock. serviceName = lowercase of
+// servicename.namespacename.
+func (c *Cache) ReconcileServiceEndpoints(serviceName string, version string, fresh []*serviceEndpoint, graceCycles int) {
+	if c == nil {
+		return
+	}
+
+	serviceName = normalizeServiceName(serviceName)
+	if serviceName == "" {
+		return
+	}
+	if graceCycles < 1 {
+		graceCycles = 1
+	}
+	versionNorm := strings.ToLower(strings.TrimSpace(version))
+	now := time.Now()
+
+	// sanitize + dedup the fresh set (same rules as AddServiceEndpoints), keyed for matching.
+	freshByKey := make(map[string]*serviceEndpoint, len(fresh))
+	freshOrder := make([]*serviceEndpoint, 0, len(fresh))
+	for _, v := range fresh {
+		if v == nil {
+			continue
+		}
+		cp := *v
+		cp.Host = strings.ToLower(strings.TrimSpace(cp.Host))
+		cp.Version = strings.ToLower(strings.TrimSpace(cp.Version))
+		if cp.Host == "" || cp.Port == 0 {
+			continue
+		}
+		if !cp.CacheExpire.IsZero() && cp.CacheExpire.Before(now) {
+			continue
+		}
+		cp.missingCount = 0
+		k := endpointKey(cp.Host, cp.Port, cp.Version)
+		if _, exists := freshByKey[k]; exists {
+			freshByKey[k] = &cp // last one wins
+			continue
+		}
+		freshByKey[k] = &cp
+		freshOrder = append(freshOrder, &cp)
+	}
+
+	if len(freshByKey) == 0 { // never shrink on an empty/invalid fresh result
+		return
+	}
+
+	c._mu.Lock()
+	defer c._mu.Unlock()
+	if c.serviceEndpoints == nil {
+		c.serviceEndpoints = make(map[string][]*serviceEndpoint)
+	}
+
+	existing := c.serviceEndpoints[serviceName]
+	result := make([]*serviceEndpoint, 0, len(existing)+len(freshOrder))
+	placed := make(map[string]bool, len(existing)+len(freshOrder))
+	pruned := 0
+	// Refresh in-grace (kept-but-absent) endpoints to the current batch's expiry so a short
+	// SdEndpointCacheExpires can't TTL-prune them before grace elapses (grace is the sole prune
+	// path). All fresh endpoints in a cycle share the discovery-computed expiry.
+	keepExpire := freshOrder[0].CacheExpire
+
+	for _, e := range existing {
+		if e == nil {
+			continue
+		}
+		host := strings.ToLower(strings.TrimSpace(e.Host))
+		if host == "" || e.Port == 0 {
+			continue // drop unusable
+		}
+		eVer := strings.ToLower(strings.TrimSpace(e.Version))
+		k := endpointKey(host, e.Port, eVer)
+
+		// Preserve-as-is ONLY for a specific (non-empty) scope that differs — that is the
+		// version-thrash guard. An EMPTY scope means the discovery was unfiltered and is
+		// authoritative for the WHOLE service, so every version is in scope (prune/grace absent).
+		if versionNorm != "" && eVer != versionNorm {
+			result = append(result, e)
+			placed[k] = true
+			continue
+		}
+		if f, ok := freshByKey[k]; ok { // still present -> take the fresh copy (counter reset)
+			result = append(result, f)
+			placed[k] = true
+			continue
+		}
+		// absent within scope -> grace
+		e.missingCount++
+		if e.missingCount >= graceCycles {
+			pruned++
+			continue // dropped
+		}
+		e.CacheExpire = keepExpire // refresh so TTL doesn't pre-empt grace
+		result = append(result, e)
+		placed[k] = true
+	}
+
+	for _, f := range freshOrder { // brand-new endpoints not already carried over
+		k := endpointKey(f.Host, f.Port, f.Version)
+		if placed[k] {
+			continue
+		}
+		result = append(result, f)
+		placed[k] = true
+	}
+
+	if len(result) == 0 {
+		delete(c.serviceEndpoints, serviceName)
+	} else {
+		c.serviceEndpoints[serviceName] = result
+	}
+
+	if !c.DisableLogging {
+		log.Println("Reconciled Service Endpoints for " + serviceName + " (version '" + versionNorm +
+			"'): " + util.Itoa(len(result)) + " kept, " + util.Itoa(pruned) + " pruned")
+	}
+}
+
 // PurgeServiceEndpoints will remove all endpoints associated with the given serviceName within map
 //
 // serviceName = lowercase of servicename.namespacename
