@@ -13,11 +13,16 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
-## [Unreleased]
+## [v1.8.13] — 2026-07-10
 
 Reliability fix for client-side service discovery. No exported-type/signature
 change for consumers; the observable-contract change is intentional and documented
 below (a forced refresh now reconciles removed endpoints out, with grace).
+
+**`go build/vet ./...` clean, `gofmt` clean, and `go test ./client/... -race` all-pass
+under Go 1.26.4** (excluding the two pre-existing env-flaky tests `TestClient_Dial` and
+`TestCL_F5_*SurvivesPanicHandler`, which fail identically on `master` — tracked in #52).
+Taken through three rounds of blind + contrarian review to a zero-P0/P1/P2 verdict.
 
 ### Fixed
 
