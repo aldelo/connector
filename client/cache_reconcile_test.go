@@ -189,6 +189,28 @@ func TestReconcile_EmptyScopePrunesVersionedInstances(t *testing.T) {
 	}
 }
 
+// Regression guard for the round-1 cross-version wipe: an empty-scope (whole-service) reconcile
+// whose fresh set contains MULTIPLE live versions must keep them ALL — it must only prune versions
+// genuinely absent from the fresh set, never evict a live other-version endpoint.
+func TestReconcile_EmptyScopeKeepsAllLiveVersions(t *testing.T) {
+	c := newCache()
+	c.AddServiceEndpoints("svc-a", []*serviceEndpoint{
+		ep("10.0.0.1", 8080, "v1.0.0", live()),
+		ep("10.0.0.9", 8080, "v2.0.0", live()),
+	})
+	// unfiltered discovery returns both live versions; both must be retained across cycles.
+	for cycle := 1; cycle <= 4; cycle++ {
+		c.ReconcileServiceEndpoints("svc-a", "", []*serviceEndpoint{
+			ep("10.0.0.1", 8080, "v1.0.0", live()),
+			ep("10.0.0.9", 8080, "v2.0.0", live()),
+		}, 3)
+	}
+	got := hostSet(c.GetServiceEndpoints("svc-a"))
+	if len(got) != 2 || !got["10.0.0.1"] || !got["10.0.0.9"] {
+		t.Fatalf("empty-scope reconcile must keep all live versions, got %v", got)
+	}
+}
+
 // An in-grace (absent-but-kept) endpoint must have its CacheExpire refreshed to the fresh batch's
 // expiry, so a short SdEndpointCacheExpires cannot TTL-prune it before grace elapses.
 func TestReconcile_InGraceEndpointExpiryIsRefreshed(t *testing.T) {
