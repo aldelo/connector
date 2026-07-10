@@ -120,6 +120,17 @@ func cacheAddServiceEndpoints(key string, eps []*serviceEndpoint) {
 	}
 }
 
+// cacheReplaceServiceEndpoints reconciles the cached set for key to exactly eps (adds new,
+// drops removed) — used on a forced/fresh discovery so deregistered instances are pruned
+// rather than merged-and-kept. See Cache.ReplaceServiceEndpoints.
+func cacheReplaceServiceEndpoints(key string, eps []*serviceEndpoint) {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if _cache != nil {
+		_cache.ReplaceServiceEndpoints(key, eps)
+	}
+}
+
 func cacheGetLiveServiceEndpoints(key, version string, force ...bool) []*serviceEndpoint {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
@@ -2929,18 +2940,23 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	//
 	// check for existing cache
 	//
-	found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, "", forceRefresh))
-	if len(found) > 0 {
-		c.setEndpoints(found)
-		if z != nil {
-			z.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
-		} else {
-			log.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
+	// A forced refresh must actually re-query DNS/Cloud Map — serving the still-warm cache
+	// here is why a deregistered instance kept being dialed for up to the cache TTL. Only take
+	// the cache short-circuit when NOT forcing (normal TTL-served read).
+	if !forceRefresh {
+		found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, "", false))
+		if len(found) > 0 {
+			c.setEndpoints(found)
+			if z != nil {
+				z.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
+			} else {
+				log.Printf("Using DNS Discovered Cache Hosts: (Service) %s.%s", serviceName, namespaceName)
+			}
+			for _, v := range c.endpointsSnapshot() {
+				printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
+			}
+			return nil
 		}
-		for _, v := range c.endpointsSnapshot() {
-			printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
-		}
-		return nil
 	}
 
 	//
@@ -3027,7 +3043,9 @@ func (c *Client) setDnsDiscoveredIpPorts(cacheExpires time.Time, srv bool, servi
 	}
 
 	c.setEndpoints(live)
-	cacheAddServiceEndpoints(serviceName+"."+namespaceName, live)
+	// Reconcile (replace), not merge: a fresh discovery is the authoritative fleet snapshot,
+	// so drop any cached instance it no longer contains instead of keeping it around.
+	cacheReplaceServiceEndpoints(serviceName+"."+namespaceName, live)
 
 	return nil
 }
@@ -3073,14 +3091,19 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	//
 	// check for existing cache
 	//
-	found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, version, forceRefresh))
-	if len(found) > 0 {
-		c.setEndpoints(found)
-		printf("%s", "Using API Discovered Cache Hosts: (Service) "+serviceName+"."+namespaceName)
-		for _, v := range c.endpointsSnapshot() {
-			printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
+	// A forced refresh must actually re-query Cloud Map — serving the still-warm cache here
+	// is why a deregistered instance kept being dialed for up to the cache TTL. Only take the
+	// cache short-circuit when NOT forcing (normal TTL-served read).
+	if !forceRefresh {
+		found := pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(serviceName+"."+namespaceName, version, false))
+		if len(found) > 0 {
+			c.setEndpoints(found)
+			printf("%s", "Using API Discovered Cache Hosts: (Service) "+serviceName+"."+namespaceName)
+			for _, v := range c.endpointsSnapshot() {
+				printf("%s", "   - "+v.Host+":"+util.UintToStr(v.Port)+", Cache Expires: "+util.FormatDateTime(v.CacheExpire))
+			}
+			return nil
 		}
-		return nil
 	}
 
 	//
@@ -3144,7 +3167,9 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	}
 
 	c.setEndpoints(live)
-	cacheAddServiceEndpoints(serviceName+"."+namespaceName, live)
+	// Reconcile (replace), not merge: a fresh discovery is the authoritative fleet snapshot,
+	// so drop any cached instance it no longer contains instead of keeping it around.
+	cacheReplaceServiceEndpoints(serviceName+"."+namespaceName, live)
 
 	return nil
 }

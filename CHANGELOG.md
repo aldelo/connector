@@ -13,6 +13,34 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
+## [Unreleased]
+
+Reliability fix for client-side service discovery. No exported-API change; the
+only observable-contract change is intentional and documented below (a forced
+refresh now prunes removed endpoints).
+
+### Fixed
+
+- **Client kept dialing endpoints removed from Cloud Map (stale until cache TTL).**
+  A forced endpoint refresh did not actually re-query service discovery: the
+  `forceRefresh` flag was passed only as the cache's `ignoreExpired` argument, so a
+  still-warm cache short-circuited the Cloud Map / DNS query
+  (`setApiDiscoveredIpPorts`, `setDnsDiscoveredIpPorts`). Compounding this,
+  discovery results were *merged* into the cache (`AddServiceEndpoints`), never
+  pruned — so an instance deregistered from Cloud Map lingered in cache and was
+  re-pushed into the live round-robin resolver every refresh, up to
+  `SdEndpointCacheExpires` (default 300s) or until an SNS "offline" push arrived.
+  Clients dialing the dead IP saw `connection refused` / timeouts.
+  - Forced refresh now **bypasses the cache short-circuit** and re-queries service
+    discovery; the non-forced (TTL-served) read path is unchanged.
+  - A fresh discovery is now **reconciled (replaced), not merged**, into the cache
+    via the new `Cache.ReplaceServiceEndpoints` — endpoints absent from the fresh
+    result are dropped. A removed instance now leaves the active resolver within
+    one refresh interval (default 30s), independent of SNS delivery.
+  - New `Cache.ReplaceServiceEndpoints(serviceName, eps)` (atomic wholesale
+    reconcile; empty set drops the key) with unit tests. Additive
+    `AddServiceEndpoints` behavior is unchanged for all other callers.
+
 ## [v1.8.11] — 2026-06-14
 
 Security maintenance release. Raises the `go` directive to **1.26.4** (8 fixed Go

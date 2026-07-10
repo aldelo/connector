@@ -183,6 +183,75 @@ func (c *Cache) AddServiceEndpoints(serviceName string, eps []*serviceEndpoint) 
 	c.serviceEndpoints[serviceName] = merged
 }
 
+// ReplaceServiceEndpoints reconciles the cached set for serviceName to EXACTLY the given
+// endpoints — additive AddServiceEndpoints keeps merging, so an instance removed from Cloud
+// Map would linger in cache (and keep being pushed to the resolver) until its TTL lapses.
+// Replace drops anything absent from the fresh discovery result, so a forced refresh prunes
+// dead endpoints and the client stops dialing them. Atomic: the swap happens under one lock.
+//
+// An empty (or fully-invalid) endpoint set deletes the key. serviceName = lowercase of
+// servicename.namespacename.
+func (c *Cache) ReplaceServiceEndpoints(serviceName string, eps []*serviceEndpoint) {
+	if c == nil {
+		return
+	}
+
+	serviceName = normalizeServiceName(serviceName) // normalize once up front
+	if serviceName == "" {                          // guard empty normalized name early
+		return
+	}
+
+	now := time.Now()
+
+	// sanitize + dedup incoming (same rules as AddServiceEndpoints): drop nil / empty host /
+	// zero port / already-expired, and collapse duplicate host:port|version.
+	seen := make(map[string]int, len(eps))
+	sanitized := make([]*serviceEndpoint, 0, len(eps))
+	for _, v := range eps {
+		if v == nil {
+			continue
+		}
+		cp := *v
+		cp.Host = strings.ToLower(strings.TrimSpace(cp.Host))
+		cp.Version = strings.ToLower(strings.TrimSpace(cp.Version))
+		if cp.Host == "" || cp.Port == 0 { // drop invalid
+			continue
+		}
+		if !cp.CacheExpire.IsZero() && cp.CacheExpire.Before(now) { // drop expired
+			continue
+		}
+		k := cp.Host + ":" + util.UintToStr(cp.Port) + "|" + cp.Version
+		if idx, exists := seen[k]; exists {
+			sanitized[idx] = &cp // last one wins (freshest attributes)
+			continue
+		}
+		seen[k] = len(sanitized)
+		sanitized = append(sanitized, &cp)
+	}
+
+	c._mu.Lock()
+	defer c._mu.Unlock()
+
+	if len(sanitized) == 0 { // reconciled to nothing -> drop the key, don't leave a stale slice
+		if c.serviceEndpoints != nil {
+			delete(c.serviceEndpoints, serviceName)
+		}
+		if !c.DisableLogging {
+			log.Println("Replaced Service Endpoints for " + serviceName + ": None (key dropped)")
+		}
+		return
+	}
+
+	if c.serviceEndpoints == nil {
+		c.serviceEndpoints = make(map[string][]*serviceEndpoint)
+	}
+	c.serviceEndpoints[serviceName] = sanitized
+
+	if !c.DisableLogging {
+		log.Println("Replaced Service Endpoints for " + serviceName + ": " + util.Itoa(len(sanitized)) + " endpoint(s)")
+	}
+}
+
 // PurgeServiceEndpoints will remove all endpoints associated with the given serviceName within map
 //
 // serviceName = lowercase of servicename.namespacename
