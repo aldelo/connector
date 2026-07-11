@@ -118,6 +118,16 @@ type grpcData struct {
 	// gRPC requires >= 2 and effectively caps at 5. 0/unset => default 3. Only used when
 	// RetryPolicyEnabled is true.
 	RetryPolicyMaxAttempts uint `mapstructure:"retry_policy_max_attempts"`
+	// EvictOnDialFailureEnabled turns on active dead-endpoint eviction: when a unary RPC fails to
+	// DIAL a specific endpoint (transport: error while dialing <ip:port>), the client purges just
+	// that ip:port from the discovery cache, pushes the trimmed set to the round_robin resolver,
+	// and retries the RPC once against the remaining endpoints. This delivers immediate
+	// per-request failover during the ~10-minute window in which Cloud Map still advertises a dead
+	// instance (the A2 plan, Option B). Default false preserves current behavior. Only a dial
+	// failure (connection never established => request provably never sent) triggers it, so the
+	// single retry is safe even for non-idempotent methods. Requires UseLoadBalancer and a
+	// non-direct discovery type (there must be other endpoints to fail over to).
+	EvictOnDialFailureEnabled bool `mapstructure:"evict_on_dial_failure_enabled"`
 }
 
 func (c *config) SetTargetAppName(s string) {
@@ -414,6 +424,13 @@ func (c *config) SetRetryPolicyMaxAttempts(i uint) {
 	}
 }
 
+func (c *config) SetEvictOnDialFailureEnabled(b bool) {
+	if c._v != nil {
+		c._v.Set("grpc.evict_on_dial_failure_enabled", b)
+		c.Grpc.EvictOnDialFailureEnabled = b
+	}
+}
+
 // Read will load config settings from disk.
 // FIX #1: Builds into local variables first and only overwrites c._v, c.Target, etc.
 // on success, so a failed Read() doesn't destroy previously valid state.
@@ -478,7 +495,8 @@ func (c *config) Read() error {
 		"grpc.circuit_breaker_error_percent_threshold", 50).Default(
 		"grpc.circuit_breaker_logger_enabled", true).Default(
 		"grpc.retry_policy_enabled", false).Default(
-		"grpc.retry_policy_max_attempts", 3)
+		"grpc.retry_policy_max_attempts", 3).Default(
+		"grpc.evict_on_dial_failure_enabled", false)
 
 	if ok, err := v.Init(); err != nil {
 		return err
