@@ -941,6 +941,33 @@ func healthCheckServiceConfigFragment(serviceName string) string {
 	return `"healthCheckConfig":{"serviceName":` + string(nameJSON) + `}`
 }
 
+// retryPolicyServiceConfigFragment builds the "methodConfig" fragment of a gRPC service
+// config (no outer braces — the caller wraps the assembled fragments in `{...}`). It applies
+// a UNAVAILABLE-only retryPolicy to ALL methods (empty name/method selector). Combined with a
+// round_robin balancer, a retry re-picks the next subconn, so a request that lands on a dead
+// endpoint transparently fails over to a live one instead of surfacing the dial error.
+//
+// maxAttempts is clamped to gRPC's valid range [2,5] (total attempts incl. the original).
+// Only UNAVAILABLE is retried — dial failures / connection-refused surface as UNAVAILABLE,
+// while application-level errors (e.g. INVALID_ARGUMENT, NOT_FOUND) are NOT retried.
+func retryPolicyServiceConfigFragment(maxAttempts uint) string {
+	if maxAttempts < 2 {
+		maxAttempts = 2
+	}
+	if maxAttempts > 5 {
+		maxAttempts = 5
+	}
+	return `"methodConfig":[{` +
+		`"name":[{}],` +
+		`"retryPolicy":{` +
+		`"maxAttempts":` + strconv.FormatUint(uint64(maxAttempts), 10) + `,` +
+		`"initialBackoff":"0.1s",` +
+		`"maxBackoff":"1s",` +
+		`"backoffMultiplier":2.0,` +
+		`"retryableStatusCodes":["UNAVAILABLE"]` +
+		`}}]`
+}
+
 // buildDialOptions returns slice of dial options built from client struct fields
 func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOption, err error) {
 	if c == nil {
@@ -1038,6 +1065,16 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		defSvrConf += healthCheckServiceConfigFragment(cfg.Grpc.HealthCheckServiceName)
 	}
 
+	if cfg.Grpc.RetryPolicyEnabled {
+		if util.LenTrim(defSvrConf) > 0 {
+			defSvrConf += ", "
+		}
+
+		// Retry UNAVAILABLE so a dial failure onto a dead endpoint transparently fails over to
+		// the next round_robin subconn instead of returning the error to the caller.
+		defSvrConf += retryPolicyServiceConfigFragment(cfg.Grpc.RetryPolicyMaxAttempts)
+	}
+
 	if util.LenTrim(defSvrConf) > 0 {
 		opts = append(opts, grpc.WithDefaultServiceConfig(fmt.Sprintf(`{%s}`, defSvrConf)))
 	}
@@ -1075,8 +1112,12 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		opts = append(opts, grpc.WithWriteBufferSize(int(cfg.Grpc.WriteBufferSize)))
 	}
 
-	// turn off retry when retry default is enabled in the future framework versions
-	opts = append(opts, grpc.WithDisableRetry())
+	// Turn off retry by default. When RetryPolicyEnabled is set, we intentionally leave gRPC
+	// retry ON so the service-config retryPolicy above can transparently fail over UNAVAILABLE
+	// RPCs onto the next round_robin subconn; disabling retry here would neutralize that policy.
+	if !cfg.Grpc.RetryPolicyEnabled {
+		opts = append(opts, grpc.WithDisableRetry())
+	}
 
 	// Build interceptor chains from a fresh local slice to avoid duplicate appends across re-dials.
 	unaryInts := append([]grpc.UnaryClientInterceptor{}, c.UnaryClientInterceptors...)

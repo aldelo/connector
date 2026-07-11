@@ -106,6 +106,18 @@ type grpcData struct {
 	CircuitBreakerSleepWindow            uint   `mapstructure:"circuit_breaker_sleep_window"`
 	CircuitBreakerErrorPercentThreshold  uint   `mapstructure:"circuit_breaker_error_percent_threshold"`
 	CircuitBreakerLoggerEnabled          bool   `mapstructure:"circuit_breaker_logger_enabled"`
+	// RetryPolicyEnabled turns on a gRPC service-config retryPolicy that transparently retries
+	// UNAVAILABLE (e.g. a dial failure to a dead endpoint). Combined with round_robin, each retry
+	// re-picks the next subconn, so a request fails over to a live endpoint instead of returning
+	// the dial error — the "try the next IP instead of failing" requirement from the A2 plan.
+	// Default false preserves the historical behavior (retry disabled via grpc.WithDisableRetry).
+	// Enable only for idempotent read paths first; auditing blast radius across consumers is a
+	// documented prerequisite. When true, grpc.WithDisableRetry is NOT applied.
+	RetryPolicyEnabled bool `mapstructure:"retry_policy_enabled"`
+	// RetryPolicyMaxAttempts is the total attempts (original + retries) for the retryPolicy above.
+	// gRPC requires >= 2 and effectively caps at 5. 0/unset => default 3. Only used when
+	// RetryPolicyEnabled is true.
+	RetryPolicyMaxAttempts uint `mapstructure:"retry_policy_max_attempts"`
 }
 
 func (c *config) SetTargetAppName(s string) {
@@ -388,6 +400,20 @@ func (c *config) SetCircuitBreakerLoggerEnabled(b bool) {
 	}
 }
 
+func (c *config) SetRetryPolicyEnabled(b bool) {
+	if c._v != nil {
+		c._v.Set("grpc.retry_policy_enabled", b)
+		c.Grpc.RetryPolicyEnabled = b
+	}
+}
+
+func (c *config) SetRetryPolicyMaxAttempts(i uint) {
+	if c._v != nil {
+		c._v.Set("grpc.retry_policy_max_attempts", i)
+		c.Grpc.RetryPolicyMaxAttempts = i
+	}
+}
+
 // Read will load config settings from disk.
 // FIX #1: Builds into local variables first and only overwrites c._v, c.Target, etc.
 // on success, so a failed Read() doesn't destroy previously valid state.
@@ -450,7 +476,9 @@ func (c *config) Read() error {
 		"grpc.circuit_breaker_request_volume_threshold", 20).Default(
 		"grpc.circuit_breaker_sleep_window", 5000).Default(
 		"grpc.circuit_breaker_error_percent_threshold", 50).Default(
-		"grpc.circuit_breaker_logger_enabled", true)
+		"grpc.circuit_breaker_logger_enabled", true).Default(
+		"grpc.retry_policy_enabled", false).Default(
+		"grpc.retry_policy_max_attempts", 3)
 
 	if ok, err := v.Init(); err != nil {
 		return err
