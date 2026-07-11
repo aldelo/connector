@@ -18,6 +18,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -924,6 +925,22 @@ func (c *Client) readConfig() error {
 	return nil
 }
 
+// healthCheckServiceConfigFragment builds the "healthCheckConfig" fragment of a gRPC
+// service config (no outer braces — the caller wraps the assembled fragments in `{...}`).
+// serviceName is the grpc.health.v1 service the client watches; it is JSON-escaped so an
+// operator-supplied value cannot break the service config JSON (an invalid service config
+// is silently ignored by gRPC, which would disable health checking without warning).
+// An empty serviceName reproduces the historical `{"serviceName":""}` (watch the default
+// unnamed health service).
+func healthCheckServiceConfigFragment(serviceName string) string {
+	nameJSON, err := json.Marshal(serviceName)
+	if err != nil {
+		// serviceName is a plain string; Marshal cannot fail. Fall back to the empty name.
+		nameJSON = []byte(`""`)
+	}
+	return `"healthCheckConfig":{"serviceName":` + string(nameJSON) + `}`
+}
+
 // buildDialOptions returns slice of dial options built from client struct fields
 func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOption, err error) {
 	if c == nil {
@@ -1015,7 +1032,10 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 			defSvrConf += ", "
 		}
 
-		defSvrConf += `"healthCheckConfig":{"serviceName":""}`
+		// Watch the configured grpc.health.v1 service name (empty => the default unnamed
+		// service, preserving prior behavior). A non-empty name lets the round_robin balancer
+		// eject subconns whose health goes NOT_SERVING — client-side auto-skip of a dead instance.
+		defSvrConf += healthCheckServiceConfigFragment(cfg.Grpc.HealthCheckServiceName)
 	}
 
 	if util.LenTrim(defSvrConf) > 0 {

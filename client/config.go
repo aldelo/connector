@@ -80,13 +80,19 @@ type topicsData struct {
 }
 
 type grpcData struct {
-	DialBlockingMode                     bool   `mapstructure:"dial_blocking_mode"`
-	ServerCACertFiles                    string `mapstructure:"server_ca_cert_files"`
-	ClientCertFile                       string `mapstructure:"client_cert_file"`
-	ClientKeyFile                        string `mapstructure:"client_key_file"`
-	UserAgent                            string `mapstructure:"user_agent"`
-	UseLoadBalancer                      bool   `mapstructure:"use_load_balancer"`
-	UseHealthCheck                       bool   `mapstructure:"use_health_check"`
+	DialBlockingMode  bool   `mapstructure:"dial_blocking_mode"`
+	ServerCACertFiles string `mapstructure:"server_ca_cert_files"`
+	ClientCertFile    string `mapstructure:"client_cert_file"`
+	ClientKeyFile     string `mapstructure:"client_key_file"`
+	UserAgent         string `mapstructure:"user_agent"`
+	UseLoadBalancer   bool   `mapstructure:"use_load_balancer"`
+	UseHealthCheck    bool   `mapstructure:"use_health_check"`
+	// HealthCheckServiceName is the grpc.health.v1 service name the client watches when
+	// UseHealthCheck is true. Empty (default) preserves the historical behavior of watching
+	// the default (unnamed) health service. Set it to the server's registered health service
+	// name so the round_robin balancer ejects subconns reporting NOT_SERVING / TRANSIENT_FAILURE
+	// — the client-side half of "auto-skip a dead instance" (the server must expose grpc.health.v1).
+	HealthCheckServiceName               string `mapstructure:"health_check_service_name"`
 	DialMinConnectTimeout                uint   `mapstructure:"dial_min_connect_timeout"`
 	KeepAliveInactivePingTimeTrigger     uint   `mapstructure:"keepalive_inactive_ping_time_trigger"`
 	KeepAliveInactivePingTimeout         uint   `mapstructure:"keepalive_inactive_ping_timeout"`
@@ -284,6 +290,13 @@ func (c *config) SetUseHealthCheck(b bool) {
 	}
 }
 
+func (c *config) SetHealthCheckServiceName(s string) {
+	if c._v != nil {
+		c._v.Set("grpc.health_check_service_name", s)
+		c.Grpc.HealthCheckServiceName = s
+	}
+}
+
 func (c *config) SetDialMinConnectTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.dial_min_connect_timeout", i)
@@ -424,6 +437,7 @@ func (c *config) Read() error {
 		"grpc.user_agent", "").Default(
 		"grpc.use_load_balancer", true).Default(
 		"grpc.use_health_check", true).Default(
+		"grpc.health_check_service_name", "").Default(
 		"grpc.dial_min_connect_timeout", 5).Default(
 		"grpc.keepalive_inactive_ping_time_trigger", 0).Default(
 		"grpc.keepalive_inactive_ping_timeout", 0).Default(
