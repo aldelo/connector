@@ -80,13 +80,19 @@ type topicsData struct {
 }
 
 type grpcData struct {
-	DialBlockingMode                     bool   `mapstructure:"dial_blocking_mode"`
-	ServerCACertFiles                    string `mapstructure:"server_ca_cert_files"`
-	ClientCertFile                       string `mapstructure:"client_cert_file"`
-	ClientKeyFile                        string `mapstructure:"client_key_file"`
-	UserAgent                            string `mapstructure:"user_agent"`
-	UseLoadBalancer                      bool   `mapstructure:"use_load_balancer"`
-	UseHealthCheck                       bool   `mapstructure:"use_health_check"`
+	DialBlockingMode  bool   `mapstructure:"dial_blocking_mode"`
+	ServerCACertFiles string `mapstructure:"server_ca_cert_files"`
+	ClientCertFile    string `mapstructure:"client_cert_file"`
+	ClientKeyFile     string `mapstructure:"client_key_file"`
+	UserAgent         string `mapstructure:"user_agent"`
+	UseLoadBalancer   bool   `mapstructure:"use_load_balancer"`
+	UseHealthCheck    bool   `mapstructure:"use_health_check"`
+	// HealthCheckServiceName is the grpc.health.v1 service name the client watches when
+	// UseHealthCheck is true. Empty (default) preserves the historical behavior of watching
+	// the default (unnamed) health service. Set it to the server's registered health service
+	// name so the round_robin balancer ejects subconns reporting NOT_SERVING / TRANSIENT_FAILURE
+	// — the client-side half of "auto-skip a dead instance" (the server must expose grpc.health.v1).
+	HealthCheckServiceName               string `mapstructure:"health_check_service_name"`
 	DialMinConnectTimeout                uint   `mapstructure:"dial_min_connect_timeout"`
 	KeepAliveInactivePingTimeTrigger     uint   `mapstructure:"keepalive_inactive_ping_time_trigger"`
 	KeepAliveInactivePingTimeout         uint   `mapstructure:"keepalive_inactive_ping_timeout"`
@@ -100,6 +106,28 @@ type grpcData struct {
 	CircuitBreakerSleepWindow            uint   `mapstructure:"circuit_breaker_sleep_window"`
 	CircuitBreakerErrorPercentThreshold  uint   `mapstructure:"circuit_breaker_error_percent_threshold"`
 	CircuitBreakerLoggerEnabled          bool   `mapstructure:"circuit_breaker_logger_enabled"`
+	// RetryPolicyEnabled turns on a gRPC service-config retryPolicy that transparently retries
+	// UNAVAILABLE (e.g. a dial failure to a dead endpoint). Combined with round_robin, each retry
+	// re-picks the next subconn, so a request fails over to a live endpoint instead of returning
+	// the dial error — the "try the next IP instead of failing" requirement from the A2 plan.
+	// Default false preserves the historical behavior (retry disabled via grpc.WithDisableRetry).
+	// Enable only for idempotent read paths first; auditing blast radius across consumers is a
+	// documented prerequisite. When true, grpc.WithDisableRetry is NOT applied.
+	RetryPolicyEnabled bool `mapstructure:"retry_policy_enabled"`
+	// RetryPolicyMaxAttempts is the total attempts (original + retries) for the retryPolicy above.
+	// gRPC requires >= 2 and effectively caps at 5. 0/unset => default 3. Only used when
+	// RetryPolicyEnabled is true.
+	RetryPolicyMaxAttempts uint `mapstructure:"retry_policy_max_attempts"`
+	// EvictOnDialFailureEnabled turns on active dead-endpoint eviction: when a unary RPC fails to
+	// DIAL a specific endpoint (transport: error while dialing <ip:port>), the client purges just
+	// that ip:port from the discovery cache, pushes the trimmed set to the round_robin resolver,
+	// and retries the RPC once against the remaining endpoints. This delivers immediate
+	// per-request failover during the ~10-minute window in which Cloud Map still advertises a dead
+	// instance (the A2 plan, Option B). Default false preserves current behavior. Only a dial
+	// failure (connection never established => request provably never sent) triggers it, so the
+	// single retry is safe even for non-idempotent methods. Requires UseLoadBalancer and a
+	// non-direct discovery type (there must be other endpoints to fail over to).
+	EvictOnDialFailureEnabled bool `mapstructure:"evict_on_dial_failure_enabled"`
 }
 
 func (c *config) SetTargetAppName(s string) {
@@ -284,6 +312,13 @@ func (c *config) SetUseHealthCheck(b bool) {
 	}
 }
 
+func (c *config) SetHealthCheckServiceName(s string) {
+	if c._v != nil {
+		c._v.Set("grpc.health_check_service_name", s)
+		c.Grpc.HealthCheckServiceName = s
+	}
+}
+
 func (c *config) SetDialMinConnectTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("grpc.dial_min_connect_timeout", i)
@@ -375,6 +410,27 @@ func (c *config) SetCircuitBreakerLoggerEnabled(b bool) {
 	}
 }
 
+func (c *config) SetRetryPolicyEnabled(b bool) {
+	if c._v != nil {
+		c._v.Set("grpc.retry_policy_enabled", b)
+		c.Grpc.RetryPolicyEnabled = b
+	}
+}
+
+func (c *config) SetRetryPolicyMaxAttempts(i uint) {
+	if c._v != nil {
+		c._v.Set("grpc.retry_policy_max_attempts", i)
+		c.Grpc.RetryPolicyMaxAttempts = i
+	}
+}
+
+func (c *config) SetEvictOnDialFailureEnabled(b bool) {
+	if c._v != nil {
+		c._v.Set("grpc.evict_on_dial_failure_enabled", b)
+		c.Grpc.EvictOnDialFailureEnabled = b
+	}
+}
+
 // Read will load config settings from disk.
 // FIX #1: Builds into local variables first and only overwrites c._v, c.Target, etc.
 // on success, so a failed Read() doesn't destroy previously valid state.
@@ -424,6 +480,7 @@ func (c *config) Read() error {
 		"grpc.user_agent", "").Default(
 		"grpc.use_load_balancer", true).Default(
 		"grpc.use_health_check", true).Default(
+		"grpc.health_check_service_name", "").Default(
 		"grpc.dial_min_connect_timeout", 5).Default(
 		"grpc.keepalive_inactive_ping_time_trigger", 0).Default(
 		"grpc.keepalive_inactive_ping_timeout", 0).Default(
@@ -436,7 +493,10 @@ func (c *config) Read() error {
 		"grpc.circuit_breaker_request_volume_threshold", 20).Default(
 		"grpc.circuit_breaker_sleep_window", 5000).Default(
 		"grpc.circuit_breaker_error_percent_threshold", 50).Default(
-		"grpc.circuit_breaker_logger_enabled", true)
+		"grpc.circuit_breaker_logger_enabled", true).Default(
+		"grpc.retry_policy_enabled", false).Default(
+		"grpc.retry_policy_max_attempts", 3).Default(
+		"grpc.evict_on_dial_failure_enabled", false)
 
 	if ok, err := v.Init(); err != nil {
 		return err

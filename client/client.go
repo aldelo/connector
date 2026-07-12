@@ -18,6 +18,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -924,6 +925,49 @@ func (c *Client) readConfig() error {
 	return nil
 }
 
+// healthCheckServiceConfigFragment builds the "healthCheckConfig" fragment of a gRPC
+// service config (no outer braces — the caller wraps the assembled fragments in `{...}`).
+// serviceName is the grpc.health.v1 service the client watches; it is JSON-escaped so an
+// operator-supplied value cannot break the service config JSON (an invalid service config
+// is silently ignored by gRPC, which would disable health checking without warning).
+// An empty serviceName reproduces the historical `{"serviceName":""}` (watch the default
+// unnamed health service).
+func healthCheckServiceConfigFragment(serviceName string) string {
+	nameJSON, err := json.Marshal(serviceName)
+	if err != nil {
+		// serviceName is a plain string; Marshal cannot fail. Fall back to the empty name.
+		nameJSON = []byte(`""`)
+	}
+	return `"healthCheckConfig":{"serviceName":` + string(nameJSON) + `}`
+}
+
+// retryPolicyServiceConfigFragment builds the "methodConfig" fragment of a gRPC service
+// config (no outer braces — the caller wraps the assembled fragments in `{...}`). It applies
+// a UNAVAILABLE-only retryPolicy to ALL methods (empty name/method selector). Combined with a
+// round_robin balancer, a retry re-picks the next subconn, so a request that lands on a dead
+// endpoint transparently fails over to a live one instead of surfacing the dial error.
+//
+// maxAttempts is clamped to gRPC's valid range [2,5] (total attempts incl. the original).
+// Only UNAVAILABLE is retried — dial failures / connection-refused surface as UNAVAILABLE,
+// while application-level errors (e.g. INVALID_ARGUMENT, NOT_FOUND) are NOT retried.
+func retryPolicyServiceConfigFragment(maxAttempts uint) string {
+	if maxAttempts < 2 {
+		maxAttempts = 2
+	}
+	if maxAttempts > 5 {
+		maxAttempts = 5
+	}
+	return `"methodConfig":[{` +
+		`"name":[{}],` +
+		`"retryPolicy":{` +
+		`"maxAttempts":` + strconv.FormatUint(uint64(maxAttempts), 10) + `,` +
+		`"initialBackoff":"0.1s",` +
+		`"maxBackoff":"1s",` +
+		`"backoffMultiplier":2.0,` +
+		`"retryableStatusCodes":["UNAVAILABLE"]` +
+		`}}]`
+}
+
 // buildDialOptions returns slice of dial options built from client struct fields
 func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOption, err error) {
 	if c == nil {
@@ -1015,7 +1059,20 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 			defSvrConf += ", "
 		}
 
-		defSvrConf += `"healthCheckConfig":{"serviceName":""}`
+		// Watch the configured grpc.health.v1 service name (empty => the default unnamed
+		// service, preserving prior behavior). A non-empty name lets the round_robin balancer
+		// eject subconns whose health goes NOT_SERVING — client-side auto-skip of a dead instance.
+		defSvrConf += healthCheckServiceConfigFragment(cfg.Grpc.HealthCheckServiceName)
+	}
+
+	if cfg.Grpc.RetryPolicyEnabled {
+		if util.LenTrim(defSvrConf) > 0 {
+			defSvrConf += ", "
+		}
+
+		// Retry UNAVAILABLE so a dial failure onto a dead endpoint transparently fails over to
+		// the next round_robin subconn instead of returning the error to the caller.
+		defSvrConf += retryPolicyServiceConfigFragment(cfg.Grpc.RetryPolicyMaxAttempts)
 	}
 
 	if util.LenTrim(defSvrConf) > 0 {
@@ -1055,8 +1112,12 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		opts = append(opts, grpc.WithWriteBufferSize(int(cfg.Grpc.WriteBufferSize)))
 	}
 
-	// turn off retry when retry default is enabled in the future framework versions
-	opts = append(opts, grpc.WithDisableRetry())
+	// Turn off retry by default. When RetryPolicyEnabled is set, we intentionally leave gRPC
+	// retry ON so the service-config retryPolicy above can transparently fail over UNAVAILABLE
+	// RPCs onto the next round_robin subconn; disabling retry here would neutralize that policy.
+	if !cfg.Grpc.RetryPolicyEnabled {
+		opts = append(opts, grpc.WithDisableRetry())
+	}
 
 	// Build interceptor chains from a fresh local slice to avoid duplicate appends across re-dials.
 	unaryInts := append([]grpc.UnaryClientInterceptor{}, c.UnaryClientInterceptors...)
@@ -1071,6 +1132,14 @@ func (c *Client) buildDialOptions(loadBalancerPolicy string) (opts []grpc.DialOp
 		// was superseded by tracer.TracerUnaryClientInterceptor; the
 		// dead method has been removed.
 		unaryInts = append(unaryInts, tracer.TracerUnaryClientInterceptor(cfg.Target.AppName+"-Client"))
+	}
+
+	if cfg.Grpc.EvictOnDialFailureEnabled {
+		logPrintf("Setup Unary Dead-Endpoint Failover Interceptor")
+		// Appended LAST so it is the innermost interceptor: its invoker is the raw RPC (so the
+		// retry re-picks a round_robin subconn), and any circuit breaker wrapping it observes the
+		// final post-failover outcome rather than the first dial error.
+		unaryInts = append(unaryInts, c.unaryDeadEndpointFailoverHandler)
 	}
 
 	count := len(unaryInts)
@@ -3202,6 +3271,126 @@ func (c *Client) setApiDiscoveredIpPorts(cacheExpires time.Time, serviceName str
 	c.setEndpoints(pruneExpiredEndpoints(cacheGetLiveServiceEndpoints(key, version, false)))
 
 	return nil
+}
+
+// parseDialFailureHostPort extracts the "host:port" from a gRPC dial-failure error string.
+//
+// gRPC wraps a connection-establishment failure as:
+//
+//	"... transport: error while dialing: dial tcp <host>:<port>: <reason>"
+//
+// (host may be an IPv4, a bracketed IPv6 literal, or a name). Only that specific "dial tcp"
+// form is matched, so an application-level error that merely happens to contain a "host:port"
+// substring cannot be misparsed as a dead endpoint. Returns ok=false when the string is not a
+// dial failure or the host/port cannot be recovered cleanly.
+func parseDialFailureHostPort(errMsg string) (host string, port uint, ok bool) {
+	const marker = "dial tcp "
+	idx := strings.Index(errMsg, marker)
+	if idx < 0 {
+		return "", 0, false
+	}
+
+	// Also require the "error while dialing" phrase so we only act on true dial failures.
+	if !strings.Contains(errMsg, "error while dialing") {
+		return "", 0, false
+	}
+
+	rest := errMsg[idx+len(marker):]
+
+	// The address runs up to the next ": " that precedes the reason text. Take the first colon
+	// that is followed by a space — that delimits "<addr>: <reason>". Bracketed IPv6 keeps its
+	// own colons inside [...], and a port is always numeric with no space, so this is safe.
+	end := strings.Index(rest, ": ")
+	if end < 0 {
+		return "", 0, false
+	}
+	addr := strings.TrimSpace(rest[:end])
+	if addr == "" {
+		return "", 0, false
+	}
+
+	h, p, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil || h == "" || p == "" {
+		return "", 0, false
+	}
+
+	portNum, convErr := strconv.Atoi(p)
+	if convErr != nil || portNum < 1 || portNum > 65535 {
+		return "", 0, false
+	}
+
+	return h, uint(portNum), true
+}
+
+// evictEndpointAndUpdateResolver purges a single dead host:port from the discovery cache and
+// pushes the trimmed endpoint set to the round_robin resolver. It mirrors the eviction that the
+// SNS ServiceHostOfflineHandler performs (see the ServiceHostOfflineHandler wiring in
+// configureNotifierHandlers), but is driven by an observed dial failure rather than an SNS offline event —
+// so it works even when the notifier has silently died. Returns true if the resolver was updated.
+func (c *Client) evictEndpointAndUpdateResolver(host string, port uint) bool {
+	if c == nil || c.closed.Load() {
+		return false
+	}
+	cfg := c.getConfig()
+	if cfg == nil {
+		return false
+	}
+
+	svcKey := strings.ToLower(cfg.Target.ServiceName + "." + cfg.Target.NamespaceName)
+	cachePurgeServiceEndpointByHostAndPort(svcKey, host, port)
+	c.setEndpoints(cacheGetLiveServiceEndpoints(svcKey, cfg.Target.InstanceVersion, true))
+	if resolverErr := c.UpdateLoadBalanceResolver(); resolverErr != nil {
+		c.logWarn("evictEndpointAndUpdateResolver: UpdateLoadBalanceResolver failed after purging " +
+			host + ":" + util.UintToStr(port) + ": " + resolverErr.Error())
+		return false
+	}
+	return true
+}
+
+// unaryDeadEndpointFailoverHandler is a unary client interceptor that implements Option B of the
+// A2 fix plan: on a dial failure to a specific endpoint, evict just that endpoint and retry the
+// RPC once against the trimmed round_robin set. It is only wired when EvictOnDialFailureEnabled
+// is set; when off, it is never added to the interceptor chain (zero overhead / no behavior
+// change). Retry is bounded to exactly one extra attempt and only ever fires on a dial failure —
+// where the connection was never established, so the original request provably never reached a
+// server and re-sending it is safe regardless of method idempotency.
+func (c *Client) unaryDeadEndpointFailoverHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	if c == nil {
+		return fmt.Errorf("Client Object Nil")
+	}
+	if c.closed.Load() {
+		return status.Error(codes.Unavailable, "client is closed")
+	}
+
+	err := invoker(ctx, method, req, reply, cc, opts...)
+	if err == nil {
+		return nil
+	}
+
+	// Snapshot config once; bail to the plain error if the feature is off or the setup can't
+	// support failover (direct connect / no load balancer => no alternate endpoints).
+	cfg := c.getConfig()
+	if cfg == nil || !cfg.Grpc.EvictOnDialFailureEnabled ||
+		!cfg.Grpc.UseLoadBalancer || cfg.Target.ServiceDiscoveryType == "direct" {
+		return err
+	}
+
+	host, port, ok := parseDialFailureHostPort(err.Error())
+	if !ok {
+		return err
+	}
+
+	c.logWarn("unaryDeadEndpointFailoverHandler: dial failure on " + host + ":" + util.UintToStr(port) +
+		" for " + method + " — evicting endpoint and retrying once")
+
+	if !c.evictEndpointAndUpdateResolver(host, port) {
+		// Could not evict/update (e.g. no endpoints left); surface the original error.
+		return err
+	}
+
+	// Retry exactly once against the trimmed endpoint set. round_robin now excludes the dead
+	// endpoint, so this attempt targets a remaining (hopefully live) endpoint.
+	return invoker(ctx, method, req, reply, cc, opts...)
 }
 
 func (c *Client) unaryCircuitBreakerHandler(ctx context.Context, method string, req interface{}, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
