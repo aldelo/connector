@@ -280,6 +280,65 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 	return nil
 }
 
+// NewManualResolverInstance creates a NEW *manual.Resolver bound to a SINGLE caller (a single
+// grpc.ClientConn), WITHOUT storing it in the process-global schemeMap. It is the per-connection
+// counterpart of NewManualResolver: the caller keeps the returned resolver on its own struct and
+// passes it into its own Dial via grpc.WithResolvers(...), then drives it with
+// UpdateManualResolverInstance. This guarantees the grpc-go manual.Resolver contract ("every
+// instance may only ever be used with a single grpc.ClientConn") structurally, so one caller's
+// endpoint refresh can never overwrite another caller's connection (the shared-resolver orphaning
+// bug). The existing global NewManualResolver/UpdateManualResolver are left intact for other callers.
+//
+// Returns the resolver instance plus the normalized scheme and service (the caller builds its dial
+// target as "<scheme>:///<service>"). Validation mirrors NewManualResolver exactly (same
+// normalizers, same error shapes).
+func NewManualResolverInstance(schemeName string, serviceName string, endpointAddrs []string) (r *manual.Resolver, normalizedScheme string, normalizedService string, err error) {
+	schemeName, err = normalizeAndValidateSchemeName(schemeName)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	svc, err := normalizeServiceName(serviceName)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	addrs, err := normalizeAddresses(endpointAddrs, nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	res := manual.NewBuilderWithScheme(schemeName)
+	res.InitialState(resolver.State{
+		Addresses: addrs,
+	})
+
+	return res, schemeName, svc, nil
+}
+
+// UpdateManualResolverInstance pushes a fresh address set into a caller-owned *manual.Resolver
+// (obtained from NewManualResolverInstance). It is the per-connection counterpart of
+// UpdateManualResolver, but targets the passed instance directly instead of a global-map lookup,
+// so the update always lands on the caller's OWN connection. Nil-guards match the global path's
+// "resolver is nil" failure shape (no panic).
+func UpdateManualResolverInstance(r *manual.Resolver, endpointAddrs []string) error {
+	if r == nil {
+		return fmt.Errorf("manual resolver instance is nil")
+	}
+
+	addrs, err := normalizeAddresses(endpointAddrs, fmt.Errorf("Endpoint Addresses Required"))
+	if err != nil {
+		return err
+	}
+
+	r.UpdateState(resolver.State{
+		Addresses: addrs,
+	})
+
+	log.Println("[NOTE] Please Ignore Error 'Health check is requested but health check function is not set'; UpdateManualResolverInstance is Completed")
+	return nil
+}
+
 func setResolver(schemeName string, serviceName string, r *manual.Resolver) error {
 	if r == nil {
 		return fmt.Errorf("Resolver is nil; cannot register")
