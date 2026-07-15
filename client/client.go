@@ -60,6 +60,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
+	manualresolver "google.golang.org/grpc/resolver/manual"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 )
@@ -281,6 +282,9 @@ func (c *Client) clearConnection() *grpc.ClientConn {
 	c._conn = nil
 	c._remoteAddress = ""
 	c._healthManualChecker = nil
+	// drop this Client's owned resolver alongside its conn; Dial rebuilds a fresh one. Keeps the
+	// resolver 1:1 with the conn across Close()+Dial() cycles (no stale instance, no orphan).
+	c._resolver = nil
 	c.connMu.Unlock()
 	return conn
 }
@@ -462,6 +466,14 @@ type Client struct {
 	// instantiated internal objects
 	_conn          *grpc.ClientConn
 	_remoteAddress string
+
+	// _resolver is this Client's OWN manual resolver instance, built in Dial and passed into
+	// this Client's ClientConn via grpc.WithResolvers. It is 1:1 with _conn: endpoint refreshes
+	// (GetLiveEndpointsCount / UpdateLoadBalanceResolver) drive THIS resolver, so they can never
+	// overwrite another Client's connection (the shared-resolver orphaning bug). Nil in "direct"
+	// discovery mode (no round-robin resolver) and after Close. Written only under _lifecycleMu
+	// (Dial / Close), read on the refresh paths after Dial has completed.
+	_resolver *manualresolver.Resolver
 
 	// upon dial completion successfully,
 	// auto instantiate a manual help checker
@@ -1703,18 +1715,24 @@ func (c *Client) Dial(ctx context.Context) error {
 	var loadBalancerPolicy string
 
 	if cfg.Target.ServiceDiscoveryType != "direct" {
-		var err error
-
 		// very important: client load balancer scheme name must be alpha and lower cased
 		//                 if scheme name is not valid, error will occur: transport error, tcp port unknown
 		schemeName, _ := util.ExtractAlpha(cfg.AppName)
 		schemeName = strings.ToLower("clb" + schemeName)
 
-		target, loadBalancerPolicy, err = loadbalancer.WithRoundRobin(schemeName, fmt.Sprintf("%s.%s", cfg.Target.ServiceName, cfg.Target.NamespaceName), endpointAddrs)
-
-		if err != nil {
-			return fmt.Errorf("build client load balancer failed: %w", err)
+		// Build a resolver instance OWNED BY THIS Client (not stored in the process-global
+		// schemeMap), so this ClientConn is 1:1 with its resolver and endpoint refreshes can
+		// never overwrite another Client's connection (the shared-resolver orphaning bug). The
+		// instance is passed into this Dial via grpc.WithResolvers below. See
+		// go-ms-shared/docs/xieyanlei/dal-config-stale-ip-shared-resolver-FIX-plan.md.
+		serviceFqdn := fmt.Sprintf("%s.%s", cfg.Target.ServiceName, cfg.Target.NamespaceName)
+		r, normScheme, normSvc, e := res.NewManualResolverInstance(schemeName, serviceFqdn, endpointAddrs)
+		if e != nil {
+			return fmt.Errorf("build client load balancer failed: %w", e)
 		}
+		c._resolver = r
+		target = fmt.Sprintf("%s:///%s", normScheme, normSvc)
+		loadBalancerPolicy = loadbalancer.RoundRobinServiceConfigPolicy()
 	} else {
 		target = fmt.Sprintf("%s:///%s", "passthrough", endpointAddrs[0])
 		loadBalancerPolicy = ""
@@ -1724,6 +1742,14 @@ func (c *Client) Dial(ctx context.Context) error {
 	if opts, err := c.buildDialOptions(loadBalancerPolicy); err != nil {
 		return fmt.Errorf("build gRPC client dial options failed: %w", err)
 	} else {
+		// Register THIS Client's own manual resolver locally to this ClientConn (non-direct mode
+		// only). WithResolvers is scoped to this Dial and takes precedence over the global
+		// registry, so no other Client shares it — this is what makes the connection 1:1 with its
+		// resolver and prevents the orphaning bug.
+		if c._resolver != nil {
+			opts = append(opts, grpc.WithResolvers(c._resolver))
+		}
+
 		if c.BeforeClientDial != nil {
 			if z := c.ZLog(); z != nil {
 				z.Printf("Before gRPC Client Dial Begin...")
@@ -2068,12 +2094,9 @@ func (c *Client) GetLiveEndpointsCount(updateEndpointsToLoadBalanceResolver bool
 			return 0, errors.New(s)
 		}
 
-		// update load balance resolver with new endpoint addresses
-		serviceName := fmt.Sprintf("%s.%s", cfg.Target.ServiceName, cfg.Target.NamespaceName)
-		schemeName, _ := util.ExtractAlpha(cfg.AppName)
-		schemeName = strings.ToLower("clb" + schemeName)
-
-		if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
+		// update THIS Client's own load balance resolver with new endpoint addresses (drives the
+		// resolver bound to this Client's ClientConn — never another Client's; see FIX-plan §5).
+		if e := res.UpdateManualResolverInstance(c._resolver, endpointAddrs); e != nil {
 			errorf("GetLiveEndpointsCount-UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s",
 				cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName, e.Error())
 			return 0, e
@@ -2174,13 +2197,9 @@ func (c *Client) UpdateLoadBalanceResolver() error {
 		printf("%s", "       - "+info)
 	}
 
-	// update load balance resolver with new endpoint addresses
-	serviceName := fmt.Sprintf("%s.%s", cfg.Target.ServiceName, cfg.Target.NamespaceName)
-
-	schemeName, _ := util.ExtractAlpha(cfg.AppName)
-	schemeName = strings.ToLower("clb" + schemeName)
-
-	if e := res.UpdateManualResolver(schemeName, serviceName, endpointAddrs); e != nil {
+	// update THIS Client's own load balance resolver with new endpoint addresses (drives the
+	// resolver bound to this Client's ClientConn — never another Client's; see FIX-plan §5).
+	if e := res.UpdateManualResolverInstance(c._resolver, endpointAddrs); e != nil {
 		errorf("UpdateLoadBalanceResolver for Client %s with Service '%s.%s' Failed: %s",
 			cfg.AppName, cfg.Target.ServiceName, cfg.Target.NamespaceName, e.Error())
 		return e

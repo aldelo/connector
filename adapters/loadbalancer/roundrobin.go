@@ -159,3 +159,12 @@ func WithRoundRobin(schemeName string, serviceName string, endpointAddrs []strin
 
 	return target, loadBalancerPolicy, nil
 }
+
+// RoundRobinServiceConfigPolicy returns the round-robin service-config JSON *fragment* (without
+// outer braces), identical to what WithRoundRobin returns as loadBalancerPolicy. It exists so a
+// caller that builds its OWN resolver instance (see resolver.NewManualResolverInstance) can obtain
+// the same LB policy without going through WithRoundRobin's process-global resolver registration.
+// The caller wraps this in fmt.Sprintf(`{%s}`, policy) exactly as it does WithRoundRobin's return.
+func RoundRobinServiceConfigPolicy() string {
+	return `"loadBalancingConfig":[{"round_robin":{}}]`
+}
