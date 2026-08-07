@@ -13,6 +13,152 @@ this library are preserved across minor/patch versions per workspace rule #10.
 
 ---
 
+## [Unreleased]
+
+Reliability fix for server-side service discovery. No exported-type/signature change
+for consumers. One additive config key (`instance.sd_register_wait_seconds`, default
+`30`); existing configs that do not set it get the new default.
+
+**`go build ./...` clean, `gofmt` clean, `go vet ./service/` clean, and
+`go test ./service/ -race` all-pass under Go 1.26.4.**
+
+### Fixed
+
+- **Services abandoned their Cloud Map instance on restart, fast enough to exhaust the
+  namespace.** (Mitigated, not eliminated — see *Known remaining gap* below.) The only thing reclaiming an abandoned instance is the notifier
+  gateway's stale-health-record remover
+  (`notifiergateway.removeInactiveInstancesFromServiceDiscovery`), which acts 15
+  minutes after keep-alives stop — so a fleet restarting together abandoned instances
+  far faster than they were reclaimed. Once the namespace reaches its instance limit,
+  *every* `RegisterInstance` in the account fails with `ResourceLimitExceeded`, which
+  crash-loops the very services whose registrations would otherwise have settled.
+  Observed in production: 69 services restarted together, ~1,300 abandoned instances
+  accumulated in ~45 minutes, and each affected service advertised ~30 endpoints of
+  which 2 were alive. The namespace only drained once the 15-minute backstop caught up.
+  - **The register wait was a hardcoded 20 x 250ms = 5s.** `RegisterInstance` is
+    asynchronous, and under a fleet-wide restart Cloud Map routinely needs longer than
+    that to reach a terminal state. The wait gave up while the registration was still
+    in flight; the instance was created anyway, and the process moved on without its
+    id. That wait is now a **wall-clock deadline**, configurable via
+    `instance.sd_register_wait_seconds` (default 30). A count of sleeps was the wrong
+    unit: each poll also makes a `GetOperationStatus` call that can take up to
+    `instance.sd_timeout`, so a "5 second" count could really run for over a minute.
+    Both the per-call timeout and the poll sleep are now clamped to the time actually
+    remaining, making the budget an upper bound. Every give-up path now names the
+    abandoned operation id and how long this process waited, worded accurately per
+    branch — a timeout says the operation is unresolved and may still complete, a
+    terminal `Fail` says AWS settled it as failed, a status-call error says the outcome
+    is unknown. Note what that does and does not buy: it does **not** measure how long
+    Cloud Map took, since the wait is what truncates the tail; what the operation id
+    buys is that the abandoned operation's real outcome can be looked up afterwards
+    instead of being lost.
+
+    The 30s default is a **provisional** figure, not a derived one. What the production
+    measurement establishes: across 132 registrations in a staggered rollout of 69
+    services (deployments created over ~32 minutes) settle time was p50 1.73s, p99
+    3.16s, max 3.17s and nothing exceeded the old budget — so 5s had barely 1.6x
+    headroom over a healthy rollout. Restarting those same 69 services within one second
+    pushed 2913 of 3045 registrations (95.7%) past it, and 94% were already failing in
+    the first ten minutes, before the namespace filled — so the short budget was the
+    ignition rather than a consequence, and the trigger is simultaneity, not fleet size.
+    What it does **not** establish is where the contended tail actually sits: the old
+    code stopped watching at the budget, so the logs distinguish "longer than 5s" from
+    nothing else and give no basis to prefer 10s, 30s or 60s. 30s is therefore a trial
+    value, to be revisited from the give-up instrumentation this change adds, and it is
+    not a substitute for staggering the restart.
+  - **`instance.auto_deregister_prior` consumed the one-shot deregister claim.**
+    `registerInstance` called `deregisterInstance()` to clear a stale id from a prior
+    launch, which won the `_deregFired` CAS (SVC-F4). Nothing resets that claim, so the
+    deregister at `Serve` shutdown hit the guard, returned `nil`, and logged
+    `De-Register Instance OK From Serve Shutdown` **without calling Cloud Map** — the
+    instance survived every clean shutdown. Since `auto_deregister_prior` defaults to
+    `true`, this was the default path. The prior-instance cleanup now goes through a
+    stateless deregister that takes the service and instance ids **explicitly** — so a
+    concurrent registration cannot redirect it onto the id it just created — and never
+    touches the one-shot claim, leaving the shutdown deregister to run exactly once.
+    Every config field it reads is snapshotted under `_mu`, the AWS call runs outside
+    the lock, and the id is cleared and persisted only when the compare-and-clear
+    actually matched, so an unconditional save cannot flush unrelated in-flight viper
+    mutations.
+
+    The **shutdown** deregister was given the same treatment, because a lock orders two
+    paths only if both take it and the quit handler exists before `registerSd` runs. It
+    now snapshots the instance id under `_mu` at entry and uses that immutable value for
+    the request, and its clear is a compare-and-clear. Previously it re-read the mutable
+    field and cleared unconditionally, so: shutdown submits a deregister for A, a
+    registration confirms and publishes B while the operation polls, A succeeds, and the
+    clear erases B — leaving B registered in Cloud Map with nothing tracking it, which
+    is the very leak this change exists to stop. This does mean the shutdown path is no
+    longer byte-identical to the previous release; its wait budget is still unchanged.
+
+    Note this cleanup's wait is wall-clock bounded (15s) where the shutdown path it was
+    modelled on sleeps 20 x 250ms without counting API time and can run for over a
+    minute. Under pathologically slow status calls the cleanup therefore gives up after
+    fewer polls than the shutdown path would; that is acceptable because failure is
+    non-fatal and the stale instance falls to the 15-minute backstop, whereas an
+    unbounded wait would stall startup.
+  - **A permanent registration failure was retried until the budget ran out.**
+    `registry.GetOperationStatus` reports a terminal failure as
+    `(sdoperationstatus.Fail, non-nil error)`, so a caller that checks the error first
+    never reaches its `Fail` branch. The poll now checks the terminal status **before**
+    the error and returns immediately, preserving the AWS reason in the wrapped error.
+    (The identical dead branch in `notifiergateway` is left for a separate change.)
+
+### Known regression
+
+- **The registration wait is uninterruptible, and it is now longer.** `signal.Notify` is
+  installed only after `registerSd` returns, so a `SIGTERM` arriving during this wait
+  takes the Go default action and kills the process without cleanup. Master abandoned
+  after roughly 5s of polling; this is willing to sit in that window for 30s. That is a
+  real regression in shutdown responsiveness, accepted here as the cost of not
+  abandoning registrations that would have succeeded — and the censored data cannot yet
+  quantify whether the trade pays for itself. Moving `signal.Notify` ahead of the wait
+  is the proper fix and is out of scope.
+
+### Known remaining gap
+
+- **A registration that completes after the wait expires is still forgotten.** This
+  change moves the threshold from ~5s to 30s and makes the overrun diagnosable; it does
+  not make the overrun safe. A restart pathological enough to blow through 30s can still
+  accumulate instances faster than the 15-minute backstop drains them, which is exactly
+  the failure mode that caused the incident. Closing it needs a registration lifecycle
+  that shutdown can claim, plus `signal.Notify` installed before the wait rather than
+  after `registerSd` returns — deliberately out of scope here, and tracked separately.
+- **Startup and shutdown are still not serialized.** The quit handler exists before
+  `registerSd`, so a programmatic shutdown can consume the one-shot claim while
+  `cfg.Instance.Id` is blank, after which a registration completing later publishes an
+  id that teardown has already walked past. Same tracking issue.
+- **Operationally, the real trigger was 69 services restarting in the same second.**
+  Staggering a fleet-wide restart avoids the contention entirely and is cheaper than any
+  client-side budget.
+
+### Deliberately not changed
+
+- **The deregister wait keeps its existing 20 x 250ms budget.** It runs on the shutdown
+  path ahead of the gRPC graceful stop, so lengthening it risks the task being
+  `SIGKILL`ed at the ECS `stopTimeout` (30s default, 120s Fargate cap) before shutdown
+  completes. Once Cloud Map accepts the deregister request, AWS owns the operation;
+  the process does not need to stay alive to watch it finish.
+- **An unconfirmed registration is not compensated, and its id is never published.**
+  `cfg.Instance.Id` is still set only after Cloud Map confirms the operation, so the
+  health-report and SNS goroutines — which are already running during the wait — cannot
+  health-update, advertise, or persist an id that may not exist. The cost is that a
+  registration which completes after the wait expires is left to the 15-minute
+  backstop; the longer default budget is what makes that rare rather than routine.
+  Closing this properly needs a registration lifecycle that shutdown can claim, plus
+  `signal.Notify` installed before the wait rather than after `registerSd` returns —
+  a larger change than this fix.
+
+### Added
+
+- `instance.sd_register_wait_seconds` (uint, default `30`) — wall-clock seconds to wait
+  for the asynchronous Cloud Map `RegisterInstance` operation to reach a terminal state,
+  with matching `config.SetSdRegisterWaitSeconds`. `0` selects the default; values above
+  3600 are capped so a nonsense configuration cannot overflow into a zero budget.
+  Raising it lengthens an uninterruptible window — see the regression note below.
+
+---
+
 ## [v1.8.13] — 2026-07-10
 
 Reliability fix for client-side service discovery. No exported-type/signature

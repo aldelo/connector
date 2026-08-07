@@ -2499,6 +2499,244 @@ func (s *Service) autoCreateService() error {
 	}
 }
 
+// sdOperationPollInterval is the delay between two Cloud Map operation status polls.
+const sdOperationPollInterval = 250 * time.Millisecond
+
+// defaultSdRegisterWaitSeconds is the wait budget applied when
+// instance.sd_register_wait_seconds is not configured.
+//
+// This is NOT instance.sd_timeout: sd_timeout bounds a single AWS API call, while
+// this bounds how long we wait for an already-submitted RegisterInstance operation to
+// reach a terminal state. Cloud Map registration is asynchronous and, when a fleet
+// restarts at once, routinely takes far longer than a single call timeout to settle;
+// the 5s this replaces was short enough that a normal fleet restart abandoned
+// instances faster than they could be reclaimed.
+//
+// The value is provisional, informed by production measurement rather than derived
+// from it. Across 132 registrations in a staggered rollout of 69 services (deployments created
+// over ~32 minutes) the observed settle time was p50 1.73s, p99 3.16s, max 3.17s and
+// nothing exceeded the old budget. When the same 69 services were restarted within the
+// same second, 2913 of 3045 registrations (95.7%) ran past it. 30s is roughly ten times
+// the observed healthy maximum.
+//
+// It is NOT proven to cover the simultaneous-restart tail: the code stops watching at
+// the budget, so the logs can only ever show "longer than the budget", never how much
+// longer — that censoring is inherent and this change does not remove it. What
+// awaitSdOperation now adds is the abandoned operation's id, so its real outcome can be
+// looked up afterwards instead of being lost. Treat 30s as a trial value paired with
+// staggering a fleet-wide restart, not as a proven bound.
+//
+// Note the wait is not interruptible: registerSd has not returned yet, so awaitOsSigExit
+// has not called signal.Notify and a SIGTERM during it takes the Go default action and
+// kills the process outright (see the ordering note above Serve). Raising this budget
+// lengthens that window.
+const defaultSdRegisterWaitSeconds = 30
+
+// defaultSdPriorCleanupWaitSeconds bounds the wait for the startup cleanup of a stale
+// instance id (instance.auto_deregister_prior).
+//
+// This is a deliberate change from the shutdown path it was modelled on, which sleeps
+// 20 x 250ms but does not count API time and can therefore run for over a minute. Here
+// the whole wait is wall-clock bounded so a slow Cloud Map cannot stall startup; the
+// trade is that under pathologically slow status calls this gives up after fewer polls
+// than the shutdown path would. That is acceptable because failure is non-fatal: the
+// stale instance is simply left to the 15-minute stale-health-record backstop.
+const defaultSdPriorCleanupWaitSeconds = 15
+
+// seams for tests — production always uses the real clock and registry.
+var (
+	sdNow                 = time.Now
+	sdSleep               = time.Sleep
+	sdGetOperationStatusF = registry.GetOperationStatus
+	sdDeregisterInstanceF = registry.DeregisterInstance
+	sdRegisterInstanceF   = registry.RegisterInstance
+)
+
+// maxSdWaitSeconds caps a configured wait so the multiplication below cannot overflow
+// time.Duration (an int64 of nanoseconds) into a zero or negative budget.
+const maxSdWaitSeconds = 3600
+
+// sdRegisterWaitBudget resolves the configured register wait budget.
+func sdRegisterWaitBudget(waitSeconds uint) time.Duration {
+	if waitSeconds == 0 {
+		waitSeconds = defaultSdRegisterWaitSeconds
+	}
+
+	if waitSeconds > maxSdWaitSeconds {
+		log.Printf("warning: instance.sd_register_wait_seconds %d exceeds the %d second cap, using the cap",
+			waitSeconds, maxSdWaitSeconds)
+		waitSeconds = maxSdWaitSeconds
+	}
+
+	return time.Duration(waitSeconds) * time.Second
+}
+
+// awaitSdOperation polls an already-submitted Cloud Map operation until it reaches a
+// terminal state or the wall-clock budget runs out.
+//
+// The budget is wall-clock rather than a poll count on purpose: each poll also makes a
+// GetOperationStatus call that can itself take up to apiTimeout, so counting 250ms
+// sleeps under-reports the real elapsed time by orders of magnitude. Both the per-call
+// timeout and the sleep are clamped to the time actually remaining, so the budget is an
+// upper bound and not a suggestion.
+func (s *Service) awaitSdOperation(sd *cloudmap.CloudMap, operationId string, budget time.Duration, apiTimeout time.Duration, label string) error {
+	started := sdNow()
+	deadline := started.Add(budget)
+	attempt := 0
+
+	// Every give-up path names the operation id and how long THIS PROCESS waited.
+	//
+	// Note what that does and does not buy. It does not measure how long Cloud Map
+	// actually took: we stop watching at the budget, so the elapsed figure is censored
+	// there by construction. What the operation id buys is that the outcome can be
+	// looked up afterwards (servicediscovery GetOperation, or the instance's presence in
+	// the namespace), which is what makes the tail investigable at all — previously a
+	// give-up left no handle on the operation it abandoned.
+	//
+	// It covers the status-call error path too, not just the deadline check: when the
+	// budget is nearly spent the call timeout is clamped to the remainder, so the last
+	// status call is the one most likely to be cut short by its own context.
+	elapsed := func() time.Duration { return sdNow().Sub(started).Truncate(time.Millisecond) }
+	sdErr := func(what string, outcome string, cause error) error {
+		if cause != nil {
+			return fmt.Errorf("%s %s After %s (budget %s, operation %s %s): %w",
+				label, what, elapsed(), budget, operationId, outcome, cause)
+		}
+		return fmt.Errorf("%s %s After %s (budget %s, operation %s %s)",
+			label, what, elapsed(), budget, operationId, outcome)
+	}
+
+	// Accurate per branch: a give-up leaves the operation genuinely unresolved, a
+	// terminal Fail means AWS already settled it as failed, and a status-call error
+	// means we do not know either way. Claiming "still pending" for all three would be
+	// wrong for two of them.
+	timedOut := func() error {
+		return sdErr("Operation Not Confirmed", "left unresolved and may still complete at AWS", nil)
+	}
+
+	for {
+		remaining := deadline.Sub(sdNow())
+		if remaining <= 0 {
+			return timedOut()
+		}
+
+		callTimeout := apiTimeout
+		if callTimeout <= 0 || callTimeout > remaining {
+			callTimeout = remaining
+		}
+
+		status, err := sdGetOperationStatusF(sd, operationId, callTimeout)
+
+		// Order matters: the adapter reports a terminal failure as
+		// (sdoperationstatus.Fail, non-nil error), so checking err first would make
+		// this branch unreachable and turn a permanent failure into a retry.
+		if status == sdoperationstatus.Fail {
+			return sdErr("Operation Failed", "reported as failed by AWS", err)
+		}
+
+		if err != nil {
+			return sdErr("Operation Status Unavailable", "outcome unknown", err)
+		}
+
+		if status == sdoperationstatus.Success {
+			return nil
+		}
+
+		remaining = deadline.Sub(sdNow())
+		if remaining <= 0 {
+			return timedOut()
+		}
+
+		attempt++
+		log.Println("... Checking " + label + " Completion Status, Attempt " + strconv.Itoa(attempt) + " (" + remaining.Truncate(time.Millisecond).String() + " left)")
+
+		sleep := sdOperationPollInterval
+		if sleep > remaining {
+			sleep = remaining
+		}
+		sdSleep(sleep)
+	}
+}
+
+// deregisterPriorInstance removes a stale instance id left in config by a previous
+// launch, ahead of registering a new one (instance.auto_deregister_prior).
+//
+// It must NOT go through deregisterInstance(): that claims the one-shot _deregFired
+// token (SVC-F4), which exists so the SHUTDOWN deregister runs at most once. Nothing
+// ever resets the token, so claiming it here made the shutdown deregister return early
+// and log "De-Register Instance OK From Serve Shutdown" without calling Cloud Map —
+// this process's own instance then outlived every clean restart and had to be reclaimed
+// by the notifier gateway's stale-health-record remover 15 minutes later.
+//
+// The prior id is passed explicitly rather than read from cfg.Instance.Id inside the
+// network call, so a concurrent registration cannot redirect this deregister onto the
+// id it just created. Failure is logged and startup continues: leaving the stale
+// instance to the 15-minute backstop is strictly better than refusing to launch.
+func (s *Service) deregisterPriorInstance() {
+	// Snapshot every config field this needs under the lock. The shutdown path also
+	// writes cfg.Instance.Id, and reading it unsynchronized here would be a real race
+	// once startup and shutdown overlap. The AWS call below runs outside the lock.
+	s._mu.RLock()
+	sd := s._sd
+	cfg := s._config
+	var priorId, serviceId string
+	var apiTimeout time.Duration
+	if cfg != nil {
+		priorId = cfg.Instance.Id
+		serviceId = cfg.Service.Id
+		apiTimeout = time.Duration(cfg.Instance.SdTimeout) * time.Second
+	}
+	s._mu.RUnlock()
+
+	if sd == nil || cfg == nil || util.LenTrim(serviceId) == 0 || util.LenTrim(priorId) == 0 {
+		return
+	}
+
+	if err := s.deregisterInstanceId(sd, serviceId, priorId, apiTimeout, "Prior De-Register Instance"); err != nil {
+		log.Printf("warning: prior instance de-register failed, leaving %s to the stale-record backstop: %v", priorId, err)
+		return
+	}
+
+	// Compare-and-clear: only drop the id if a registration has not already replaced
+	// it, so a successful prior cleanup cannot erase a newly registered instance.
+	s._mu.Lock()
+	cleared := cfg.Instance.Id == priorId
+	if cleared {
+		cfg.SetInstanceId("")
+	}
+	s._mu.Unlock()
+
+	// Save only when this call actually changed the value; an unconditional save would
+	// also persist whatever unrelated viper mutations happen to be in flight.
+	if !cleared {
+		return
+	}
+
+	if err := cfg.Save(); err != nil {
+		log.Printf("warning: persisting cleared prior instance id failed: %v", err)
+	}
+}
+
+// deregisterInstanceId performs a Cloud Map deregister for one explicit instance id.
+// It is stateless: it takes the service and instance ids as immutable arguments, does
+// not read or mutate cfg, and does not touch the _deregFired one-shot token.
+// Interpreting the outcome is the caller's job.
+func (s *Service) deregisterInstanceId(sd *cloudmap.CloudMap, serviceId string, instanceId string, apiTimeout time.Duration, label string) error {
+	var timeoutDuration []time.Duration
+	if apiTimeout > 0 {
+		timeoutDuration = append(timeoutDuration, apiTimeout)
+	}
+
+	log.Println(label + " Begin: " + instanceId)
+
+	operationId, err := sdDeregisterInstanceF(sd, instanceId, serviceId, timeoutDuration...)
+	if err != nil {
+		return fmt.Errorf("%s Fail: %w", label, err)
+	}
+
+	return s.awaitSdOperation(sd, operationId, defaultSdPriorCleanupWaitSeconds*time.Second, apiTimeout, label)
+}
+
 // registerInstance will call cloud map to register service instance.
 // FIX #10: Added sdoperationstatus.Fail check to return immediately on permanent failure.
 // FIX #11: Fixed log message from "(100ms)" to "(250ms)" to match actual sleep duration.
@@ -2518,56 +2756,48 @@ func (s *Service) registerInstance(ip string, port uint, healthy bool, version s
 	}
 
 	if cfg.Instance.AutoDeregisterPrior {
-		if deregErr := s.deregisterInstance(); deregErr != nil {
-			log.Printf("warning: deregisterInstance (AutoDeregisterPrior) failed: %v", deregErr)
-		}
+		s.deregisterPriorInstance()
 	}
 
-	if instanceId, operationId, err := registry.RegisterInstance(sd, cfg.Service.Id, cfg.Instance.Prefix, ip, port, healthy, version, timeoutDuration...); err != nil {
+	instanceId, operationId, err := sdRegisterInstanceF(sd, cfg.Service.Id, cfg.Instance.Prefix, ip, port, healthy, version, timeoutDuration...)
+	if err != nil {
 		log.Println("Auto Register Instance Failed: " + err.Error())
 		return err
-	} else {
-		tryCount := 0
-
-		log.Println("Auto Register Instance Initiated... " + instanceId)
-
-		time.Sleep(250 * time.Millisecond)
-
-		for {
-			if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration...); e != nil {
-				log.Println("... Auto Register Instance Failed: " + e.Error())
-				return e
-			} else {
-				if status == sdoperationstatus.Success {
-					log.Println("... Auto Register Instance OK: " + instanceId)
-
-					cfg.SetInstanceId(instanceId)
-
-					if e2 := cfg.Save(); e2 != nil {
-						log.Println("... Update Config with Registered Instance Failed: " + e2.Error())
-						return fmt.Errorf("Register Instance Fail When Save Config Errored: %w", e2)
-					} else {
-						log.Println("... Update Config with Registered Instance OK")
-						return nil
-					}
-				} else if status == sdoperationstatus.Fail {
-					// FIX #10: Permanent failure — do not retry
-					log.Println("... Auto Register Instance Failed: Operation returned Fail status")
-					return fmt.Errorf("Register Instance Failed: Operation returned permanent Fail status")
-				} else {
-					if tryCount < 20 {
-						tryCount++
-						// FIX #11: Log message said "(100ms)" but actual sleep is 250ms
-						log.Println("... Checking Register Instance Completion Status, Attempt " + strconv.Itoa(tryCount) + " (250ms)")
-						time.Sleep(250 * time.Millisecond)
-					} else {
-						log.Println("... Auto Register Instance Failed: Operation Timeout After 5 Seconds")
-						return fmt.Errorf("Register Instance Fail When Operation Timed Out After 5 Seconds")
-					}
-				}
-			}
-		}
 	}
+
+	log.Println("Auto Register Instance Initiated... " + instanceId)
+
+	// The instance id is published only after Cloud Map confirms the operation. While
+	// the wait runs, the health-report and SNS goroutines are already live and would
+	// otherwise health-update, advertise, or persist an id that may never exist.
+	//
+	// The flip side is deliberate: if this wait gives out, Cloud Map may still complete
+	// the registration and this process no longer knows the id, so the instance is left
+	// to the notifier gateway's stale-health-record remover. That backstop is why the
+	// budget below matters — it has to be long enough that a fleet-wide restart settles
+	// inside it, or abandoned instances pile up faster than they are reclaimed.
+	if e := s.awaitSdOperation(sd, operationId,
+		sdRegisterWaitBudget(cfg.Instance.SdRegisterWaitSeconds),
+		time.Duration(cfg.Instance.SdTimeout)*time.Second,
+		"Auto Register Instance"); e != nil {
+		log.Println("... Auto Register Instance Failed: " + e.Error())
+		return fmt.Errorf("Register Instance Failed: %w", e)
+	}
+
+	log.Println("... Auto Register Instance OK: " + instanceId)
+
+	s._mu.Lock()
+	cfg.SetInstanceId(instanceId)
+	s._mu.Unlock()
+
+	if e2 := cfg.Save(); e2 != nil {
+		log.Println("... Update Config with Registered Instance Failed: " + e2.Error())
+		return fmt.Errorf("Register Instance Fail When Save Config Errored: %w", e2)
+	}
+
+	log.Println("... Update Config with Registered Instance OK")
+
+	return nil
 }
 
 // updateHealth will update instance health
@@ -2620,23 +2850,36 @@ func (s *Service) deregisterInstance() error {
 // only called through the _deregFired CAS guard in deregisterInstance,
 // so it is guaranteed to run at most once per Service lifetime.
 func (s *Service) doDeregisterInstance() error {
+	// Snapshot the ids under _mu and use the snapshot for the rest of this call.
+	// Reading cfg.Instance.Id again later would let a registration that confirms while
+	// this deregister is in flight substitute its own id: shutdown would submit for A,
+	// startup would publish B, and the clear below would erase B while only A had
+	// actually been removed — leaving B registered in Cloud Map with nothing tracking
+	// it, which is the exact failure this change exists to stop.
 	s._mu.RLock()
 	sd := s._sd
 	cfg := s._config
+	var instanceId, serviceId string
+	var sdTimeout uint
+	if cfg != nil {
+		instanceId = cfg.Instance.Id
+		serviceId = cfg.Service.Id
+		sdTimeout = cfg.Instance.SdTimeout
+	}
 	s._mu.RUnlock()
 
-	if sd == nil || cfg == nil || util.LenTrim(cfg.Service.Id) == 0 || util.LenTrim(cfg.Instance.Id) == 0 {
+	if sd == nil || cfg == nil || util.LenTrim(serviceId) == 0 || util.LenTrim(instanceId) == 0 {
 		return nil
 	}
 
 	log.Println("De-Register Instance Begin...")
 
 	var timeoutDuration []time.Duration
-	if cfg.Instance.SdTimeout > 0 {
-		timeoutDuration = append(timeoutDuration, time.Duration(cfg.Instance.SdTimeout)*time.Second)
+	if sdTimeout > 0 {
+		timeoutDuration = append(timeoutDuration, time.Duration(sdTimeout)*time.Second)
 	}
 
-	if operationId, err := registry.DeregisterInstance(sd, cfg.Instance.Id, cfg.Service.Id, timeoutDuration...); err != nil {
+	if operationId, err := sdDeregisterInstanceF(sd, instanceId, serviceId, timeoutDuration...); err != nil {
 		log.Println("... De-Register Instance Failed: " + err.Error())
 		return fmt.Errorf("De-Register Instance Fail: %w", err)
 	} else {
@@ -2645,14 +2888,28 @@ func (s *Service) doDeregisterInstance() error {
 		time.Sleep(250 * time.Millisecond)
 
 		for {
-			if status, e := registry.GetOperationStatus(sd, operationId, timeoutDuration...); e != nil {
+			if status, e := sdGetOperationStatusF(sd, operationId, timeoutDuration...); e != nil {
 				log.Println("... De-Register Instance Failed: " + e.Error())
 				return fmt.Errorf("De-Register Instance Fail: %w", e)
 			} else {
 				if status == sdoperationstatus.Success {
 					log.Println("... De-Register Instance OK")
 
-					cfg.SetInstanceId("")
+					// Compare-and-clear under _mu: only drop the id that was actually
+					// deregistered. A lock orders the startup and shutdown paths only if
+					// both take it, and the quit handler exists before registerSd runs,
+					// so a registration can publish a different id while this call polls.
+					s._mu.Lock()
+					cleared := cfg.Instance.Id == instanceId
+					if cleared {
+						cfg.SetInstanceId("")
+					}
+					s._mu.Unlock()
+
+					if !cleared {
+						log.Println("... Instance Id Changed During De-Register, Leaving It Untouched")
+						return nil
+					}
 
 					if e2 := cfg.Save(); e2 != nil {
 						log.Println("... Update Config with De-Registered Instance Failed: " + e2.Error())

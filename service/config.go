@@ -98,6 +98,7 @@ type instanceData struct {
 	InitialUnhealthy                   bool   `mapstructure:"initial_unhealthy"`
 	Id                                 string `mapstructure:"instance_id"`
 	SdTimeout                          uint   `mapstructure:"sd_timeout"`
+	SdRegisterWaitSeconds              uint   `mapstructure:"sd_register_wait_seconds"`
 	InternalHealthFrequency            uint   `mapstructure:"internal_health_frequency"`
 	AutoDeregisterPrior                bool   `mapstructure:"auto_deregister_prior"`
 	HealthReportServiceUrl             string `mapstructure:"health_report_service_url"`
@@ -383,6 +384,13 @@ func (c *config) SetInstanceId(s string) {
 	}
 }
 
+func (c *config) SetSdRegisterWaitSeconds(i uint) {
+	if c._v != nil {
+		c._v.Set("instance.sd_register_wait_seconds", i)
+		c.Instance.SdRegisterWaitSeconds = i
+	}
+}
+
 func (c *config) SetSdTimeout(i uint) {
 	if c._v != nil {
 		c._v.Set("instance.sd_timeout", i)
@@ -621,6 +629,7 @@ func (c *config) Read() error {
 		"instance.initial_unhealthy", false).Default(
 		"instance.instance_id", "").Default(
 		"instance.sd_timeout", 5).Default(
+		"instance.sd_register_wait_seconds", defaultSdRegisterWaitSeconds).Default(
 		"instance.internal_health_frequency", 5).Default(
 		"instance.auto_deregister_prior", true).Default(
 		"instance.health_report_service_url", "").Default(
