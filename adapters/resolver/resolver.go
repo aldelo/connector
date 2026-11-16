@@ -18,7 +18,6 @@ package resolver
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"regexp"
 	"strconv"
@@ -276,7 +275,6 @@ func UpdateManualResolver(schemeName string, serviceName string, endpointAddrs [
 		Addresses: addrs,
 	})
 
-	log.Println("[NOTE] Please Ignore Error 'Health check is requested but health check function is not set'; UpdateManualResolver is Completed")
 	return nil
 }
 
@@ -335,7 +333,6 @@ func UpdateManualResolverInstance(r *manual.Resolver, endpointAddrs []string) er
 		Addresses: addrs,
 	})
 
-	log.Println("[NOTE] Please Ignore Error 'Health check is requested but health check function is not set'; UpdateManualResolverInstance is Completed")
 	return nil
 }
 
