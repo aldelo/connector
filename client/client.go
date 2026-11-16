@@ -57,6 +57,11 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	// Registers grpc-go's client-side health check function. Without it, any
+	// service config carrying "healthCheckConfig" (set when UseHealthCheck is on)
+	// logs "Health check is requested but health package is not imported" for
+	// every new subchannel and health checking is silently disabled.
+	_ "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
