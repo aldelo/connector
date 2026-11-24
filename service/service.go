@@ -53,6 +53,7 @@ import (
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
 	"github.com/aldelo/connector/adapters/tracer"
+	healthreportsig "github.com/aldelo/connector/internal/healthreport"
 	"github.com/aldelo/connector/internal/safego"
 	"github.com/aldelo/connector/service/grpc_recovery"
 	ws "github.com/aldelo/connector/webserver"
@@ -163,10 +164,10 @@ func (p ShutdownPhase) String() string {
 // hash value is comprised of namespaceid + serviceid + instanceid + current date in UTC in yyyy-mm-dd format;
 // the sha256 hash salt uses named HashKey on both client and server side
 type healthreport struct {
-	NamespaceId string `json:"NamespaceId"`
-	ServiceId   string `json:"ServiceId"`
-	InstanceId  string `json:"InstanceId"`
-	AwsRegion   string `json:"AWSRegion"`
+	NamespaceId   string `json:"NamespaceId"`
+	ServiceId     string `json:"ServiceId"`
+	InstanceId    string `json:"InstanceId"`
+	AwsRegion     string `json:"AWSRegion"`
 	ServiceInfo   string `json:"ServiceInfo"`
 	HostInfo      string `json:"HostInfo"`
 	HashKeyName   string `json:"HashKeyName"`
@@ -2043,8 +2044,12 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 		return true
 	}
 
-	hashSignature := crypto.Sha256(cfg.Namespace.Id+cfg.Service.Id+cfg.Instance.Id+util.FormatDate(time.Now().UTC()), cfg.Instance.HashKeySecret)
-	hashSignatureV2 := crypto.Sha256(cfg.Namespace.Id+cfg.Service.Id+cfg.Instance.Id+cfg.Target.Region+strings.ToLower(cfg.Service.Name+"."+cfg.Namespace.Name)+localAddr+util.FormatDate(time.Now().UTC()), cfg.Instance.HashKeySecret)
+	// the signature source construction is a wire contract shared with the
+	// gateway-side verifier — both sides build it via internal/healthreport
+	// so they cannot drift apart
+	dateUTC := util.FormatDate(time.Now().UTC())
+	hashSignature := crypto.Sha256(healthreportsig.V1Source(cfg.Namespace.Id, cfg.Service.Id, cfg.Instance.Id, dateUTC), cfg.Instance.HashKeySecret)
+	hashSignatureV2 := crypto.Sha256(healthreportsig.V2Source(cfg.Namespace.Id, cfg.Service.Id, cfg.Instance.Id, cfg.Target.Region, strings.ToLower(cfg.Service.Name+"."+cfg.Namespace.Name), localAddr, dateUTC), cfg.Instance.HashKeySecret)
 
 	data := &healthreport{
 		NamespaceId:     cfg.Namespace.Id,

@@ -32,6 +32,7 @@ import (
 	"github.com/aldelo/common/wrapper/xray"
 	"github.com/aldelo/connector/adapters/registry"
 	"github.com/aldelo/connector/adapters/registry/sdoperationstatus"
+	healthreportsig "github.com/aldelo/connector/internal/healthreport"
 	"github.com/aldelo/connector/internal/safego"
 	"github.com/aldelo/connector/notifiergateway/config"
 	"github.com/aldelo/connector/notifiergateway/model"
@@ -129,6 +130,50 @@ const maxInboundBodyBytes int64 = 1 << 20 // 1 MiB
 // secureCompare performs constant-time comparison to prevent timing attacks on token/signature validation.
 func secureCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// verifyHealthReportSignatures validates an inbound health report's hash
+// signatures against the given hash secret. The v1 signature (mandatory)
+// authenticates the identity triple; the v2 signature (additive) covers every
+// mutable field — AwsRegion, ServiceInfo, and HostInfo — and is what
+// qualifies the persisted row as HostInfoVerified for the registration
+// reconciler. The signature-source construction is shared with the
+// service-side sender via internal/healthreport, so the two sides cannot
+// drift apart.
+//
+// Returns:
+//   - hostInfoVerified: true only when a v2 signature was present AND verified
+//   - ok: false when the report must be rejected (reason explains why)
+func verifyHealthReportSignatures(data *healthreport, hashSecret string, now time.Time) (hostInfoVerified bool, ok bool, reason string) {
+	if data == nil {
+		return false, false, "Health Report is Nil"
+	}
+
+	// both sides sign against the same UTC date; a report signed just before
+	// UTC midnight and verified after fails BOTH signatures (pre-existing v1
+	// semantics) — the client retries on the next heartbeat
+	dateUTC := util.FormatDate(now.UTC())
+
+	bufHash := crypto.Sha256(healthreportsig.V1Source(data.NamespaceId, data.ServiceId, data.InstanceId, dateUTC), hashSecret)
+
+	// constant-time comparison to prevent timing attacks
+	if !secureCompare(bufHash, data.HashSignature) {
+		return false, false, "Hash Signature Mismatch"
+	}
+
+	// v2 signature: when present it must verify; when absent the report
+	// persists unverified (v1-only sender during rollout)
+	if util.LenTrim(data.HashSignatureV2) > 0 {
+		buf2Hash := crypto.Sha256(healthreportsig.V2Source(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo, dateUTC), hashSecret)
+
+		if !secureCompare(buf2Hash, data.HashSignatureV2) {
+			return false, false, "V2 Hash Signature Mismatch"
+		}
+
+		return true, true, ""
+	}
+
+	return false, true, ""
 }
 
 // NewNotifierGateway constructs a new web server object for use as the notifier gateway host
@@ -438,35 +483,21 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 		c.String(401, "Inbound Health Report Hash Key Name Not Valid")
 		return
 	} else {
-		buf := data.NamespaceId + data.ServiceId + data.InstanceId + util.FormatDate(time.Now().UTC())
-		bufHash := crypto.Sha256(buf, hashSecret)
+		verified, ok, reason := verifyHealthReportSignatures(&data, hashSecret, time.Now())
 
-		// FIX #7: Use constant-time comparison to prevent timing attacks
-		if !secureCompare(bufHash, data.HashSignature) {
-			log.Println("!!! Inbound Health Report Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: Hash Signature Mismatch !!!")
-			// FIX #6: Do not log hash secret in plaintext
-			log.Println("... Host = Sha256 Source: " + escapeUserInput(buf))
-			log.Println("... Client Sha256 Signature Mismatch")
-			c.String(401, "Inbound Health Report Hash Signature Not Valid")
+		if !ok {
+			if strings.Contains(reason, "V2") {
+				log.Println("!!! Inbound Health Report V2 Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: " + reason + " !!!")
+				c.String(401, "Inbound Health Report V2 Hash Signature Not Valid")
+			} else {
+				log.Println("!!! Inbound Health Report Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: " + reason + " !!!")
+				log.Println("... Client Sha256 Signature Mismatch")
+				c.String(401, "Inbound Health Report Hash Signature Not Valid")
+			}
 			return
 		}
 
-		// v2 signature (additive): when present it must verify; when it
-		// verifies, the persisted row is marked HostInfoVerified, which is
-		// the reconciler's trust gate — HostInfo then cannot be forged by
-		// replaying a captured body with a modified endpoint
-		if util.LenTrim(data.HashSignatureV2) > 0 {
-			buf2 := data.NamespaceId + data.ServiceId + data.InstanceId + data.AwsRegion + data.ServiceInfo + data.HostInfo + util.FormatDate(time.Now().UTC())
-			buf2Hash := crypto.Sha256(buf2, hashSecret)
-
-			if !secureCompare(buf2Hash, data.HashSignatureV2) {
-				log.Println("!!! Inbound Health Report V2 Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: Hash Signature Mismatch !!!")
-				c.String(401, "Inbound Health Report V2 Hash Signature Not Valid")
-				return
-			}
-
-			hostInfoVerified = true
-		}
+		hostInfoVerified = verified
 	}
 
 	if xray.XRayServiceOn() {
@@ -1312,6 +1343,13 @@ const (
 	// be re-registered (bad service-id shape, unresolvable HostInfo), so a
 	// permanently-broken row does not page every cycle.
 	unhealableLogInterval = 1 * time.Hour
+
+	// reconcileStateMaxAge bounds how long reconciliation state (confirmation
+	// sightings, restore timestamps, unhealable notice timestamps) survives
+	// for an instance id: entries older than this can only belong to
+	// decommissioned instances, whose rows are long gone — pruning them keeps
+	// the state maps from leaking one entry per ever-decommissioned instance.
+	reconcileStateMaxAge = 24 * time.Hour
 )
 
 // Remover seams and state, overridable/inspectable in unit tests.
@@ -1849,6 +1887,31 @@ func reconcileMissingRegistrations() {
 		return
 	}
 
+	now := time.Now().UTC()
+
+	// prune reconciliation state for instances whose records are long gone
+	// (runs even on idle cycles so a dormant gateway does not retain state):
+	// entries older than reconcileStateMaxAge can only belong to
+	// decommissioned instances — confirmation and backoff windows are minutes
+	reconcileStateMu.Lock()
+	pruneBefore := now.Add(-reconcileStateMaxAge)
+	for id, t := range reconcileFirstSeen {
+		if t.Before(pruneBefore) {
+			delete(reconcileFirstSeen, id)
+		}
+	}
+	for id, t := range lastReRegisteredAt {
+		if t.Before(pruneBefore) {
+			delete(lastReRegisteredAt, id)
+		}
+	}
+	for id, t := range unhealableLoggedAt {
+		if t.Before(pruneBefore) {
+			delete(unhealableLoggedAt, id)
+		}
+	}
+	reconcileStateMu.Unlock()
+
 	if len(items) == 0 {
 		return
 	}
@@ -1862,7 +1925,6 @@ func reconcileMissingRegistrations() {
 	eligibleByService := make(map[svcKey][]*model.HealthStatus)
 
 	freshWindow := time.Duration(model.EffectiveHealthReportRecordStaleMinutes()) * time.Minute
-	now := time.Now().UTC()
 
 	for _, v := range items {
 		if v == nil || v.LastTimestamp <= 0 {
@@ -1933,9 +1995,7 @@ func reconcileMissingRegistrations() {
 
 	restoresRemaining := maxReRegistersPerCycle
 	inspected := 0
-	missingCount := 0
-	restored := 0
-	deferred := 0
+	var totals reconcileTally
 
 	for i := 0; i < budget; i++ {
 		k := keys[(start+i)%len(keys)]
@@ -1951,32 +2011,44 @@ func reconcileMissingRegistrations() {
 		}
 
 		inspected++
-		used, missing := reconcileService(sd, k.serviceId, eligibleByService[k], &restoresRemaining)
-		restored += used
-		missingCount += missing
-		deferred += missing - used
+		t := reconcileService(sd, k.serviceId, eligibleByService[k], &restoresRemaining)
+		totals.missing += t.missing
+		totals.restored += t.restored
+		totals.deferred += t.deferred
+		totals.backedOff += t.backedOff
+		totals.unhealable += t.unhealable
 	}
 
 	reconcileStateMu.Lock()
 	reconcileCursor = (start + budget) % len(keys)
 	reconcileStateMu.Unlock()
 
-	log.Printf("~~~ Registration Reconciliation: %s service(s) inspected, %s instance(s) missing, %s re-registered, %s deferred to subsequent cycles ~~~",
-		util.Itoa(inspected), util.Itoa(missingCount), util.Itoa(restored), util.Itoa(deferred))
+	log.Printf("~~~ Registration Reconciliation: %s service(s) inspected, %s instance(s) missing, %s re-registered, %s deferred to subsequent cycles, %s deliberate-removal stand-down(s), %s unhealable ~~~",
+		util.Itoa(inspected), util.Itoa(totals.missing), util.Itoa(totals.restored), util.Itoa(totals.deferred), util.Itoa(totals.backedOff), util.Itoa(totals.unhealable))
 }
 
 // reconcileService restores missing Cloud Map registrations for the verified,
 // fresh health records of one Cloud Map service. It returns how many
 // restorations it performed and how many missing instances it identified;
 // restoresRemaining is the cycle-wide budget shared across services.
-func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.HealthStatus, restoresRemaining *int) (restored int, missing int) {
+func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.HealthStatus, restoresRemaining *int) reconcileTally {
+	var tally reconcileTally
+
 	now := time.Now().UTC()
+
+	// per-service pre-check: an invalid service id can never be registered —
+	// skip the whole service before spending a Cloud Map API call on it
+	if err := registry.ValidateServiceID(serviceId); err != nil {
+		log.Printf("~~~ Registration Reconciliation Skipped Service '%s': service id can never be registered (%s) ~~~",
+			escapeUserInput(serviceId), escapeUserInput(err.Error()))
+		return tally
+	}
 
 	registered, err := sdListRegisteredFn(sd, serviceId)
 	if err != nil {
 		log.Printf("~~~ Registration Reconciliation Skipped Service '%s': %s ~~~",
 			escapeUserInput(serviceId), escapeUserInput(err.Error()))
-		return 0, 0
+		return tally
 	}
 
 	timeoutDuration := time.Duration(model.GetServiceDiscoveryTimeoutSeconds()) * time.Second
@@ -2001,7 +2073,7 @@ func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.Hea
 			continue
 		}
 
-		missing++
+		tally.missing++
 
 		reconcileStateMu.Lock()
 		firstSeen, seenBefore := reconcileFirstSeen[instanceId]
@@ -2027,45 +2099,49 @@ func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.Hea
 		if wasRestored && now.Sub(lastRestoredAt) < reRegisterBackoffWindow() {
 			log.Printf("!!! Registration Reconciliation: Instance '%s' (Service '%s') was re-registered by the gateway %s ago and is missing again — deliberate removal suspected, standing down for this instance (remove its health record to make removal permanent) !!!",
 				escapeUserInput(instanceId), escapeUserInput(serviceId), now.Sub(lastRestoredAt).Round(time.Second))
+			tally.backedOff++
 			continue
 		}
 
-		// unhealable pre-checks: never spend probe/register budget on rows
-		// that cannot be registered, and never page on them every cycle
-		if err := registry.ValidateServiceID(serviceId); err != nil {
-			logUnhealable(instanceId, serviceId, "service id can never be registered ("+err.Error()+")")
+		// cycle-wide restore budget: checked before any per-row work so
+		// budget-exhausted cycles cost nothing beyond the query itself
+		if *restoresRemaining <= 0 {
+			tally.deferred++
 			continue
 		}
 
 		host, portStr, parseErr := parseHostPort(v.HostInfo)
 		if parseErr != nil {
 			logUnhealable(instanceId, serviceId, parseErr.Error())
+			tally.unhealable++
 			continue
-		}
-
-		// resolve to an IPv4 literal (Cloud Map accepts only IPv4; legacy
-		// rows may carry DNS hostnames)
-		if net.ParseIP(host) == nil || net.ParseIP(host).To4() == nil {
-			resolved, rerr := lookupIPv4Fn(host)
-			if rerr != nil || resolved == "" {
-				logUnhealable(instanceId, serviceId, "HostInfo host '"+host+"' does not resolve to an IPv4 address")
-				continue
-			}
-			host = resolved
 		}
 
 		portNum, convErr := strconv.ParseUint(portStr, 10, 16)
 		if convErr != nil || portNum == 0 {
 			logUnhealable(instanceId, serviceId, "HostInfo port '"+portStr+"' is invalid")
+			tally.unhealable++
 			continue
 		}
 
-		if *restoresRemaining <= 0 {
-			continue // cycle-wide restore budget exhausted; next cycle continues
+		// one shared probe unit per row covers its network probes (DNS
+		// resolution for hostname rows and the TCP dial) — budget-exhausted
+		// rows defer instead of stretching the sweep goroutine's cadence
+		if !consumeCycleProbe() {
+			tally.deferred++
+			continue
 		}
 
-		if !consumeCycleProbe() {
-			continue // shared probe budget exhausted; next cycle continues
+		// resolve to an IPv4 literal (Cloud Map accepts only IPv4; legacy
+		// rows may carry DNS hostnames)
+		if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
+			resolved, rerr := lookupIPv4Fn(host)
+			if rerr != nil || resolved == "" {
+				logUnhealable(instanceId, serviceId, "HostInfo host '"+host+"' does not resolve to an IPv4 address")
+				tally.unhealable++
+				continue
+			}
+			host = resolved
 		}
 
 		target := net.JoinHostPort(host, portStr)
@@ -2087,10 +2163,13 @@ func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.Hea
 		_, regErr := sdRegisterExistingFn(sd, serviceId, instanceId, host, uint(portNum), true, "", timeoutDuration)
 
 		if regErr != nil && isDuplicateInstanceError(regErr) {
-			// the other gateway task converged first — idempotent success
+			// the other gateway task converged first. DuplicateRequest means
+			// a same-creator request is IN FLIGHT, not that it succeeded —
+			// so this consumes no restore budget and records no state: the
+			// next cycle re-checks and sees the outcome either way.
 			log.Printf("~~~ Registration Reconciliation: Instance '%s' (Service '%s') already re-registered (converged with the other gateway task) ~~~",
 				escapeUserInput(instanceId), escapeUserInput(serviceId))
-			regErr = nil
+			continue
 		}
 
 		if regErr != nil {
@@ -2100,7 +2179,7 @@ func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.Hea
 		}
 
 		*restoresRemaining--
-		restored++
+		tally.restored++
 
 		reconcileStateMu.Lock()
 		lastReRegisteredAt[instanceId] = now
@@ -2111,7 +2190,16 @@ func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.Hea
 			escapeUserInput(instanceId), escapeUserInput(serviceId), escapeUserInput(target))
 	}
 
-	return restored, missing
+	return tally
+}
+
+// reconcileTally counts one reconcile cycle's outcomes for the summary log.
+type reconcileTally struct {
+	missing    int // instances observed fresh-but-missing
+	restored   int // registrations successfully restored this cycle
+	deferred   int // skipped due to exhausted budgets (retried next cycle)
+	backedOff  int // deliberately stood down (suspected manual removal)
+	unhealable int // rows that can never be re-registered (manual cleanup)
 }
 
 // logUnhealable reports a row that can never be re-registered, throttled to at
@@ -2163,6 +2251,7 @@ func sdListRegistered(sd *cloudmap.CloudMap, serviceId string) (map[string]bool,
 
 	ids := map[string]bool{}
 	nextToken := ""
+	truncated := false
 
 	for page := 0; page < maxListInstancePages; page++ {
 		instances, more, err := sdListInstancesPageFn(sd, serviceId, aws.Int64(100), nextToken, timeoutDuration)
@@ -2181,6 +2270,20 @@ func sdListRegistered(sd *cloudmap.CloudMap, serviceId string) (map[string]bool,
 		}
 
 		nextToken = more
+
+		if page == maxListInstancePages-1 {
+			truncated = true
+		}
+	}
+
+	// fail closed: a truncated registered-set view would mark every instance
+	// beyond the cap as missing every cycle — re-registering live instances
+	// (wiping their Cloud Map attributes) and paging on the deliberate-removal
+	// backoff. Never act on a known-incomplete view.
+	if truncated {
+		log.Printf("!!! Registration Reconciliation: ListInstances pagination cap of %s pages (x100 results) reached with more results outstanding for Service '%s' — registered-set view is INCOMPLETE, service skipped this cycle (investigate: unexpected instance count) !!!",
+			util.Itoa(maxListInstancePages), escapeUserInput(serviceId))
+		return nil, fmt.Errorf("ListInstances Pagination Cap Reached With More Results (Incomplete Registered-Set View)")
 	}
 
 	return ids, nil

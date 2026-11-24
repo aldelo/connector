@@ -23,7 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aldelo/common/crypto"
 	"github.com/aldelo/common/wrapper/cloudmap"
+	healthreportsig "github.com/aldelo/connector/internal/healthreport"
 	"github.com/aldelo/connector/notifiergateway/model"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/servicediscovery"
@@ -530,7 +532,9 @@ func TestReconcile_SharedProbeBudget(t *testing.T) {
 
 // TestReconcile_DuplicateInstanceErrorConverges: a duplicate-instance error
 // from Cloud Map (the other gateway task converged first) is treated as
-// success, not a failure.
+// benign — logged, no failure page — but it does NOT consume the restore
+// budget or impose the backoff, because DuplicateRequest means a same-creator
+// request is in flight, not that it succeeded.
 func TestReconcile_DuplicateInstanceErrorConverges(t *testing.T) {
 	listFreshPtr := reconcileSeams(t)
 
@@ -552,15 +556,15 @@ func TestReconcile_DuplicateInstanceErrorConverges(t *testing.T) {
 
 	seedConfirmedMissing("x-nae-dupe", reconcileConfirmationWindow()+time.Minute)
 
-	// must not panic; convergence is recorded as a restore
+	// must not panic; convergence is NOT recorded as a restore
 	reconcileMissingRegistrations()
 
 	reconcileStateMu.Lock()
 	_, restored := lastReRegisteredAt["x-nae-dupe"]
 	reconcileStateMu.Unlock()
 
-	if !restored {
-		t.Fatal("duplicate-instance convergence was not recorded as a restore")
+	if restored {
+		t.Fatal("duplicate-instance convergence was recorded as a restore — in-flight requests must not consume budget or impose backoff")
 	}
 }
 
@@ -634,7 +638,8 @@ func TestReconcile_ServiceBudgetRotates(t *testing.T) {
 	var rows []*model.HealthStatus
 	for i := 0; i < total; i++ {
 		r := freshRow("x-nae-inst", "127.0.0.1:12345")
-		r.ServiceId = "srv-0123456789abcde" + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26))
+		// 16 lowercase hex chars after "srv-" to satisfy the Cloud Map id pattern
+		r.ServiceId = fmt.Sprintf("srv-%016x", i)
 		r.InstanceId = "x-nae-inst-" + r.ServiceId
 		rows = append(rows, r)
 	}
@@ -707,4 +712,175 @@ func TestReconcileConfirmationWindowAtLeastOneCycle(t *testing.T) {
 	if reconcileConfirmationWindow() < minReconcileConfirmWindow {
 		t.Fatal("confirmation window below its floor")
 	}
+}
+
+// TestReconcile_PaginationCapFailsClosed: when ListInstances hits the page
+// cap with a next token outstanding, the registered-set view is INCOMPLETE —
+// the service must be skipped entirely (fail closed), never acted upon.
+// Acting on a truncated view would mark every instance beyond the cap as
+// missing forever: attribute-wiping re-registers plus backoff paging.
+func TestReconcile_PaginationCapFailsClosed(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	sdListRegisteredFn = sdListRegistered
+	sdClientForFn = func(namespaceId, awsRegion string) (*cloudmap.CloudMap, error) {
+		return &cloudmap.CloudMap{}, nil
+	}
+
+	pages := 0
+	sdListInstancesPageFn = func(sd *cloudmap.CloudMap, serviceId string, maxResults *int64, nextToken string, timeoutDuration time.Duration) ([]*servicediscovery.InstanceSummary, string, error) {
+		pages++
+		// every page carries the row's instance AND a dangling next token
+		return []*servicediscovery.InstanceSummary{{Id: aws.String("x-nae-beyond-cap")}}, "more-please", nil
+	}
+
+	registered := 0
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		registered++
+		return "op-test", nil
+	}
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{freshRow("x-nae-beyond-cap", "127.0.0.1:12345")}, nil
+	}
+
+	seedConfirmedMissing("x-nae-beyond-cap", reconcileConfirmationWindow()+time.Minute)
+
+	reconcileMissingRegistrations()
+
+	if pages != maxListInstancePages {
+		t.Fatalf("expected the page cap of %d to be hit, got %d pages", maxListInstancePages, pages)
+	}
+
+	if registered != 0 {
+		t.Fatalf("acted on a truncated registered-set view (%d register calls) — must fail closed", registered)
+	}
+}
+
+// TestReconcile_StatePrunedForDecommissionedInstances: reconciliation state
+// entries older than reconcileStateMaxAge are pruned on every cycle, so
+// decommissioned instances do not leak entries forever; recent entries stay.
+func TestReconcile_StatePrunedForDecommissionedInstances(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	ancient := time.Now().UTC().Add(-reconcileStateMaxAge - time.Hour)
+	recent := time.Now().UTC().Add(-time.Minute)
+
+	reconcileStateMu.Lock()
+	reconcileFirstSeen = map[string]time.Time{"x-nae-old": ancient, "x-nae-new": recent}
+	lastReRegisteredAt = map[string]time.Time{"x-nae-old": ancient, "x-nae-new": recent}
+	unhealableLoggedAt = map[string]time.Time{"x-nae-old": ancient, "x-nae-new": recent}
+	reconcileStateMu.Unlock()
+
+	// idle cycle (empty fresh list) still prunes
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{}, nil
+	}
+
+	reconcileMissingRegistrations()
+
+	reconcileStateMu.Lock()
+	defer reconcileStateMu.Unlock()
+
+	for _, m := range []map[string]time.Time{reconcileFirstSeen, lastReRegisteredAt, unhealableLoggedAt} {
+		if _, ok := m["x-nae-old"]; ok {
+			t.Fatal("state for a decommissioned (ancient) instance was not pruned")
+		}
+		if _, ok := m["x-nae-new"]; !ok {
+			t.Fatal("recent state was pruned — active entries must survive")
+		}
+	}
+}
+
+// TestVerifyHealthReportSignatures pins the gateway-side signature matrix:
+// v1 is mandatory, v2 is additive, and every combination degrades safely.
+func TestVerifyHealthReportSignatures(t *testing.T) {
+	secret := "test-hash-secret"
+	date := "2026-11-24"
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+
+	valid := func(v2 string) *healthreport {
+		d := &healthreport{
+			NamespaceId:   "ns-test",
+			ServiceId:     "srv-0123456789abcdef",
+			InstanceId:    "x-nae-a",
+			AwsRegion:     "us-east-1",
+			ServiceInfo:   "svc-test.dev.aldelo.nae",
+			HostInfo:      "10.2.0.1:50000",
+			HashSignature: crypto.Sha256(healthreportsig.V1Source("ns-test", "srv-0123456789abcdef", "x-nae-a", date), secret),
+		}
+		if v2 != "" {
+			d.HashSignatureV2 = v2
+		}
+		return d
+	}
+
+	validV2 := func(d *healthreport) string {
+		return crypto.Sha256(healthreportsig.V2Source(d.NamespaceId, d.ServiceId, d.InstanceId, d.AwsRegion, d.ServiceInfo, d.HostInfo, date), secret)
+	}
+
+	t.Run("v1 ok, no v2", func(t *testing.T) {
+		verified, ok, _ := verifyHealthReportSignatures(valid(""), secret, now)
+		if !ok || verified {
+			t.Fatalf("v1-only report: ok=%v verified=%v, want ok=true verified=false", ok, verified)
+		}
+	})
+
+	t.Run("v1 ok, v2 ok", func(t *testing.T) {
+		d := valid("")
+		d.HashSignatureV2 = validV2(d)
+		verified, ok, _ := verifyHealthReportSignatures(d, secret, now)
+		if !ok || !verified {
+			t.Fatalf("fully-signed report: ok=%v verified=%v, want ok=true verified=true", ok, verified)
+		}
+	})
+
+	t.Run("v1 mismatch", func(t *testing.T) {
+		d := valid("")
+		d.HashSignature = "wrong"
+		_, ok, _ := verifyHealthReportSignatures(d, secret, now)
+		if ok {
+			t.Fatal("v1 mismatch must reject the report")
+		}
+	})
+
+	t.Run("v1 ok, v2 mismatch", func(t *testing.T) {
+		d := valid("")
+		d.HashSignatureV2 = "wrong"
+		_, ok, _ := verifyHealthReportSignatures(d, secret, now)
+		if ok {
+			t.Fatal("v2 mismatch must reject the report even when v1 passes")
+		}
+	})
+
+	t.Run("v2 cannot bypass v1", func(t *testing.T) {
+		d := valid("")
+		d.HashSignature = "wrong"
+		d.HashSignatureV2 = validV2(d)
+		_, ok, _ := verifyHealthReportSignatures(d, secret, now)
+		if ok {
+			t.Fatal("a valid v2 must not bypass a failed v1")
+		}
+	})
+
+	t.Run("midnight rollover fails both", func(t *testing.T) {
+		d := valid("")
+		d.HashSignatureV2 = validV2(d)
+		// verify "the next day" — both signatures are date-bound
+		nextDay := time.Date(2026, 11, 25, 0, 30, 0, 0, time.UTC)
+		_, ok, _ := verifyHealthReportSignatures(d, secret, nextDay)
+		if ok {
+			t.Fatal("date rollover must fail both signatures (client retries)")
+		}
+	})
+
+	t.Run("forged hostinfo breaks v2", func(t *testing.T) {
+		d := valid("")
+		d.HashSignatureV2 = validV2(d)
+		d.HostInfo = "9.9.9.9:53" // tampered after signing
+		verified, ok, _ := verifyHealthReportSignatures(d, secret, now)
+		if ok || verified {
+			t.Fatal("tampered HostInfo with stale v2 must be rejected")
+		}
+	})
 }
