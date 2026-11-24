@@ -1,12 +1,15 @@
 package notifiergateway
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"runtime/debug"
 	"sort"
@@ -14,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aws/aws-sdk-go/service/servicediscovery"
 
 	util "github.com/aldelo/common"
 	"github.com/aldelo/common/crypto"
@@ -106,6 +111,14 @@ type healthreport struct {
 	HostInfo      string `json:"HostInfo"`
 	HashKeyName   string `json:"HashKeyName"`
 	HashSignature string `json:"HashSignature"`
+	// HashSignatureV2 covers all mutable fields (see service-side struct):
+	// namespaceid + serviceid + instanceid + awsregion + serviceinfo +
+	// hostinfo + current UTC date, salted with the named HashKey. When it
+	// verifies, the persisted row is marked HostInfoVerified and becomes
+	// eligible for the registration reconciler, which writes HostInfo into
+	// Cloud Map. v1 stays mandatory, so v1-only senders interoperate (their
+	// rows persist, just without reconciler eligibility).
+	HashSignatureV2 string `json:"HashSignatureV2"`
 }
 
 // maxInboundBodyBytes caps the request body size for SNS callback and
@@ -414,6 +427,11 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 	// FIX #8: Escape user-controlled HashKeyName before logging
 	escapedHashKeyName := escapeUserInput(data.HashKeyName)
 
+	// hostInfoVerified is set below when the additive v2 signature (which
+	// covers HostInfo) verifies; it travels into the persisted row and gates
+	// the registration reconciler
+	hostInfoVerified := false
+
 	hashSecret, hsFound := model.GetHashKey(strings.TrimSpace(data.HashKeyName))
 	if !hsFound || util.LenTrim(hashSecret) == 0 {
 		log.Println("!!! Inbound Health Report Hash Key Name '" + escapedHashKeyName + "' From " + escapeUserInput(c.ClientIP()) + " Not Valid: Host Does Not Expect This Hash Key Name !!!")
@@ -432,6 +450,23 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 			c.String(401, "Inbound Health Report Hash Signature Not Valid")
 			return
 		}
+
+		// v2 signature (additive): when present it must verify; when it
+		// verifies, the persisted row is marked HostInfoVerified, which is
+		// the reconciler's trust gate — HostInfo then cannot be forged by
+		// replaying a captured body with a modified endpoint
+		if util.LenTrim(data.HashSignatureV2) > 0 {
+			buf2 := data.NamespaceId + data.ServiceId + data.InstanceId + data.AwsRegion + data.ServiceInfo + data.HostInfo + util.FormatDate(time.Now().UTC())
+			buf2Hash := crypto.Sha256(buf2, hashSecret)
+
+			if !secureCompare(buf2Hash, data.HashSignatureV2) {
+				log.Println("!!! Inbound Health Report V2 Hash Signature From " + escapeUserInput(c.ClientIP()) + " Not Valid: Hash Signature Mismatch !!!")
+				c.String(401, "Inbound Health Report V2 Hash Signature Not Valid")
+				return
+			}
+
+			hostInfoVerified = true
+		}
 	}
 
 	if xray.XRayServiceOn() {
@@ -442,7 +477,7 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 		defer trace.Close()
 
 		trace.Capture("healthReporter.writeToDataStore", func() error {
-			if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo); e != nil {
+			if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo, hostInfoVerified); e != nil {
 				log.Println("!!! Inbound Health Report (NamespaceID '" + escapeUserInput(data.NamespaceId) + "', ServiceID '" + escapeUserInput(data.ServiceId) + "', InstanceID '" + escapeUserInput(data.InstanceId) + "') Persist to Data Store Failed: " + e.Error() + " !!!")
 				c.String(500, "Persist Instance Status to Data Store Failed")
 				return fmt.Errorf("Persist Instance Status to Data Store Failed: %w", e)
@@ -463,7 +498,7 @@ func healthreporter(c *gin.Context, bindingInputPtr interface{}) {
 		})
 	} else {
 		// store health report update to dynamodb
-		if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo); e != nil {
+		if e := model.SetInstanceHealthToDataStore(data.NamespaceId, data.ServiceId, data.InstanceId, data.AwsRegion, data.ServiceInfo, data.HostInfo, hostInfoVerified); e != nil {
 			log.Println("!!! Inbound Health Report (NamespaceID '" + escapeUserInput(data.NamespaceId) + "', ServiceID '" + escapeUserInput(data.ServiceId) + "', InstanceID '" + escapeUserInput(data.InstanceId) + "') Persist to Data Store Failed: " + e.Error() + " !!!")
 			c.String(500, "Persist Instance Status to Data Store Failed")
 		} else {
@@ -1245,9 +1280,10 @@ const (
 	// rotating cursor covers the remainder over subsequent cycles.
 	maxReconcileServicesPerCycle = 25
 
-	// maxReRegistersPerCycle bounds how many missing registrations one cycle
-	// may restore — blast-radius symmetry with maxDeregistersPerCycle. Missing
-	// registrations are rediscovered on every cycle, so deferral is harmless.
+	// maxReRegistersPerCycle bounds how many missing registrations ONE CYCLE
+	// may restore across ALL services (not per service) — blast-radius
+	// symmetry with maxDeregistersPerCycle. Missing registrations are
+	// rediscovered on every cycle, so deferral is harmless.
 	maxReRegistersPerCycle = 5
 
 	// capEscalationCycles is how many consecutive capped cycles must occur
@@ -1255,6 +1291,27 @@ const (
 	// token, so routine backlog drains (mass redeploys, scale-ins) do not page
 	// while a genuinely stuck sweep does.
 	capEscalationCycles = 3
+
+	// minReconcileConfirmWindow is the floor for how long an instance must
+	// have been continuously observed fresh-but-missing before it may be
+	// re-registered; see reconcileConfirmationWindow for the effective value.
+	minReconcileConfirmWindow = 60 * time.Second
+
+	// reRegisterBackoffFactor multiplies the sweep interval into the window
+	// during which a freshly re-registered instance that goes missing AGAIN
+	// is treated as deliberately removed (ops deregistering a bad instance, a
+	// draining service) — the reconciler stands down for that instance and
+	// pages !!! instead of fighting the human.
+	reRegisterBackoffFactor = 5
+
+	// maxListInstancePages bounds ListInstances pagination for the
+	// reconciler's registered-id collection.
+	maxListInstancePages = 10
+
+	// unhealableLogInterval throttles the @@@ notice for rows that can never
+	// be re-registered (bad service-id shape, unresolvable HostInfo), so a
+	// permanently-broken row does not page every cycle.
+	unhealableLogInterval = 1 * time.Hour
 )
 
 // Remover seams and state, overridable/inspectable in unit tests.
@@ -1272,17 +1329,85 @@ var (
 	consecutiveCappedCycles int
 
 	// Registration-reconciliation seams, overridable in unit tests.
-	listAllInstances     = model.ListAllInstancesFromDataStore
-	sdListRegisteredFn   = sdListRegistered
-	sdRegisterExistingFn = registry.RegisterExistingInstance
-	sdClientForFn        = sdClientFor
+	listFreshInstances    = model.ListFreshInstancesFromDataStore
+	sdListRegisteredFn    = sdListRegistered
+	sdListInstancesPageFn = sdListInstancesPage
+	sdRegisterExistingFn  = registry.RegisterExistingInstance
+	sdClientForFn         = sdClientFor
+	lookupIPv4Fn          = lookupIPv4
+
+	// reconcileStateMu guards the reconciliation state maps and cursor.
+	reconcileStateMu sync.Mutex
 
 	// reconcileCursor rotates which slice of the (deterministically sorted)
-	// service list the reconciliation leg inspects each cycle. Guarded by
-	// reconcileMu.
+	// service list the reconciliation leg inspects each cycle. Seeded per
+	// task (hostname-derived) so the two gateway tasks inspect different
+	// slices instead of colliding on the same services.
 	reconcileCursor int
-	reconcileMu     sync.Mutex
+	reconcileSeeded bool
+
+	// reconcileFirstSeen tracks when each instance was first observed
+	// fresh-but-missing, implementing the re-registration confirmation
+	// window (do not fight a deliberate deregistration within one cycle).
+	reconcileFirstSeen map[string]time.Time = map[string]time.Time{}
+
+	// lastReRegisteredAt tracks when the gateway last restored an instance,
+	// for the deliberate-removal backoff.
+	lastReRegisteredAt map[string]time.Time = map[string]time.Time{}
+
+	// unhealableLoggedAt throttles unhealable-class notices per instance.
+	unhealableLoggedAt map[string]time.Time = map[string]time.Time{}
+
+	// cycleProbeBudgetRemaining is the per-cycle TCP probe budget shared by
+	// the stale sweep and the reconciler (both legs dial endpoints; DROP
+	// firewalls make each dial cost the full timeout). Reset by the sweeper
+	// loop at the start of each cycle. Guarded by reconcileStateMu.
+	cycleProbeBudgetRemaining int
 )
+
+// resetCycleProbeBudget refills the shared per-cycle probe budget.
+func resetCycleProbeBudget() {
+	reconcileStateMu.Lock()
+	defer reconcileStateMu.Unlock()
+	cycleProbeBudgetRemaining = maxLivenessProbesPerCycle
+}
+
+// consumeCycleProbe takes one unit from the shared per-cycle probe budget;
+// false means the budget is exhausted and the probe must be deferred.
+func consumeCycleProbe() bool {
+	reconcileStateMu.Lock()
+	defer reconcileStateMu.Unlock()
+	if cycleProbeBudgetRemaining <= 0 {
+		return false
+	}
+	cycleProbeBudgetRemaining--
+	return true
+}
+
+// reconcileConfirmationWindow returns how long an instance must have been
+// continuously observed fresh-but-missing before the reconciler may act — at
+// least one full sweep interval, so a deliberate deregistration (ops removing
+// a bad instance, a draining service) gets one cycle of quiet.
+func reconcileConfirmationWindow() time.Duration {
+	freq := time.Duration(model.GetHealthReportCleanUpFrequencySeconds()) * time.Second
+	if freq <= 0 {
+		freq = 120 * time.Second
+	}
+	if freq < minReconcileConfirmWindow {
+		freq = minReconcileConfirmWindow
+	}
+	return freq
+}
+
+// reRegisterBackoffWindow returns how long after a gateway re-registration a
+// fresh instance going missing AGAIN is treated as deliberate removal.
+func reRegisterBackoffWindow() time.Duration {
+	freq := time.Duration(model.GetHealthReportCleanUpFrequencySeconds()) * time.Second
+	if freq <= 0 {
+		freq = 120 * time.Second
+	}
+	return freq * time.Duration(reRegisterBackoffFactor)
+}
 
 // staleConfirmationWindow returns how long an instance must have been
 // continuously observed stale before it may be deregistered. It is at least
@@ -1428,6 +1553,7 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 
 		// Run immediately on startup before waiting for the first tick
 		log.Println(">>> Stale Health Report Record Remover - Processing Invoked <<<")
+		resetCycleProbeBudget()
 		removeInactiveInstancesFromServiceDiscovery()
 		reconcileMissingRegistrations()
 
@@ -1442,6 +1568,7 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 
 			case <-ticker.C:
 				log.Println(">>> Stale Health Report Record Remover - Processing Invoked <<<")
+				resetCycleProbeBudget()
 				removeInactiveInstancesFromServiceDiscovery()
 				reconcileMissingRegistrations()
 			}
@@ -1557,19 +1684,16 @@ func removeInactiveInstancesFromServiceDiscovery() {
 	// deregistered based on record age alone.
 	var confirmed []confirmedStale
 	aliveKept := 0
-	probeBudget := maxLivenessProbesPerCycle
 	deferredProbes := 0
 
 	for _, cand := range eligible {
 		v := cand.item
 		instanceId := v.InstanceId
 
-		if probeBudget == 0 {
+		if !consumeCycleProbe() {
 			deferredProbes++
 			continue
 		}
-
-		probeBudget--
 
 		target, parseErr := parseDialTarget(v.HostInfo)
 
@@ -1681,18 +1805,32 @@ func removeInactiveInstancesFromServiceDiscovery() {
 //
 // This bounds any wrongful deregistration — whatever its cause (sweeper
 // defect, manual removal, API anomaly, the other gateway task acting on bad
-// data) — to about one heartbeat interval plus one sweep cycle, instead of
+// data) — to about one heartbeat interval plus a few sweep cycles, instead of
 // requiring a service restart (services only register at startup; incident
 // 2026-11-23 stayed broken for ~6 hours for exactly this reason).
 //
-// Safety properties:
-//   - only FRESH records are considered (stale records belong to the stale
-//     sweep; a data-store outage makes records look staler, never fresher,
-//     so the leg is naturally inert during data-store degradation);
+// Safety properties (each addressed a review finding):
+//   - only FRESH, HostInfo-VERIFIED records are eligible — the v2 hash
+//     signature covers HostInfo, so an unsigned/replayed HostInfo can never
+//     become registration authority (rows from v1-only senders are simply
+//     not healed until they upgrade);
+//   - a fresh-but-missing instance must stay missing for
+//     reconcileConfirmationWindow() (>= one full sweep interval) before it is
+//     re-registered, so deliberate deregistration (ops removing a bad
+//     instance, a draining service) is not fought within one cycle;
+//   - an instance the gateway re-registered that goes missing again within
+//     reRegisterBackoffWindow() is treated as deliberately removed: the
+//     reconciler stands down for it and pages !!! instead of reinstating it;
 //   - the endpoint is TCP-verified before its registration is restored, so a
 //     dead endpoint is never resurrected into discovery;
-//   - at most maxReRegistersPerCycle restorations and maxReconcileServicesPerCycle
-//     inspected services per cycle, rotating across cycles.
+//   - shared per-cycle probe budget with the stale sweep (both legs dial);
+//   - at most maxReRegistersPerCycle restorations per cycle ACROSS ALL
+//     services, and maxReconcileServicesPerCycle services inspected per
+//     cycle, rotating across cycles (cursor seeded per task so the two
+//     gateway tasks cover different slices);
+//   - rows that can never be re-registered (bad service-id shape,
+//     unresolvable HostInfo) are logged at most once per
+//     unhealableLogInterval at @@@, never with the !!! incident token.
 //
 // It runs in the same background goroutine as the stale sweep, immediately
 // after it, and carries its own panic recovery so a defect here cannot take
@@ -1705,9 +1843,9 @@ func reconcileMissingRegistrations() {
 		}
 	}()
 
-	items, e := listAllInstances()
+	items, e := listFreshInstances()
 	if e != nil {
-		log.Println("~~~ Registration Reconciliation Skipped: " + e.Error() + " ~~~")
+		log.Println("!!! Registration Reconciliation Failed to Read Fresh Health Records: " + escapeUserInput(e.Error()) + " !!!")
 		return
 	}
 
@@ -1715,24 +1853,33 @@ func reconcileMissingRegistrations() {
 		return
 	}
 
-	now := time.Now().UTC()
-	freshWindow := time.Duration(model.EffectiveHealthReportRecordStaleMinutes()) * time.Minute
-
 	type svcKey struct {
 		namespaceId string
 		serviceId   string
 		awsRegion   string
 	}
 
-	freshByService := make(map[svcKey][]*model.HealthStatus)
+	eligibleByService := make(map[svcKey][]*model.HealthStatus)
+
+	freshWindow := time.Duration(model.EffectiveHealthReportRecordStaleMinutes()) * time.Minute
+	now := time.Now().UTC()
 
 	for _, v := range items {
 		if v == nil || v.LastTimestamp <= 0 {
 			continue
 		}
 
-		// stale records are the stale sweep's domain — never resurrect those
+		// freshness filter (defense in depth): the query itself is the
+		// fresh-records LSI complement, but a regression there must not let
+		// the reconciler act on a stale record — those belong to the stale
+		// sweep, which may be about to deregister them
 		if time.Unix(v.LastTimestamp, 0).Before(now.Add(-freshWindow)) {
+			continue
+		}
+
+		// trust gate: only rows whose HostInfo was covered by a verified v2
+		// signature may be written back into discovery
+		if !v.HostInfoVerified {
 			continue
 		}
 
@@ -1746,16 +1893,16 @@ func reconcileMissingRegistrations() {
 			awsRegion:   v.AwsRegion,
 		}
 
-		freshByService[k] = append(freshByService[k], v)
+		eligibleByService[k] = append(eligibleByService[k], v)
 	}
 
-	if len(freshByService) == 0 {
+	if len(eligibleByService) == 0 {
 		return
 	}
 
 	// deterministic order so the rotating cursor makes progress across cycles
-	keys := make([]svcKey, 0, len(freshByService))
-	for k := range freshByService {
+	keys := make([]svcKey, 0, len(eligibleByService))
+	for k := range eligibleByService {
 		keys = append(keys, k)
 	}
 
@@ -1765,14 +1912,30 @@ func reconcileMissingRegistrations() {
 		return a < b
 	})
 
-	reconcileMu.Lock()
+	reconcileStateMu.Lock()
+	if !reconcileSeeded {
+		// per-task cursor seed: the two gateway tasks start at different
+		// points of the rotation instead of colliding on the same slice
+		if host, herr := os.Hostname(); herr == nil && host != "" {
+			h := fnv.New32a()
+			_, _ = h.Write([]byte(host))
+			reconcileCursor = int(h.Sum32() % uint32(len(keys)))
+		}
+		reconcileSeeded = true
+	}
 	start := reconcileCursor % len(keys)
-	reconcileMu.Unlock()
+	reconcileStateMu.Unlock()
 
 	budget := maxReconcileServicesPerCycle
 	if budget > len(keys) {
 		budget = len(keys)
 	}
+
+	restoresRemaining := maxReRegistersPerCycle
+	inspected := 0
+	missingCount := 0
+	restored := 0
+	deferred := 0
 
 	for i := 0; i < budget; i++ {
 		k := keys[(start+i)%len(keys)]
@@ -1787,22 +1950,33 @@ func reconcileMissingRegistrations() {
 			continue
 		}
 
-		reconcileService(sd, k.serviceId, freshByService[k])
+		inspected++
+		used, missing := reconcileService(sd, k.serviceId, eligibleByService[k], &restoresRemaining)
+		restored += used
+		missingCount += missing
+		deferred += missing - used
 	}
 
-	reconcileMu.Lock()
+	reconcileStateMu.Lock()
 	reconcileCursor = (start + budget) % len(keys)
-	reconcileMu.Unlock()
+	reconcileStateMu.Unlock()
+
+	log.Printf("~~~ Registration Reconciliation: %s service(s) inspected, %s instance(s) missing, %s re-registered, %s deferred to subsequent cycles ~~~",
+		util.Itoa(inspected), util.Itoa(missingCount), util.Itoa(restored), util.Itoa(deferred))
 }
 
-// reconcileService restores missing Cloud Map registrations for the fresh
-// health records of one Cloud Map service.
-func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.HealthStatus) {
+// reconcileService restores missing Cloud Map registrations for the verified,
+// fresh health records of one Cloud Map service. It returns how many
+// restorations it performed and how many missing instances it identified;
+// restoresRemaining is the cycle-wide budget shared across services.
+func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.HealthStatus, restoresRemaining *int) (restored int, missing int) {
+	now := time.Now().UTC()
+
 	registered, err := sdListRegisteredFn(sd, serviceId)
 	if err != nil {
 		log.Printf("~~~ Registration Reconciliation Skipped Service '%s': %s ~~~",
 			escapeUserInput(serviceId), escapeUserInput(err.Error()))
-		return
+		return 0, 0
 	}
 
 	timeoutDuration := time.Duration(model.GetServiceDiscoveryTimeoutSeconds()) * time.Second
@@ -1810,31 +1984,88 @@ func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.Hea
 		timeoutDuration = 5 * time.Second
 	}
 
-	reRegistered := 0
-
 	for _, v := range rows {
-		if v == nil || registered[v.InstanceId] {
+		if v == nil {
 			continue
 		}
 
-		if reRegistered >= maxReRegistersPerCycle {
-			log.Printf("~~~ Registration Reconciliation: Service '%s' has more missing registrations than the per-cycle restore cap of %s — remaining instances deferred to subsequent cycles ~~~",
-				escapeUserInput(serviceId), util.Itoa(maxReRegistersPerCycle))
-			break
+		instanceId := v.InstanceId
+
+		if registered[instanceId] {
+			// registration is back (owner or other task acted) — reset the
+			// instance's reconciliation state
+			reconcileStateMu.Lock()
+			delete(reconcileFirstSeen, instanceId)
+			delete(lastReRegisteredAt, instanceId)
+			reconcileStateMu.Unlock()
+			continue
+		}
+
+		missing++
+
+		reconcileStateMu.Lock()
+		firstSeen, seenBefore := reconcileFirstSeen[instanceId]
+		lastRestoredAt, wasRestored := lastReRegisteredAt[instanceId]
+		reconcileStateMu.Unlock()
+
+		if !seenBefore {
+			reconcileStateMu.Lock()
+			reconcileFirstSeen[instanceId] = now
+			reconcileStateMu.Unlock()
+			continue
+		}
+
+		// confirmation window: do not act on the first observation of
+		// fresh-but-missing — deliberate deregistration gets a cycle of quiet
+		if now.Sub(firstSeen) < reconcileConfirmationWindow() {
+			continue
+		}
+
+		// deliberate-removal backoff: an instance the gateway just restored
+		// that went missing again is being removed on purpose — stand down
+		// and page instead of fighting it
+		if wasRestored && now.Sub(lastRestoredAt) < reRegisterBackoffWindow() {
+			log.Printf("!!! Registration Reconciliation: Instance '%s' (Service '%s') was re-registered by the gateway %s ago and is missing again — deliberate removal suspected, standing down for this instance (remove its health record to make removal permanent) !!!",
+				escapeUserInput(instanceId), escapeUserInput(serviceId), now.Sub(lastRestoredAt).Round(time.Second))
+			continue
+		}
+
+		// unhealable pre-checks: never spend probe/register budget on rows
+		// that cannot be registered, and never page on them every cycle
+		if err := registry.ValidateServiceID(serviceId); err != nil {
+			logUnhealable(instanceId, serviceId, "service id can never be registered ("+err.Error()+")")
+			continue
 		}
 
 		host, portStr, parseErr := parseHostPort(v.HostInfo)
 		if parseErr != nil {
-			log.Printf("@@@ Registration Reconciliation: Instance '%s' (Service '%s') heartbeat is fresh but HostInfo cannot be parsed (%s) — cannot re-register @@@",
-				escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(parseErr.Error()))
+			logUnhealable(instanceId, serviceId, parseErr.Error())
 			continue
+		}
+
+		// resolve to an IPv4 literal (Cloud Map accepts only IPv4; legacy
+		// rows may carry DNS hostnames)
+		if net.ParseIP(host) == nil || net.ParseIP(host).To4() == nil {
+			resolved, rerr := lookupIPv4Fn(host)
+			if rerr != nil || resolved == "" {
+				logUnhealable(instanceId, serviceId, "HostInfo host '"+host+"' does not resolve to an IPv4 address")
+				continue
+			}
+			host = resolved
 		}
 
 		portNum, convErr := strconv.ParseUint(portStr, 10, 16)
 		if convErr != nil || portNum == 0 {
-			log.Printf("@@@ Registration Reconciliation: Instance '%s' (Service '%s') heartbeat is fresh but HostInfo port '%s' is invalid — cannot re-register @@@",
-				escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(portStr))
+			logUnhealable(instanceId, serviceId, "HostInfo port '"+portStr+"' is invalid")
 			continue
+		}
+
+		if *restoresRemaining <= 0 {
+			continue // cycle-wide restore budget exhausted; next cycle continues
+		}
+
+		if !consumeCycleProbe() {
+			continue // shared probe budget exhausted; next cycle continues
 		}
 
 		target := net.JoinHostPort(host, portStr)
@@ -1844,7 +2075,7 @@ func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.Hea
 		conn, dialErr := dialTCP("tcp", target, instanceLivenessDialTimeout)
 		if dialErr != nil {
 			log.Printf("@@@ Registration Reconciliation: Instance '%s' (Service '%s') heartbeat is fresh but endpoint '%s' is unreachable (%s) — NOT re-registering (investigate: heartbeat alive, endpoint down) @@@",
-				escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(target), escapeUserInput(dialErr.Error()))
+				escapeUserInput(instanceId), escapeUserInput(serviceId), escapeUserInput(target), escapeUserInput(dialErr.Error()))
 			continue
 		}
 
@@ -1853,21 +2084,73 @@ func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.Hea
 		// version attribute intentionally omitted: the health record does not
 		// carry it, and Cloud Map re-registration would overwrite the value
 		// the owning service set at startup
-		if _, regErr := sdRegisterExistingFn(sd, serviceId, v.InstanceId, host, uint(portNum), true, "", timeoutDuration); regErr != nil {
+		_, regErr := sdRegisterExistingFn(sd, serviceId, instanceId, host, uint(portNum), true, "", timeoutDuration)
+
+		if regErr != nil && isDuplicateInstanceError(regErr) {
+			// the other gateway task converged first — idempotent success
+			log.Printf("~~~ Registration Reconciliation: Instance '%s' (Service '%s') already re-registered (converged with the other gateway task) ~~~",
+				escapeUserInput(instanceId), escapeUserInput(serviceId))
+			regErr = nil
+		}
+
+		if regErr != nil {
 			log.Printf("!!! Registration Reconciliation: Re-register Instance '%s' (Service '%s') at '%s' Failed: %s !!!",
-				escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(target), escapeUserInput(regErr.Error()))
+				escapeUserInput(instanceId), escapeUserInput(serviceId), escapeUserInput(target), escapeUserInput(regErr.Error()))
 			continue
 		}
 
-		reRegistered++
+		*restoresRemaining--
+		restored++
+
+		reconcileStateMu.Lock()
+		lastReRegisteredAt[instanceId] = now
+		delete(reconcileFirstSeen, instanceId)
+		reconcileStateMu.Unlock()
 
 		log.Printf("@@@ Registration Reconciliation: Instance '%s' (Service '%s') heartbeat is fresh but Cloud Map registration was MISSING — endpoint verified ALIVE at '%s', re-registered under its original instance id @@@",
-			escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(target))
+			escapeUserInput(instanceId), escapeUserInput(serviceId), escapeUserInput(target))
 	}
+
+	return restored, missing
+}
+
+// logUnhealable reports a row that can never be re-registered, throttled to at
+// most once per unhealableLogInterval per instance, always at @@@ — never the
+// !!! incident token — because a permanently-broken row is a known condition,
+// not an incident.
+func logUnhealable(instanceId string, serviceId string, reason string) {
+	now := time.Now().UTC()
+
+	reconcileStateMu.Lock()
+	if t, ok := unhealableLoggedAt[instanceId]; ok && now.Sub(t) < unhealableLogInterval {
+		reconcileStateMu.Unlock()
+		return
+	}
+	unhealableLoggedAt[instanceId] = now
+	reconcileStateMu.Unlock()
+
+	log.Printf("@@@ Registration Reconciliation: Instance '%s' (Service '%s') cannot be re-registered: %s — manual cleanup required @@@",
+		escapeUserInput(instanceId), escapeUserInput(serviceId), escapeUserInput(reason))
+}
+
+// isDuplicateInstanceError reports whether a Cloud Map register error means
+// the instance already exists (another task converged first). Both spaced and
+// unspaced variants are matched: AWS error classes surface as e.g.
+// "DuplicateRequest: ..." as well as "duplicate instance".
+func isDuplicateInstanceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	msg = strings.ReplaceAll(msg, " ", "")
+	return strings.Contains(msg, "duplicateinstance") ||
+		strings.Contains(msg, "instancealreadyexists") ||
+		strings.Contains(msg, "duplicaterequest") ||
+		strings.Contains(msg, "duplicateresource")
 }
 
 // sdListRegistered returns the set of instance ids currently registered for a
-// Cloud Map service.
+// Cloud Map service, following pagination.
 func sdListRegistered(sd *cloudmap.CloudMap, serviceId string) (map[string]bool, error) {
 	if sd == nil {
 		return nil, fmt.Errorf("Service Discovery Object is Required for ListInstances")
@@ -1878,19 +2161,53 @@ func sdListRegistered(sd *cloudmap.CloudMap, serviceId string) (map[string]bool,
 		timeoutDuration = 5 * time.Second
 	}
 
-	instances, _, err := sd.ListInstances(serviceId, aws.Int64(100), nil, timeoutDuration)
-	if err != nil {
-		return nil, err
-	}
+	ids := map[string]bool{}
+	nextToken := ""
 
-	ids := make(map[string]bool, len(instances))
-	for _, inst := range instances {
-		if inst != nil && inst.Id != nil {
-			ids[*inst.Id] = true
+	for page := 0; page < maxListInstancePages; page++ {
+		instances, more, err := sdListInstancesPageFn(sd, serviceId, aws.Int64(100), nextToken, timeoutDuration)
+		if err != nil {
+			return nil, err
 		}
+
+		for _, inst := range instances {
+			if inst != nil && inst.Id != nil {
+				ids[*inst.Id] = true
+			}
+		}
+
+		if more == "" {
+			break
+		}
+
+		nextToken = more
 	}
 
 	return ids, nil
+}
+
+// sdListInstancesPage fetches one page of a service's registered instances.
+func sdListInstancesPage(sd *cloudmap.CloudMap, serviceId string, maxResults *int64, nextToken string, timeoutDuration time.Duration) ([]*servicediscovery.InstanceSummary, string, error) {
+	return sd.ListInstances(serviceId, maxResults, &nextToken, timeoutDuration)
+}
+
+// lookupIPv4 resolves a hostname to its first IPv4 address.
+func lookupIPv4(host string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	ipAddrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "", err
+	}
+
+	for _, ipAddr := range ipAddrs {
+		if ip := ipAddr.IP.To4(); ip != nil {
+			return ip.String(), nil
+		}
+	}
+
+	return "", fmt.Errorf("No IPv4 Address Found for Host '%s'", host)
 }
 
 // sdDeregisterInstance handles de-register instance action, along with creating and using sd object for various namespaces.

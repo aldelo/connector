@@ -89,6 +89,14 @@ func validateNamespaceID(id string) error {
 	return nil
 }
 
+// ValidateServiceID exposes the Cloud Map service-id contract for callers
+// that need to pre-validate a service id before acting on it (e.g. the
+// notifier gateway's registration reconciler, which skips rows whose service
+// id can never be registered).
+func ValidateServiceID(id string) error {
+	return validateServiceID(id)
+}
+
 func validateServiceID(id string) error {
 	id = strings.TrimSpace(id)
 	if id == "" {

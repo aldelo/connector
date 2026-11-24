@@ -35,6 +35,10 @@ func staleRemoverSeams(t *testing.T) (listFn *func() ([]*model.HealthStatus, err
 	origDereg := deregisterInstanceViaSd
 	origDial := dialTCP
 
+	// the sweep's dial budget is shared with the reconciler and per-cycle;
+	// refill it for this test so prior tests cannot starve it
+	resetCycleProbeBudget()
+
 	t.Cleanup(func() {
 		listInactiveInstances = origList
 		deregisterInstanceViaSd = origDereg
@@ -42,6 +46,7 @@ func staleRemoverSeams(t *testing.T) (listFn *func() ([]*model.HealthStatus, err
 		updateStaleConfirmations(map[string]time.Time{})
 		cappedCycle(false)
 		model.ResetLastInstanceHealthWriteFailure()
+		resetCycleProbeBudget()
 	})
 
 	return &listInactiveInstances, &deregisterInstanceViaSd

@@ -219,6 +219,13 @@ type HealthStatus struct {
 	HostInfo       string `json:"hostinfo" dynamodbav:"HostInfo"`
 	LastTimestamp  int64  `json:"lasttimestamp" dynamodbav:"LastTimestamp"`
 	LastUpdatedUTC string `json:"lastupdatedutc" dynamodbav:"LastUpdatedUTC"`
+	// HostInfoVerified is true when the persisted report carried a valid v2
+	// hash signature covering HostInfo (and all other mutable fields). Only
+	// verified rows are eligible for the gateway's registration reconciler,
+	// which writes HostInfo into Cloud Map — an unsigned/replayed HostInfo
+	// must never become registration authority. Rows written by v1-only
+	// senders lack the attribute (zero value false).
+	HostInfoVerified bool `json:"hostinfoverified" dynamodbav:"HostInfoVerified"`
 }
 
 // DynamoDB key pattern constants
@@ -377,7 +384,7 @@ func GetInstanceHealthFromDataStore(instanceId string) (lastHealthy string, err 
 	}
 }
 
-func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instanceId string, awsRegion string, serviceInfo string, hostInfo string) (err error) {
+func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instanceId string, awsRegion string, serviceInfo string, hostInfo string, hostInfoVerified ...bool) (err error) {
 	store, _, timeoutSec, retries := ddbSnapshot()
 	if store == nil {
 		MarkLastInstanceHealthWriteFailure()
@@ -423,6 +430,10 @@ func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instance
 		HostInfo:       hostInfo,
 		LastTimestamp:  timeNowUTC.Unix(),
 		LastUpdatedUTC: util.FormatDateTime(timeNowUTC),
+	}
+
+	if len(hostInfoVerified) > 0 {
+		statusInfo.HostInfoVerified = hostInfoVerified[0]
 	}
 
 	if e := store.PutItemWithRetry(retries, statusInfo, store.TimeOutDuration(timeoutSec)); e != nil {
@@ -524,37 +535,46 @@ func DeleteInstanceHealthFromDataStore(instanceKeys ...*dynamodb.DynamoDBTableKe
 	}
 }
 
-// ListAllInstancesFromDataStore returns every instance health record in the
-// health partition, regardless of freshness. Used by the registration
-// reconciler, which needs the complement view of the stale query: records
-// whose owners are actively heartbeating, to verify their Cloud Map
-// registrations still exist.
-func ListAllInstancesFromDataStore() (instances []*HealthStatus, err error) {
+// ListFreshInstancesFromDataStore returns the instance health records whose
+// owners are actively heartbeating — the indexed complement of the stale
+// query (same LSI, LastTimestamp >= now - staleMinutes) — for the
+// registration reconciler, which verifies these instances' Cloud Map
+// registrations still exist. Querying the complement avoids a second
+// full-partition scan per cycle.
+func ListFreshInstancesFromDataStore() (instances []*HealthStatus, err error) {
 	store, _, timeoutSec, retries := ddbSnapshot()
 
 	if store == nil {
-		return []*HealthStatus{}, fmt.Errorf("List All Instances From Data Store Failed: DynamoDB Connection Not Established")
+		return []*HealthStatus{}, fmt.Errorf("List Fresh Instances From Data Store Failed: DynamoDB Connection Not Established")
 	}
 
 	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
 
+	staleMinutes := normalizedHealthReportRecordStaleMinutes()
+	ts := util.Int64ToString(time.Now().UTC().Add(time.Duration(staleMinutes) * time.Minute * -1).Unix())
+
 	if itemsList, e := store.QueryPagedItemsWithRetry(retries, &[]*HealthStatus{}, &[]*HealthStatus{},
 		store.TimeOutDuration(timeoutSec),
-		"",
-		"PK=:pk",
+		"LSI-LastTimestamp",
+		"PK=:pk AND LastTimestamp>=:lasttimestamp",
 		map[string]*ddb.AttributeValue{
 			":pk": {
 				S: aws.String(pk),
 			},
+			":lasttimestamp": {
+				N: aws.String(ts),
+			},
 		}, nil); e != nil {
 		// error
-		return []*HealthStatus{}, fmt.Errorf("List All Instances From Data Store Failed: %s", e)
+		return []*HealthStatus{}, fmt.Errorf("List Fresh Instances From Data Store Failed: %s", e)
 	} else {
 		// success
 		ok := false
 
 		if instances, ok = itemsList.([]*HealthStatus); !ok {
-			return []*HealthStatus{}, nil
+			// a type-assertion failure means the query contract changed —
+			// surface it instead of silently disabling the reconciler
+			return []*HealthStatus{}, fmt.Errorf("List Fresh Instances From Data Store Failed: Unexpected Result Type %T", itemsList)
 		} else {
 			return instances, nil
 		}

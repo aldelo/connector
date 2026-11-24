@@ -163,14 +163,25 @@ func (p ShutdownPhase) String() string {
 // hash value is comprised of namespaceid + serviceid + instanceid + current date in UTC in yyyy-mm-dd format;
 // the sha256 hash salt uses named HashKey on both client and server side
 type healthreport struct {
-	NamespaceId   string `json:"NamespaceId"`
-	ServiceId     string `json:"ServiceId"`
-	InstanceId    string `json:"InstanceId"`
-	AwsRegion     string `json:"AWSRegion"`
+	NamespaceId string `json:"NamespaceId"`
+	ServiceId   string `json:"ServiceId"`
+	InstanceId  string `json:"InstanceId"`
+	AwsRegion   string `json:"AWSRegion"`
 	ServiceInfo   string `json:"ServiceInfo"`
 	HostInfo      string `json:"HostInfo"`
 	HashKeyName   string `json:"HashKeyName"`
 	HashSignature string `json:"HashSignature"`
+	// HashSignatureV2 extends the signature to cover ALL mutable fields
+	// (namespaceid + serviceid + instanceid + awsregion + serviceinfo +
+	// hostinfo + current date in UTC, yyyy-mm-dd format) using the same
+	// named HashKey. v1 (HashSignature above) authenticates only the id
+	// triple, which let a captured body be replayed with a forged HostInfo.
+	// The notifier gateway marks rows whose v2 signature verified as
+	// trusted, and only trusted rows are eligible for the gateway's
+	// registration reconciler (which writes HostInfo into Cloud Map).
+	// Senders and gateways interoperate during rollout: v1 remains
+	// mandatory, v2 is additive.
+	HashSignatureV2 string `json:"HashSignatureV2"`
 }
 
 // Service is the gRPC server lifecycle owner for a connector-managed
@@ -2033,16 +2044,18 @@ func (s *Service) setServiceHealthReportUpdateToDataStore() bool {
 	}
 
 	hashSignature := crypto.Sha256(cfg.Namespace.Id+cfg.Service.Id+cfg.Instance.Id+util.FormatDate(time.Now().UTC()), cfg.Instance.HashKeySecret)
+	hashSignatureV2 := crypto.Sha256(cfg.Namespace.Id+cfg.Service.Id+cfg.Instance.Id+cfg.Target.Region+strings.ToLower(cfg.Service.Name+"."+cfg.Namespace.Name)+localAddr+util.FormatDate(time.Now().UTC()), cfg.Instance.HashKeySecret)
 
 	data := &healthreport{
-		NamespaceId:   cfg.Namespace.Id,
-		ServiceId:     cfg.Service.Id,
-		InstanceId:    cfg.Instance.Id,
-		AwsRegion:     cfg.Target.Region,
-		ServiceInfo:   strings.ToLower(cfg.Service.Name + "." + cfg.Namespace.Name),
-		HostInfo:      localAddr,
-		HashKeyName:   cfg.Instance.HashKeyName,
-		HashSignature: hashSignature,
+		NamespaceId:     cfg.Namespace.Id,
+		ServiceId:       cfg.Service.Id,
+		InstanceId:      cfg.Instance.Id,
+		AwsRegion:       cfg.Target.Region,
+		ServiceInfo:     strings.ToLower(cfg.Service.Name + "." + cfg.Namespace.Name),
+		HostInfo:        localAddr,
+		HashKeyName:     cfg.Instance.HashKeyName,
+		HashSignature:   hashSignature,
+		HashSignatureV2: hashSignatureV2,
 	}
 
 	jsonData, e := util.MarshalJSONCompact(data)

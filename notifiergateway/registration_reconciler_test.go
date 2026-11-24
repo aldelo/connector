@@ -25,29 +25,42 @@ import (
 
 	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aldelo/connector/notifiergateway/model"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/servicediscovery"
 )
 
 // reconcileSeams snapshots the reconciler's package-level seams and restores
-// them (and cursor state) when the test ends.
-func reconcileSeams(t *testing.T) (listAllPtr *func() ([]*model.HealthStatus, error)) {
+// them (and confirmation/cursor/budget state) when the test ends.
+func reconcileSeams(t *testing.T) (listFreshPtr *func() ([]*model.HealthStatus, error)) {
 	t.Helper()
 
-	origListAll := listAllInstances
+	origListFresh := listFreshInstances
 	origListRegistered := sdListRegisteredFn
+	origListPage := sdListInstancesPageFn
 	origRegisterExisting := sdRegisterExistingFn
 	origClientFor := sdClientForFn
 	origDial := dialTCP
+	origLookup := lookupIPv4Fn
 
 	t.Cleanup(func() {
-		listAllInstances = origListAll
+		listFreshInstances = origListFresh
 		sdListRegisteredFn = origListRegistered
+		sdListInstancesPageFn = origListPage
 		sdRegisterExistingFn = origRegisterExisting
 		sdClientForFn = origClientFor
 		dialTCP = origDial
+		lookupIPv4Fn = origLookup
 
-		reconcileMu.Lock()
+		reconcileStateMu.Lock()
 		reconcileCursor = 0
-		reconcileMu.Unlock()
+		reconcileSeeded = false
+		reconcileFirstSeen = map[string]time.Time{}
+		lastReRegisteredAt = map[string]time.Time{}
+		unhealableLoggedAt = map[string]time.Time{}
+		cycleProbeBudgetRemaining = 0
+		reconcileStateMu.Unlock()
+
+		resetCycleProbeBudget()
 	})
 
 	// default stubs: no Cloud Map client, no registered instances
@@ -59,18 +72,25 @@ func reconcileSeams(t *testing.T) (listAllPtr *func() ([]*model.HealthStatus, er
 		return map[string]bool{}, nil
 	}
 
-	return &listAllInstances
+	lookupIPv4Fn = func(host string) (string, error) {
+		return "", fmt.Errorf("lookup disabled in test")
+	}
+
+	resetCycleProbeBudget()
+
+	return &listFreshInstances
 }
 
 func freshRow(instanceId string, hostInfo string) *model.HealthStatus {
 	return &model.HealthStatus{
-		NamespaceId:   "ns-test",
-		ServiceId:     "srv-0123456789abcdef",
-		InstanceId:    instanceId,
-		AwsRegion:     "us-east-1",
-		ServiceInfo:   "svc-test.dev.aldelo.nae",
-		HostInfo:      hostInfo,
-		LastTimestamp: time.Now().UTC().Unix(),
+		NamespaceId:      "ns-test",
+		ServiceId:        "srv-0123456789abcdef",
+		InstanceId:       instanceId,
+		AwsRegion:        "us-east-1",
+		ServiceInfo:      "svc-test.dev.aldelo.nae",
+		HostInfo:         hostInfo,
+		LastTimestamp:    time.Now().UTC().Unix(),
+		HostInfoVerified: true,
 	}
 }
 
@@ -88,11 +108,25 @@ type registeredCall struct {
 	healthy    bool
 }
 
-// TestReconcile_ReRegistersFreshMissingInstance: a fresh record whose
-// instance is absent from Cloud Map, with a reachable endpoint, must be
-// re-registered under its ORIGINAL instance id with the parsed ip/port.
-func TestReconcile_ReRegistersFreshMissingInstance(t *testing.T) {
-	listAllPtr := reconcileSeams(t)
+// seedConfirmedMissing marks an instance as observed fresh-but-missing since
+// the given age, satisfying the confirmation window.
+func seedConfirmedMissing(instanceId string, age time.Duration) {
+	reconcileStateMu.Lock()
+	reconcileFirstSeen[instanceId] = time.Now().UTC().Add(-age)
+	reconcileStateMu.Unlock()
+}
+
+func seedRecentlyRestored(instanceId string, age time.Duration) {
+	reconcileStateMu.Lock()
+	lastReRegisteredAt[instanceId] = time.Now().UTC().Add(-age)
+	reconcileStateMu.Unlock()
+}
+
+// TestReconcile_ReRegistersFreshMissingVerifiedInstance: a fresh, VERIFIED
+// record, confirmed missing, with a reachable endpoint, must be re-registered
+// under its ORIGINAL instance id with the parsed ip/port.
+func TestReconcile_ReRegistersFreshMissingVerifiedInstance(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -115,9 +149,11 @@ func TestReconcile_ReRegistersFreshMissingInstance(t *testing.T) {
 		return "op-test", nil
 	}
 
-	*listAllPtr = func() ([]*model.HealthStatus, error) {
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
 		return []*model.HealthStatus{freshRow("x-nae-fiserv-provider-d831ae2e", host+":"+portStr)}, nil
 	}
+
+	seedConfirmedMissing("x-nae-fiserv-provider-d831ae2e", reconcileConfirmationWindow()+time.Minute)
 
 	reconcileMissingRegistrations()
 
@@ -140,36 +176,11 @@ func TestReconcile_ReRegistersFreshMissingInstance(t *testing.T) {
 	}
 }
 
-// TestReconcile_SkipsAlreadyRegistered: a fresh record whose instance is
-// already registered must not trigger a re-registration.
-func TestReconcile_SkipsAlreadyRegistered(t *testing.T) {
-	listAllPtr := reconcileSeams(t)
-
-	sdListRegisteredFn = func(sd *cloudmap.CloudMap, serviceId string) (map[string]bool, error) {
-		return map[string]bool{"x-nae-present": true}, nil
-	}
-
-	registered := 0
-	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
-		registered++
-		return "op-test", nil
-	}
-
-	*listAllPtr = func() ([]*model.HealthStatus, error) {
-		return []*model.HealthStatus{freshRow("x-nae-present", "127.0.0.1:12345")}, nil
-	}
-
-	reconcileMissingRegistrations()
-
-	if registered != 0 {
-		t.Fatalf("already-registered instance was re-registered (%d calls)", registered)
-	}
-}
-
-// TestReconcile_IgnoresStaleRecords: stale records are the stale sweep's
-// domain — the reconciler must not even inspect their Cloud Map service.
-func TestReconcile_IgnoresStaleRecords(t *testing.T) {
-	listAllPtr := reconcileSeams(t)
+// TestReconcile_IgnoresUnverifiedRows: rows without a verified v2 signature
+// (v1-only senders, replayed/forged HostInfo) must never be registered into
+// discovery — not even inspected.
+func TestReconcile_IgnoresUnverifiedRows(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
 
 	inspected := 0
 	sdListRegisteredFn = func(sd *cloudmap.CloudMap, serviceId string) (map[string]bool, error) {
@@ -183,28 +194,142 @@ func TestReconcile_IgnoresStaleRecords(t *testing.T) {
 		return "op-test", nil
 	}
 
-	*listAllPtr = func() ([]*model.HealthStatus, error) {
-		return []*model.HealthStatus{staleRow("x-nae-stale", "127.0.0.1:12345")}, nil
+	row := freshRow("x-nae-v1-only", "127.0.0.1:12345")
+	row.HostInfoVerified = false
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{row}, nil
 	}
 
 	reconcileMissingRegistrations()
 
-	if inspected != 0 {
-		t.Fatalf("stale record's service was inspected (%d calls) — reconciler must skip stale records", inspected)
-	}
-
-	if registered != 0 {
-		t.Fatalf("stale record was re-registered (%d calls)", registered)
+	if inspected != 0 || registered != 0 {
+		t.Fatalf("unverified row acted upon (inspected=%d registered=%d) — trust gate failed", inspected, registered)
 	}
 }
 
-// TestReconcile_DoesNotResurrectUnreachableEndpoint: a fresh record whose
-// endpoint is unreachable must NOT be re-registered (never resurrect a dead
-// endpoint into discovery) — this state is logged as an @@@ alarm instead.
-func TestReconcile_DoesNotResurrectUnreachableEndpoint(t *testing.T) {
-	listAllPtr := reconcileSeams(t)
+// TestReconcile_FirstSightingAwaitsConfirmation: the first observation of
+// fresh-but-missing must record and defer, not register — deliberate
+// deregistration (ops removing a bad instance) gets a cycle of quiet.
+func TestReconcile_FirstSightingAwaitsConfirmation(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	registered := 0
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		registered++
+		return "op-test", nil
+	}
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{freshRow("x-nae-first-sight", "127.0.0.1:1")}, nil
+	}
+
+	reconcileMissingRegistrations()
+
+	if registered != 0 {
+		t.Fatalf("first fresh-but-missing sighting was re-registered immediately (%d calls) — confirmation guard failed", registered)
+	}
+
+	reconcileStateMu.Lock()
+	_, seen := reconcileFirstSeen["x-nae-first-sight"]
+	reconcileStateMu.Unlock()
+
+	if !seen {
+		t.Fatal("first sighting was not recorded for confirmation")
+	}
+}
+
+// TestReconcile_BackoffAfterRestore: an instance the gateway re-registered
+// that goes missing again within the backoff window must NOT be re-registered
+// (deliberate removal) — the window passing restores normal behavior.
+func TestReconcile_BackoffAfterRestore(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	registered := 0
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		registered++
+		return "op-test", nil
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("test listener failed: %v", err)
+	}
+	defer ln.Close()
+
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{freshRow("x-nae-flapping", "127.0.0.1:"+portStr)}, nil
+	}
+
+	// instance was restored 1 cycle ago and is missing again → stand down
+	seedConfirmedMissing("x-nae-flapping", reconcileConfirmationWindow()+time.Minute)
+	seedRecentlyRestored("x-nae-flapping", time.Minute)
+
+	reconcileMissingRegistrations()
+
+	if registered != 0 {
+		t.Fatalf("recently-restored instance was re-registered again (%d calls) — deliberate-removal backoff failed", registered)
+	}
+
+	// after the backoff window passes, normal healing resumes
+	seedRecentlyRestored("x-nae-flapping", reRegisterBackoffWindow()+time.Minute)
+
+	reconcileMissingRegistrations()
+
+	if registered != 1 {
+		t.Fatalf("healing did not resume after the backoff window (registered=%d)", registered)
+	}
+}
+
+// TestReconcile_SkipsAlreadyRegistered: a fresh record whose instance is
+// already registered must not trigger a re-registration, and its
+// reconciliation state must be cleared.
+func TestReconcile_SkipsAlreadyRegistered(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
 
 	sdListRegisteredFn = func(sd *cloudmap.CloudMap, serviceId string) (map[string]bool, error) {
+		return map[string]bool{"x-nae-present": true}, nil
+	}
+
+	registered := 0
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		registered++
+		return "op-test", nil
+	}
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{freshRow("x-nae-present", "127.0.0.1:12345")}, nil
+	}
+
+	seedConfirmedMissing("x-nae-present", time.Hour) // stale confirmation state
+	seedRecentlyRestored("x-nae-present", time.Hour)
+
+	reconcileMissingRegistrations()
+
+	if registered != 0 {
+		t.Fatalf("already-registered instance was re-registered (%d calls)", registered)
+	}
+
+	reconcileStateMu.Lock()
+	_, stillTracked := reconcileFirstSeen["x-nae-present"]
+	_, stillRestored := lastReRegisteredAt["x-nae-present"]
+	reconcileStateMu.Unlock()
+
+	if stillTracked || stillRestored {
+		t.Fatal("reconciliation state not cleared for an instance that is registered again")
+	}
+}
+
+// TestReconcile_IgnoresStaleRecords: stale records are the stale sweep's
+// domain — the reconciler must not even inspect their Cloud Map service.
+func TestReconcile_IgnoresStaleRecords(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	inspected := 0
+	sdListRegisteredFn = func(sd *cloudmap.CloudMap, serviceId string) (map[string]bool, error) {
+		inspected++
 		return map[string]bool{}, nil
 	}
 
@@ -214,9 +339,33 @@ func TestReconcile_DoesNotResurrectUnreachableEndpoint(t *testing.T) {
 		return "op-test", nil
 	}
 
-	*listAllPtr = func() ([]*model.HealthStatus, error) {
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{staleRow("x-nae-stale", "127.0.0.1:12345")}, nil
+	}
+
+	reconcileMissingRegistrations()
+
+	if inspected != 0 || registered != 0 {
+		t.Fatalf("stale record acted upon (inspected=%d registered=%d)", inspected, registered)
+	}
+}
+
+// TestReconcile_DoesNotResurrectUnreachableEndpoint: a fresh record whose
+// endpoint is unreachable must NOT be re-registered.
+func TestReconcile_DoesNotResurrectUnreachableEndpoint(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	registered := 0
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		registered++
+		return "op-test", nil
+	}
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
 		return []*model.HealthStatus{freshRow("x-nae-fresh-dead", "127.0.0.1:1")}, nil
 	}
+
+	seedConfirmedMissing("x-nae-fresh-dead", reconcileConfirmationWindow()+time.Minute)
 
 	reconcileMissingRegistrations()
 
@@ -225,10 +374,10 @@ func TestReconcile_DoesNotResurrectUnreachableEndpoint(t *testing.T) {
 	}
 }
 
-// TestReconcile_URLHostInfoForm: legacy URL-form HostInfo rows are parsed and
-// re-registered with host and port extracted from the URL.
-func TestReconcile_URLHostInfoForm(t *testing.T) {
-	listAllPtr := reconcileSeams(t)
+// TestReconcile_HostnameResolvedToIPv4: legacy URL/hostname HostInfo rows are
+// resolved to an IPv4 literal before registration.
+func TestReconcile_HostnameResolvedToIPv4(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -236,7 +385,14 @@ func TestReconcile_URLHostInfoForm(t *testing.T) {
 	}
 	defer ln.Close()
 
-	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+
+	lookupIPv4Fn = func(host string) (string, error) {
+		if host != "legacy.internal.aldelo.nae" {
+			return "", fmt.Errorf("unexpected host %q", host)
+		}
+		return "127.0.0.1", nil
+	}
 
 	var got registeredCall
 	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
@@ -244,22 +400,234 @@ func TestReconcile_URLHostInfoForm(t *testing.T) {
 		return "op-test", nil
 	}
 
-	*listAllPtr = func() ([]*model.HealthStatus, error) {
-		return []*model.HealthStatus{freshRow("x-nae-legacy-url", "https://"+host+":"+portStr+"/snsrelay")}, nil
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{freshRow("x-nae-legacy", "https://legacy.internal.aldelo.nae:"+portStr+"/snsrelay")}, nil
+	}
+
+	seedConfirmedMissing("x-nae-legacy", reconcileConfirmationWindow()+time.Minute)
+
+	reconcileMissingRegistrations()
+
+	if got.instanceId != "x-nae-legacy" || got.ip != "127.0.0.1" || got.port == 0 {
+		t.Fatalf("hostname HostInfo mishandled: got %+v", got)
+	}
+}
+
+// TestReconcile_UnhealableServiceIdSkipsRegistration: rows whose service id
+// can never be registered must be skipped without any register call or probe.
+func TestReconcile_UnhealableServiceIdSkipsRegistration(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	row := freshRow("x-nae-bad-svc", "127.0.0.1:12345")
+	row.ServiceId = "not-a-cloudmap-service-id"
+
+	registered := 0
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		registered++
+		return "op-test", nil
+	}
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{row}, nil
+	}
+
+	seedConfirmedMissing("x-nae-bad-svc", reconcileConfirmationWindow()+time.Minute)
+
+	reconcileMissingRegistrations()
+
+	if registered != 0 {
+		t.Fatalf("unhealable service-id row was re-registered (%d calls)", registered)
+	}
+}
+
+// TestReconcile_PerCycleRestoreCapAcrossServices: the restore cap is per
+// CYCLE across ALL services, not per service.
+func TestReconcile_PerCycleRestoreCapAcrossServices(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("test listener failed: %v", err)
+	}
+	defer ln.Close()
+
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+
+	const services = 5
+	const perService = maxReRegistersPerCycle + 2
+
+	var rows []*model.HealthStatus
+	for s := 0; s < services; s++ {
+		for i := 0; i < perService; i++ {
+			r := freshRow(fmt.Sprintf("x-nae-s%02d-i%02d", s, i), "127.0.0.1:"+portStr)
+			r.ServiceId = fmt.Sprintf("srv-0123456789abcd%02d", s)
+			rows = append(rows, r)
+		}
+	}
+
+	var registered int
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		registered++
+		return "op-test", nil
+	}
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return rows, nil
+	}
+
+	for _, r := range rows {
+		seedConfirmedMissing(r.InstanceId, reconcileConfirmationWindow()+time.Minute)
 	}
 
 	reconcileMissingRegistrations()
 
-	if got.instanceId != "x-nae-legacy-url" || got.ip != host || got.port == 0 {
-		t.Fatalf("URL-form HostInfo mishandled: got %+v", got)
+	if registered > maxReRegistersPerCycle {
+		t.Fatalf("re-registrations (%d) exceeded the PER-CYCLE cap (%d) — cap is per service", registered, maxReRegistersPerCycle)
+	}
+}
+
+// TestReconcile_SharedProbeBudget: the TCP probe budget is shared with the
+// stale sweep and bounded per cycle.
+func TestReconcile_SharedProbeBudget(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	reconcileStateMu.Lock()
+	cycleProbeBudgetRemaining = 2
+	reconcileStateMu.Unlock()
+
+	dialed := 0
+	origDial := dialTCP
+	dialTCP = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		dialed++
+		return origDial(network, addr, timeout)
+	}
+
+	registered := 0
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		registered++
+		return "op-test", nil
+	}
+
+	var rows []*model.HealthStatus
+	for i := 0; i < 10; i++ {
+		rows = append(rows, freshRow(fmt.Sprintf("x-nae-budget-%02d", i), "127.0.0.1:1"))
+	}
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return rows, nil
+	}
+
+	for _, r := range rows {
+		seedConfirmedMissing(r.InstanceId, reconcileConfirmationWindow()+time.Minute)
+	}
+
+	reconcileMissingRegistrations()
+
+	if dialed > 2 {
+		t.Fatalf("dialed %d endpoints with a budget of 2 — shared probe budget not enforced", dialed)
+	}
+}
+
+// TestReconcile_DuplicateInstanceErrorConverges: a duplicate-instance error
+// from Cloud Map (the other gateway task converged first) is treated as
+// success, not a failure.
+func TestReconcile_DuplicateInstanceErrorConverges(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("test listener failed: %v", err)
+	}
+	defer ln.Close()
+
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		return "", fmt.Errorf("DuplicateRequest: a request with the same creatorRequestId is in progress")
+	}
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{freshRow("x-nae-dupe", "127.0.0.1:"+portStr)}, nil
+	}
+
+	seedConfirmedMissing("x-nae-dupe", reconcileConfirmationWindow()+time.Minute)
+
+	// must not panic; convergence is recorded as a restore
+	reconcileMissingRegistrations()
+
+	reconcileStateMu.Lock()
+	_, restored := lastReRegisteredAt["x-nae-dupe"]
+	reconcileStateMu.Unlock()
+
+	if !restored {
+		t.Fatal("duplicate-instance convergence was not recorded as a restore")
+	}
+}
+
+// TestReconcile_PaginationFollowsToken: the registered-id collection follows
+// ListInstances pagination — instances beyond the first page must be seen as
+// registered, not missing.
+func TestReconcile_PaginationFollowsToken(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
+
+	// restore the real (paginated) sdListRegistered so the page seam is
+	// actually exercised — the default seam stub short-circuits it
+	sdListRegisteredFn = sdListRegistered
+
+	// the real sdListRegistered requires a non-nil Cloud Map client; the
+	// page seam is stubbed so no network call happens
+	sdClientForFn = func(namespaceId, awsRegion string) (*cloudmap.CloudMap, error) {
+		return &cloudmap.CloudMap{}, nil
+	}
+
+	page1 := []*servicediscovery.InstanceSummary{
+		{Id: aws.String("x-nae-page1-a")},
+	}
+	page2 := []*servicediscovery.InstanceSummary{
+		{Id: aws.String("x-nae-page2-b")},
+	}
+
+	calls := 0
+	sdListInstancesPageFn = func(sd *cloudmap.CloudMap, serviceId string, maxResults *int64, nextToken string, timeoutDuration time.Duration) ([]*servicediscovery.InstanceSummary, string, error) {
+		calls++
+		if nextToken == "" {
+			return page1, "token-2", nil
+		}
+		return page2, "", nil
+	}
+
+	registered := 0
+	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
+		registered++
+		return "op-test", nil
+	}
+
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return []*model.HealthStatus{
+			freshRow("x-nae-page1-a", "127.0.0.1:1"),
+			freshRow("x-nae-page2-b", "127.0.0.1:1"),
+		}, nil
+	}
+
+	seedConfirmedMissing("x-nae-page1-a", reconcileConfirmationWindow()+time.Minute)
+	seedConfirmedMissing("x-nae-page2-b", reconcileConfirmationWindow()+time.Minute)
+
+	reconcileMissingRegistrations()
+
+	if calls != 2 {
+		t.Fatalf("expected 2 ListInstances pages, got %d — pagination token dropped", calls)
+	}
+
+	if registered != 0 {
+		t.Fatalf("instances found on page 2 were treated as missing (%d register calls) — pagination bug", registered)
 	}
 }
 
 // TestReconcile_ServiceBudgetRotates: with more fresh services than the
-// per-cycle budget, successive cycles must cover different services and the
-// union must cover everything.
+// per-cycle budget, successive cycles cover different services and the union
+// covers everything.
 func TestReconcile_ServiceBudgetRotates(t *testing.T) {
-	listAllPtr := reconcileSeams(t)
+	listFreshPtr := reconcileSeams(t)
 
 	const total = maxReconcileServicesPerCycle + 10
 
@@ -272,26 +640,23 @@ func TestReconcile_ServiceBudgetRotates(t *testing.T) {
 	}
 
 	inspected := map[string]int{}
-	cycleSeen := map[string]bool{}
 	var mu sync.Mutex
 
 	sdListRegisteredFn = func(sd *cloudmap.CloudMap, serviceId string) (map[string]bool, error) {
 		mu.Lock()
 		inspected[serviceId]++
-		cycleSeen[serviceId] = true
 		mu.Unlock()
-		return map[string]bool{"x-nae-inst-" + serviceId: true}, nil // already registered → no re-register
+		return map[string]bool{"x-nae-inst-" + serviceId: true}, nil
 	}
 
-	*listAllPtr = func() ([]*model.HealthStatus, error) {
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
 		return rows, nil
 	}
 
 	reconcileMissingRegistrations()
 
 	mu.Lock()
-	firstCycle := len(cycleSeen)
-	cycleSeen = map[string]bool{}
+	firstCycle := len(inspected)
 	mu.Unlock()
 
 	reconcileMissingRegistrations()
@@ -308,72 +673,15 @@ func TestReconcile_ServiceBudgetRotates(t *testing.T) {
 	}
 }
 
-// TestReconcile_PerCycleRestoreCap: a single service with more missing
-// registrations than the per-cycle restore cap defers the remainder.
-func TestReconcile_PerCycleRestoreCap(t *testing.T) {
-	listAllPtr := reconcileSeams(t)
+// TestReconcile_EmptyStoreIsNoop and read-error skip: no side effects.
+func TestReconcile_EmptyStoreAndReadError(t *testing.T) {
+	listFreshPtr := reconcileSeams(t)
 
-	const missing = maxReRegistersPerCycle + 4
-
-	var rows []*model.HealthStatus
-	for i := 0; i < missing; i++ {
-		rows = append(rows, freshRow(fmt.Sprintf("x-nae-missing-inst-%02d", i), "127.0.0.1:12345"))
-	}
-
-	var registered int
-	sdRegisterExistingFn = func(sd *cloudmap.CloudMap, serviceId, instanceId, ip string, port uint, healthy bool, version string, timeout ...time.Duration) (string, error) {
-		registered++
-		return "op-test", nil
-	}
-
-	// endpoint never dialed-reachable? dial must succeed to re-register —
-	// use a live listener so the cap, not the dial, is what limits
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("test listener failed: %v", err)
-	}
-	defer ln.Close()
-
-	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
-	for _, r := range rows {
-		r.HostInfo = "127.0.0.1:" + portStr
-	}
-
-	*listAllPtr = func() ([]*model.HealthStatus, error) {
-		return rows, nil
-	}
-
-	reconcileMissingRegistrations()
-
-	if registered > maxReRegistersPerCycle {
-		t.Fatalf("re-registrations (%d) exceeded per-cycle restore cap (%d)", registered, maxReRegistersPerCycle)
-	}
-
-	if registered != maxReRegistersPerCycle {
-		t.Fatalf("expected the restore cap to be reached, got %d", registered)
-	}
-}
-
-// TestReconcile_EmptyStoreIsNoop: an empty record set must be a clean no-op.
-func TestReconcile_EmptyStoreIsNoop(t *testing.T) {
-	listAllPtr := reconcileSeams(t)
-
-	*listAllPtr = func() ([]*model.HealthStatus, error) {
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
 		return []*model.HealthStatus{}, nil
 	}
 
-	// must not panic; nothing to assert beyond that
-	reconcileMissingRegistrations()
-}
-
-// TestReconcile_ListErrorSkipsQuietly: a data-store read failure must skip
-// the cycle without side effects.
-func TestReconcile_ListErrorSkipsQuietly(t *testing.T) {
-	listAllPtr := reconcileSeams(t)
-
-	*listAllPtr = func() ([]*model.HealthStatus, error) {
-		return nil, fmt.Errorf("data store unavailable")
-	}
+	reconcileMissingRegistrations() // must not panic
 
 	inspected := 0
 	sdListRegisteredFn = func(sd *cloudmap.CloudMap, serviceId string) (map[string]bool, error) {
@@ -381,9 +689,22 @@ func TestReconcile_ListErrorSkipsQuietly(t *testing.T) {
 		return map[string]bool{}, nil
 	}
 
+	*listFreshPtr = func() ([]*model.HealthStatus, error) {
+		return nil, fmt.Errorf("data store unavailable")
+	}
+
 	reconcileMissingRegistrations()
 
 	if inspected != 0 {
-		t.Fatalf("reconciler inspected services despite a data-store read failure (%d calls)", inspected)
+		t.Fatalf("reconciler inspected services despite a read failure (%d calls)", inspected)
+	}
+}
+
+// TestReconcileConfirmationWindowAtLeastOneCycle: the confirmation window
+// must be at least one full sweep interval so deliberate deregistration is
+// not fought within a single cycle.
+func TestReconcileConfirmationWindowAtLeastOneCycle(t *testing.T) {
+	if reconcileConfirmationWindow() < minReconcileConfirmWindow {
+		t.Fatal("confirmation window below its floor")
 	}
 }
