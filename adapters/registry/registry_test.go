@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aldelo/common/wrapper/cloudmap"
 	"github.com/aws/aws-sdk-go/aws"
 )
 
@@ -444,5 +445,60 @@ func TestSanitizeMaxResults(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RegisterExistingInstance (validation only — success paths require Cloud Map)
+// ---------------------------------------------------------------------------
+
+// TestRegisterExistingInstanceValidation: the explicit-id variant must reject
+// invalid inputs before any Cloud Map call, and must never be callable with an
+// empty instance id (the whole contract is registering under the caller's id).
+func TestRegisterExistingInstanceValidation(t *testing.T) {
+	sd := &cloudmap.CloudMap{}
+
+	cases := []struct {
+		name       string
+		serviceId  string
+		instanceId string
+		ip         string
+		port       uint
+		version    string
+		wantErr    string
+	}{
+		{name: "empty serviceId", serviceId: "", instanceId: "x-nae-svc-0d73d0e6-4c1e-4c4f-b1a2-9b8c1d2e3f4a", ip: "10.2.0.1", port: 50000, wantErr: "Service"},
+		{name: "invalid serviceId chars", serviceId: "srv bad", instanceId: "x-nae-svc-0d73d0e6-4c1e-4c4f-b1a2-9b8c1d2e3f4a", ip: "10.2.0.1", port: 50000, wantErr: "Service"},
+		{name: "empty instanceId", serviceId: "srv-0123456789abcdef", instanceId: "", ip: "10.2.0.1", port: 50000, wantErr: "InstanceId"},
+		{name: "instanceId with spaces", serviceId: "srv-0123456789abcdef", instanceId: "x-nae svc", ip: "10.2.0.1", port: 50000, wantErr: "InstanceId"},
+		{name: "instanceId too long", serviceId: "srv-0123456789abcdef", instanceId: strings.Repeat("a", 65), ip: "10.2.0.1", port: 50000, wantErr: "InstanceId"},
+		{name: "instanceId illegal chars", serviceId: "srv-0123456789abcdef", instanceId: "x/nae:svc", ip: "10.2.0.1", port: 50000, wantErr: "InstanceId"},
+		{name: "empty ip", serviceId: "srv-0123456789abcdef", instanceId: "x-nae-svc-0d73d0e6-4c1e-4c4f-b1a2-9b8c1d2e3f4a", ip: "", port: 50000, wantErr: "IP"},
+		{name: "ipv6 rejected", serviceId: "srv-0123456789abcdef", instanceId: "x-nae-svc-0d73d0e6-4c1e-4c4f-b1a2-9b8c1d2e3f4a", ip: "::1", port: 50000, wantErr: "IPv4"},
+		{name: "port zero", serviceId: "srv-0123456789abcdef", instanceId: "x-nae-svc-0d73d0e6-4c1e-4c4f-b1a2-9b8c1d2e3f4a", ip: "10.2.0.1", port: 0, wantErr: "Port"},
+		{name: "port too high", serviceId: "srv-0123456789abcdef", instanceId: "x-nae-svc-0d73d0e6-4c1e-4c4f-b1a2-9b8c1d2e3f4a", ip: "10.2.0.1", port: 65536, wantErr: "Port"},
+		{name: "version too long", serviceId: "srv-0123456789abcdef", instanceId: "x-nae-svc-0d73d0e6-4c1e-4c4f-b1a2-9b8c1d2e3f4a", ip: "10.2.0.1", port: 50000, version: strings.Repeat("v", 257), wantErr: "version"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := RegisterExistingInstance(sd, tc.serviceId, tc.instanceId, tc.ip, tc.port, true, tc.version)
+
+			if err == nil {
+				t.Fatalf("RegisterExistingInstance(%q, %q, ...) expected validation error, got nil", tc.serviceId, tc.instanceId)
+			}
+
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("RegisterExistingInstance error %q does not mention %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestRegisterExistingInstanceNilSd: a nil Cloud Map client must be rejected
+// before anything else.
+func TestRegisterExistingInstanceNilSd(t *testing.T) {
+	if _, err := RegisterExistingInstance(nil, "srv-0123456789abcdef", "x-nae-svc-0d73d0e6-4c1e-4c4f-b1a2-9b8c1d2e3f4a", "10.2.0.1", 50000, true, ""); err == nil {
+		t.Fatal("RegisterExistingInstance with nil sd must return an error")
 	}
 }

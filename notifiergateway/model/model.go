@@ -19,6 +19,7 @@ package model
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	util "github.com/aldelo/common"
@@ -218,6 +219,13 @@ type HealthStatus struct {
 	HostInfo       string `json:"hostinfo" dynamodbav:"HostInfo"`
 	LastTimestamp  int64  `json:"lasttimestamp" dynamodbav:"LastTimestamp"`
 	LastUpdatedUTC string `json:"lastupdatedutc" dynamodbav:"LastUpdatedUTC"`
+	// HostInfoVerified is true when the persisted report carried a valid v2
+	// hash signature covering HostInfo (and all other mutable fields). Only
+	// verified rows are eligible for the gateway's registration reconciler,
+	// which writes HostInfo into Cloud Map — an unsigned/replayed HostInfo
+	// must never become registration authority. Rows written by v1-only
+	// senders lack the attribute (zero value false).
+	HostInfoVerified bool `json:"hostinfoverified" dynamodbav:"HostInfoVerified"`
 }
 
 // DynamoDB key pattern constants
@@ -376,9 +384,10 @@ func GetInstanceHealthFromDataStore(instanceId string) (lastHealthy string, err 
 	}
 }
 
-func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instanceId string, awsRegion string, serviceInfo string, hostInfo string) (err error) {
+func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instanceId string, awsRegion string, serviceInfo string, hostInfo string, hostInfoVerified ...bool) (err error) {
 	store, _, timeoutSec, retries := ddbSnapshot()
 	if store == nil {
+		MarkLastInstanceHealthWriteFailure()
 		return fmt.Errorf("Set Instance Health To Data Store Failed: DynamoDB Connection Not Established")
 	}
 
@@ -423,12 +432,81 @@ func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instance
 		LastUpdatedUTC: util.FormatDateTime(timeNowUTC),
 	}
 
+	if len(hostInfoVerified) > 0 {
+		statusInfo.HostInfoVerified = hostInfoVerified[0]
+	}
+
 	if e := store.PutItemWithRetry(retries, statusInfo, store.TimeOutDuration(timeoutSec)); e != nil {
 		// error
+		MarkLastInstanceHealthWriteFailure()
 		return fmt.Errorf("Set Instance Health To Data Store Failed: %s", e)
 	} else {
 		// success
 		return nil
+	}
+}
+
+// lastInstanceHealthWriteFailureAtUnixNano records when the most recent
+// instance-health write to the data store failed (unix nanoseconds; 0 = none
+// recorded). The stale-record remover consults it to stand down while the
+// staleness data itself is not trustworthy — a data-store write outage must not
+// be able to masquerade as a fleet of dead instances (incident 2026-11-23:
+// two failed heartbeats + the 5-minute stale threshold wrongfully deregistered
+// six live CloudMap instances across dev and qa).
+var lastInstanceHealthWriteFailureAtUnixNano atomic.Int64
+
+// MarkLastInstanceHealthWriteFailure records the current time as the most
+// recent instance-health write failure. Safe for concurrent use.
+func MarkLastInstanceHealthWriteFailure() {
+	SetLastInstanceHealthWriteFailureAt(time.Now().UTC())
+}
+
+// SetLastInstanceHealthWriteFailureAt records the given time as the most
+// recent instance-health write failure. Intended for operational tooling and
+// tests that need to simulate an aged failure (e.g. verifying the stale
+// sweep's stand-down window lapses). Safe for concurrent use.
+func SetLastInstanceHealthWriteFailureAt(t time.Time) {
+	lastInstanceHealthWriteFailureAtUnixNano.Store(t.UnixNano())
+}
+
+// ResetLastInstanceHealthWriteFailure clears the write-failure marker.
+// Safe for concurrent use.
+func ResetLastInstanceHealthWriteFailure() {
+	lastInstanceHealthWriteFailureAtUnixNano.Store(0)
+}
+
+// TimeSinceLastInstanceHealthWriteFailure reports how long ago the most recent
+// instance-health write failure occurred, and whether one was ever recorded.
+func TimeSinceLastInstanceHealthWriteFailure() (elapsed time.Duration, failed bool) {
+	n := lastInstanceHealthWriteFailureAtUnixNano.Load()
+	if n == 0 {
+		return 0, false
+	}
+	return time.Since(time.Unix(0, n)), true
+}
+
+// EffectiveHealthReportRecordStaleMinutes returns the configured
+// health_report_record_stale_minutes value after applying the documented clamp
+// (minimum 3, default 5, maximum 15) — the same normalization the stale query
+// itself applies, exposed so other components (e.g. the remover's stand-down
+// window) reason about the threshold that is actually in effect.
+func EffectiveHealthReportRecordStaleMinutes() int {
+	return int(normalizedHealthReportRecordStaleMinutes())
+}
+
+// normalizedHealthReportRecordStaleMinutes applies the stale-minutes clamp.
+func normalizedHealthReportRecordStaleMinutes() uint {
+	staleMinutes := GetHealthReportRecordStaleMinutes()
+
+	switch {
+	case staleMinutes == 0:
+		return 5
+	case staleMinutes < 3:
+		return 3
+	case staleMinutes > 15:
+		return 15
+	default:
+		return staleMinutes
 	}
 }
 
@@ -457,6 +535,52 @@ func DeleteInstanceHealthFromDataStore(instanceKeys ...*dynamodb.DynamoDBTableKe
 	}
 }
 
+// ListFreshInstancesFromDataStore returns the instance health records whose
+// owners are actively heartbeating — the indexed complement of the stale
+// query (same LSI, LastTimestamp >= now - staleMinutes) — for the
+// registration reconciler, which verifies these instances' Cloud Map
+// registrations still exist. Querying the complement avoids a second
+// full-partition scan per cycle.
+func ListFreshInstancesFromDataStore() (instances []*HealthStatus, err error) {
+	store, _, timeoutSec, retries := ddbSnapshot()
+
+	if store == nil {
+		return []*HealthStatus{}, fmt.Errorf("List Fresh Instances From Data Store Failed: DynamoDB Connection Not Established")
+	}
+
+	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
+
+	staleMinutes := normalizedHealthReportRecordStaleMinutes()
+	ts := util.Int64ToString(time.Now().UTC().Add(time.Duration(staleMinutes) * time.Minute * -1).Unix())
+
+	if itemsList, e := store.QueryPagedItemsWithRetry(retries, &[]*HealthStatus{}, &[]*HealthStatus{},
+		store.TimeOutDuration(timeoutSec),
+		"LSI-LastTimestamp",
+		"PK=:pk AND LastTimestamp>=:lasttimestamp",
+		map[string]*ddb.AttributeValue{
+			":pk": {
+				S: aws.String(pk),
+			},
+			":lasttimestamp": {
+				N: aws.String(ts),
+			},
+		}, nil); e != nil {
+		// error
+		return []*HealthStatus{}, fmt.Errorf("List Fresh Instances From Data Store Failed: %s", e)
+	} else {
+		// success
+		ok := false
+
+		if instances, ok = itemsList.([]*HealthStatus); !ok {
+			// a type-assertion failure means the query contract changed —
+			// surface it instead of silently disabling the reconciler
+			return []*HealthStatus{}, fmt.Errorf("List Fresh Instances From Data Store Failed: Unexpected Result Type %T", itemsList)
+		} else {
+			return instances, nil
+		}
+	}
+}
+
 func ListInactiveInstancesFromDataStore() (inactiveInstances []*HealthStatus, err error) {
 	store, _, timeoutSec, retries := ddbSnapshot()
 	// FIX: Original code used named return 'err' (which is nil) in the error message:
@@ -467,15 +591,7 @@ func ListInactiveInstancesFromDataStore() (inactiveInstances []*HealthStatus, er
 
 	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
 
-	staleMinutes := GetHealthReportRecordStaleMinutes()
-
-	if staleMinutes == 0 {
-		staleMinutes = 5
-	} else if staleMinutes < 3 {
-		staleMinutes = 3
-	} else if staleMinutes > 15 {
-		staleMinutes = 15
-	}
+	staleMinutes := normalizedHealthReportRecordStaleMinutes()
 
 	ts := util.Int64ToString(time.Now().UTC().Add(time.Duration(staleMinutes) * time.Minute * -1).Unix())
 
