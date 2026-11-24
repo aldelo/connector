@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -1202,6 +1203,100 @@ var (
 	sdMapMu sync.Mutex
 )
 
+// Stale-sweep safety guards (incident 2026-11-23: a ~2.5-minute DynamoDB
+// disruption failed two consecutive heartbeat writes; the stale-record remover
+// then judged six LIVE instances stale (5-minute threshold) and deregistered
+// them from CloudMap. go-ms services only register at startup, so they stayed
+// undiscoverable for ~6 hours until manually restarted).
+const (
+	// maxHealthReportInterval is the upper bound of the service-side health
+	// report interval (service config health_report_update_frequency_seconds:
+	// default 120s, minimum 30s, maximum 300s). The sweep stands down for
+	// staleMinutes + maxHealthReportInterval after any data-store write failure,
+	// so a live service always gets one full heartbeat chance to re-write its
+	// record before staleness is trusted again.
+	maxHealthReportInterval = 300 * time.Second
+
+	// staleConfirmWindow is how long an instance must have been continuously
+	// observed stale before it may be deregistered, so that a single anomalous
+	// read cannot act on its own. With the default sweep cadence (120s) this
+	// normally costs one extra cycle.
+	staleConfirmWindow = 60 * time.Second
+
+	// instanceLivenessDialTimeout bounds the TCP liveness probe against a
+	// stale record's HostInfo before the instance may be deregistered.
+	instanceLivenessDialTimeout = 2 * time.Second
+
+	// maxDeregistersPerCycle caps how many instances one sweep may
+	// deregister, bounding the blast radius of any defect in the stale
+	// detection. Excess confirmed candidates are logged loudly and picked up
+	// by subsequent cycles.
+	maxDeregistersPerCycle = 3
+)
+
+// Remover seams, overridable in unit tests.
+var (
+	listInactiveInstances                        = model.ListInactiveInstancesFromDataStore
+	deregisterInstanceViaSd                      = sdDeregisterInstance
+	refreshInstanceRecord                        = model.SetInstanceHealthToDataStore
+	dialTCP                                      = net.DialTimeout
+	staleFirstSeen          map[string]time.Time = map[string]time.Time{}
+	staleFirstSeenMu        sync.Mutex
+)
+
+// staleFirstSeenLookup returns when the given instance was first observed
+// stale in a prior cycle, if it was.
+func staleFirstSeenLookup(instanceId string) (firstSeen time.Time, seen bool) {
+	staleFirstSeenMu.Lock()
+	defer staleFirstSeenMu.Unlock()
+	t, ok := staleFirstSeen[instanceId]
+	return t, ok
+}
+
+// updateStaleConfirmations replaces the tracked stale-sighting state with the
+// given map (instance id → first sighting time).
+func updateStaleConfirmations(next map[string]time.Time) {
+	staleFirstSeenMu.Lock()
+	defer staleFirstSeenMu.Unlock()
+	staleFirstSeen = next
+}
+
+// parseDialTarget normalizes a health record's HostInfo into a TCP dial
+// target ("host:port"). Plain "ip:port" (the go-ms service format, from
+// Service.LocalAddress) and URL forms ("https://host:port/...", used by some
+// legacy notifier records) are both accepted.
+func parseDialTarget(hostInfo string) (string, error) {
+	s := strings.TrimSpace(hostInfo)
+
+	if s == "" {
+		return "", fmt.Errorf("HostInfo is empty")
+	}
+
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return "", fmt.Errorf("HostInfo URL parse failed: %w", err)
+		}
+
+		if u.Hostname() == "" || u.Port() == "" {
+			return "", fmt.Errorf("HostInfo URL lacks host or port")
+		}
+
+		return net.JoinHostPort(u.Hostname(), u.Port()), nil
+	}
+
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return "", fmt.Errorf("HostInfo is not host:port: %w", err)
+	}
+
+	if host == "" || port == "" {
+		return "", fmt.Errorf("HostInfo lacks host or port")
+	}
+
+	return net.JoinHostPort(host, port), nil
+}
+
 // RunStaleHealthReportRecordsRemoverService starts a go-routine and runs loop to continuously clean up stale records.
 // FIX #3: Uses time.NewTicker inside select so the stop signal is immediately honored,
 // instead of the original busy-wait select/default + time.Sleep which missed the stop signal during sleep.
@@ -1256,19 +1351,136 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 }
 
 // removeInactiveInstancesFromServiceDiscovery will query dynamodb table used for instance host health monitor,
-// if greater than 15 minutes of no keep-alive timestamp update, gather for cloudmap service discovery de-register,
+// if greater than the stale threshold of no keep-alive timestamp update, gather for cloudmap service discovery de-register,
 // then remove from dynamodb table upon de-register success.
 // FIX #4: Uses the package-level sdMapMu instead of a per-goroutine mutex.
+//
+// Safety guards (incident 2026-11-23) — a stale record alone may no longer
+// deregister an instance; all of the following must hold:
+//
+//	guard 1 (stand-down):   the data store has not failed an instance-health
+//	                        write within staleMinutes + maxHealthReportInterval
+//	                        (staleness data must be trustworthy to act on);
+//	guard 2 (confirmation): the record has been observed stale for at least
+//	                        staleConfirmWindow across consecutive cycles;
+//	guard 3 (liveness):     the record's HostInfo endpoint fails a TCP dial —
+//	                        a reachable endpoint is KEPT and its record is
+//	                        refreshed instead of being deregistered;
+//	guard 4 (rate cap):     at most maxDeregistersPerCycle deregistrations
+//	                        happen per cycle.
 func removeInactiveInstancesFromServiceDiscovery() {
-	items, e := model.ListInactiveInstancesFromDataStore()
+	// guard 1: if the store that feeds staleness detection recently failed
+	// writes, its "stale" rows are indistinguishable from dead services.
+	if elapsed, failed := model.TimeSinceLastInstanceHealthWriteFailure(); failed {
+		standDown := time.Duration(model.EffectiveHealthReportRecordStaleMinutes())*time.Minute + maxHealthReportInterval
+
+		if elapsed < standDown {
+			log.Printf("~~~ Health Report Stale Record Clean Up: Skipped (data-store write failed %s ago, within the %s stand-down window — staleness data not trustworthy) ~~~",
+				elapsed.Round(time.Second), standDown)
+			return
+		}
+	}
+
+	items, e := listInactiveInstances()
 	if e != nil {
 		log.Println("!!! Remove Health Report Stale Records Failed: " + e.Error() + " !!!")
 		return
 	}
 
 	if len(items) == 0 {
+		updateStaleConfirmations(map[string]time.Time{})
 		log.Println("~~~ Health Report Stale Record Clean Up: 0 Found, All OK ~~~")
 		return
+	}
+
+	now := time.Now().UTC()
+
+	// Confirmation state for this cycle: instance id → first sighting time.
+	nextFirstSeen := make(map[string]time.Time, len(items))
+
+	type confirmedStale struct {
+		item *model.HealthStatus
+	}
+
+	var confirmed []confirmedStale
+	awaitingConfirmation := 0
+	aliveKept := 0
+
+	for _, v := range items {
+		if v == nil {
+			continue
+		}
+
+		instanceId := v.InstanceId
+
+		firstSeen, seenBefore := staleFirstSeenLookup(instanceId)
+		if !seenBefore {
+			firstSeen = now
+		}
+
+		nextFirstSeen[instanceId] = firstSeen
+
+		// guard 2: must be stale across consecutive cycles before acting.
+		if now.Sub(firstSeen) < staleConfirmWindow {
+			awaitingConfirmation++
+			continue
+		}
+
+		// guard 3: verify liveness — a reachable endpoint must never be
+		// deregistered based on record age alone.
+		target, parseErr := parseDialTarget(v.HostInfo)
+
+		if parseErr != nil {
+			log.Printf("@@@ Health Report Stale Record Clean Up: Instance '%s' HostInfo cannot be parsed for liveness check (%s) — proceeding on record age only @@@",
+				escapeUserInput(instanceId), parseErr.Error())
+		} else if conn, dialErr := dialTCP("tcp", target, instanceLivenessDialTimeout); dialErr == nil {
+			_ = conn.Close()
+			aliveKept++
+
+			delete(nextFirstSeen, instanceId)
+
+			if refreshErr := refreshInstanceRecord(v.NamespaceId, v.ServiceId, v.InstanceId, v.AwsRegion, v.ServiceInfo, v.HostInfo); refreshErr != nil {
+				log.Printf("@@@ Health Report Stale Record Clean Up: Instance '%s' endpoint ALIVE at '%s' — instance KEPT, but record refresh failed: %s @@@",
+					escapeUserInput(instanceId), target, refreshErr.Error())
+			} else {
+				log.Printf("@@@ Health Report Stale Record Clean Up: Instance '%s' endpoint ALIVE at '%s' — instance KEPT and record refreshed @@@",
+					escapeUserInput(instanceId), target)
+			}
+
+			continue
+		} else {
+			log.Printf("Service Discovery Liveness Check for Stale Instance '%s' at '%s' unreachable (%s) — eligible for de-register",
+				escapeUserInput(instanceId), target, dialErr.Error())
+		}
+
+		confirmed = append(confirmed, confirmedStale{
+			item: v,
+		})
+	}
+
+	updateStaleConfirmations(nextFirstSeen)
+
+	if awaitingConfirmation > 0 {
+		log.Printf("~~~ Health Report Stale Record Clean Up: %s instance(s) newly stale — awaiting confirmation on a subsequent cycle ~~~",
+			util.Itoa(awaitingConfirmation))
+	}
+
+	if aliveKept > 0 {
+		log.Printf("@@@ Health Report Stale Record Clean Up: %s stale record(s) had LIVE endpoints — instances KEPT and records refreshed @@@",
+			util.Itoa(aliveKept))
+	}
+
+	if len(confirmed) == 0 {
+		log.Println("~~~ Health Report Stale Record Clean Up: 0 Confirmed Stale, All OK ~~~")
+		return
+	}
+
+	// guard 4: bound the blast radius of any stale-detection defect.
+	if len(confirmed) > maxDeregistersPerCycle {
+		log.Printf("!!! Health Report Stale Record Clean Up: %s instances confirmed stale exceeds the per-cycle de-register cap of %s — only the oldest %s will be de-registered this cycle (investigate if this is unexpected) !!!",
+			util.Itoa(len(confirmed)), util.Itoa(maxDeregistersPerCycle), util.Itoa(maxDeregistersPerCycle))
+
+		confirmed = confirmed[:maxDeregistersPerCycle]
 	}
 
 	// FIX #4: Lock the package-level mutex to protect sdMap and serialise deregister operations
@@ -1279,15 +1491,15 @@ func removeInactiveInstancesFromServiceDiscovery() {
 	keys := []*dynamodb.DynamoDBTableKeyValue{}
 	pk := model.BuildHealthPK()
 
-	for _, v := range items {
-		if v != nil {
-			if err := sdDeregisterInstance(v.NamespaceId, v.ServiceId, v.InstanceId, v.AwsRegion); err == nil {
-				// deregister success, queue instance for delete from data store
-				keys = append(keys, &dynamodb.DynamoDBTableKeyValue{
-					PK: pk,
-					SK: model.BuildHealthSK(v.InstanceId),
-				})
-			}
+	for _, c := range confirmed {
+		v := c.item
+
+		if err := deregisterInstanceViaSd(v.NamespaceId, v.ServiceId, v.InstanceId, v.AwsRegion); err == nil {
+			// deregister success, queue instance for delete from data store
+			keys = append(keys, &dynamodb.DynamoDBTableKeyValue{
+				PK: pk,
+				SK: model.BuildHealthSK(v.InstanceId),
+			})
 		}
 	}
 

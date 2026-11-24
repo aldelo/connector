@@ -19,6 +19,7 @@ package model
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	util "github.com/aldelo/common"
@@ -379,6 +380,7 @@ func GetInstanceHealthFromDataStore(instanceId string) (lastHealthy string, err 
 func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instanceId string, awsRegion string, serviceInfo string, hostInfo string) (err error) {
 	store, _, timeoutSec, retries := ddbSnapshot()
 	if store == nil {
+		MarkLastInstanceHealthWriteFailure()
 		return fmt.Errorf("Set Instance Health To Data Store Failed: DynamoDB Connection Not Established")
 	}
 
@@ -425,10 +427,67 @@ func SetInstanceHealthToDataStore(namespaceId string, serviceId string, instance
 
 	if e := store.PutItemWithRetry(retries, statusInfo, store.TimeOutDuration(timeoutSec)); e != nil {
 		// error
+		MarkLastInstanceHealthWriteFailure()
 		return fmt.Errorf("Set Instance Health To Data Store Failed: %s", e)
 	} else {
 		// success
 		return nil
+	}
+}
+
+// lastInstanceHealthWriteFailureAtUnixNano records when the most recent
+// instance-health write to the data store failed (unix nanoseconds; 0 = none
+// recorded). The stale-record remover consults it to stand down while the
+// staleness data itself is not trustworthy — a data-store write outage must not
+// be able to masquerade as a fleet of dead instances (incident 2026-11-23:
+// two failed heartbeats + the 5-minute stale threshold wrongfully deregistered
+// six live CloudMap instances across dev and qa).
+var lastInstanceHealthWriteFailureAtUnixNano atomic.Int64
+
+// MarkLastInstanceHealthWriteFailure records the current time as the most
+// recent instance-health write failure. Safe for concurrent use.
+func MarkLastInstanceHealthWriteFailure() {
+	lastInstanceHealthWriteFailureAtUnixNano.Store(time.Now().UTC().UnixNano())
+}
+
+// ResetLastInstanceHealthWriteFailure clears the write-failure marker.
+// Safe for concurrent use.
+func ResetLastInstanceHealthWriteFailure() {
+	lastInstanceHealthWriteFailureAtUnixNano.Store(0)
+}
+
+// TimeSinceLastInstanceHealthWriteFailure reports how long ago the most recent
+// instance-health write failure occurred, and whether one was ever recorded.
+func TimeSinceLastInstanceHealthWriteFailure() (elapsed time.Duration, failed bool) {
+	n := lastInstanceHealthWriteFailureAtUnixNano.Load()
+	if n == 0 {
+		return 0, false
+	}
+	return time.Since(time.Unix(0, n)), true
+}
+
+// EffectiveHealthReportRecordStaleMinutes returns the configured
+// health_report_record_stale_minutes value after applying the documented clamp
+// (minimum 3, default 5, maximum 15) — the same normalization the stale query
+// itself applies, exposed so other components (e.g. the remover's stand-down
+// window) reason about the threshold that is actually in effect.
+func EffectiveHealthReportRecordStaleMinutes() int {
+	return int(normalizedHealthReportRecordStaleMinutes())
+}
+
+// normalizedHealthReportRecordStaleMinutes applies the stale-minutes clamp.
+func normalizedHealthReportRecordStaleMinutes() uint {
+	staleMinutes := GetHealthReportRecordStaleMinutes()
+
+	switch {
+	case staleMinutes == 0:
+		return 5
+	case staleMinutes < 3:
+		return 3
+	case staleMinutes > 15:
+		return 15
+	default:
+		return staleMinutes
 	}
 }
 
@@ -467,15 +526,7 @@ func ListInactiveInstancesFromDataStore() (inactiveInstances []*HealthStatus, er
 
 	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
 
-	staleMinutes := GetHealthReportRecordStaleMinutes()
-
-	if staleMinutes == 0 {
-		staleMinutes = 5
-	} else if staleMinutes < 3 {
-		staleMinutes = 3
-	} else if staleMinutes > 15 {
-		staleMinutes = 15
-	}
+	staleMinutes := normalizedHealthReportRecordStaleMinutes()
 
 	ts := util.Int64ToString(time.Now().UTC().Add(time.Duration(staleMinutes) * time.Minute * -1).Unix())
 
