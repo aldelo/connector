@@ -524,6 +524,43 @@ func DeleteInstanceHealthFromDataStore(instanceKeys ...*dynamodb.DynamoDBTableKe
 	}
 }
 
+// ListAllInstancesFromDataStore returns every instance health record in the
+// health partition, regardless of freshness. Used by the registration
+// reconciler, which needs the complement view of the stale query: records
+// whose owners are actively heartbeating, to verify their Cloud Map
+// registrations still exist.
+func ListAllInstancesFromDataStore() (instances []*HealthStatus, err error) {
+	store, _, timeoutSec, retries := ddbSnapshot()
+
+	if store == nil {
+		return []*HealthStatus{}, fmt.Errorf("List All Instances From Data Store Failed: DynamoDB Connection Not Established")
+	}
+
+	pk := fmt.Sprintf(pkHealthPattern, pkPrefix, pkHealthPrefix)
+
+	if itemsList, e := store.QueryPagedItemsWithRetry(retries, &[]*HealthStatus{}, &[]*HealthStatus{},
+		store.TimeOutDuration(timeoutSec),
+		"",
+		"PK=:pk",
+		map[string]*ddb.AttributeValue{
+			":pk": {
+				S: aws.String(pk),
+			},
+		}, nil); e != nil {
+		// error
+		return []*HealthStatus{}, fmt.Errorf("List All Instances From Data Store Failed: %s", e)
+	} else {
+		// success
+		ok := false
+
+		if instances, ok = itemsList.([]*HealthStatus); !ok {
+			return []*HealthStatus{}, nil
+		} else {
+			return instances, nil
+		}
+	}
+}
+
 func ListInactiveInstancesFromDataStore() (inactiveInstances []*HealthStatus, err error) {
 	store, _, timeoutSec, retries := ddbSnapshot()
 	// FIX: Original code used named return 'err' (which is nil) in the error message:

@@ -394,6 +394,116 @@ func RegisterInstance(sd *cloudmap.CloudMap,
 	return instanceId, operationId, nil
 }
 
+// RegisterExistingInstance registers a service endpoint to AWS Cloud Map
+// under an explicit, caller-owned instanceId — unlike RegisterInstance,
+// which generates a new id. It exists for reconciliation: a health-record
+// row that is actively heartbeating but whose Cloud Map registration has gone
+// missing (wrongful deregistration, manual removal, API anomaly) can be
+// restored under its original id, so the health record and the Cloud Map
+// registration stay keyed identically.
+//
+// The call is idempotent: Cloud Map accepts re-registering an existing
+// instanceId (attributes are overwritten), and the stable CreatorRequestId
+// (the instanceId itself) makes concurrent reconcilers converge on the same
+// operation instead of duplicating work.
+//
+// sd = (required) cloudmap service discovery object
+// serviceId = (required) cloudmap service id
+// instanceId = (required) the exact instance id to register under (validated,
+// never regenerated — a duplicate-instance error is returned to the caller)
+// ip = (required) ip address of the instance being registered
+// port = (required) port number of the instance being registered
+// healthy = (required) indicates the initial instance state as healthy or
+// unhealthy when registered to cloud map
+// version = (optional) such as v1.0.1, semver semantic, for internal use by
+// services; an empty value omits the INSTANCE_VERSION attribute
+func RegisterExistingInstance(sd *cloudmap.CloudMap,
+	serviceId string,
+	instanceId string,
+	ip string,
+	port uint,
+	healthy bool,
+	version string,
+	timeoutDuration ...time.Duration) (operationId string, err error) {
+
+	if sd == nil {
+		return "", fmt.Errorf("SD Client is Required")
+	}
+
+	// normalize inputs before validation/use
+	serviceId = strings.TrimSpace(serviceId)
+	instanceId = strings.TrimSpace(instanceId)
+	ip = strings.TrimSpace(ip)
+	version = strings.TrimSpace(version)
+
+	if err := validateServiceID(serviceId); err != nil {
+		return "", err
+	}
+
+	// the explicit id is the contract of this function — validate it, never
+	// regenerate it
+	if err := validateInstanceID(instanceId); err != nil {
+		return "", err
+	}
+
+	if ip == "" {
+		return "", fmt.Errorf("Instance IP is Required")
+	}
+
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil || parsedIP.To4() == nil { // only ipv4 supported by aws cloud map at this time
+		return "", fmt.Errorf("Instance IP Must Be A Valid IPv4 Address")
+	}
+
+	if port == 0 || port > 65535 {
+		return "", fmt.Errorf("Instance Port Must Be Between 1 and 65535")
+	}
+
+	// prevent overlong attribute values rejected by Cloud Map
+	if len(version) > instanceVersionMaxLen {
+		return "", fmt.Errorf("Instance version exceeds maximum length of %d characters", instanceVersionMaxLen)
+	}
+
+	health := "UNHEALTHY"
+	if healthy {
+		health = "HEALTHY"
+	}
+
+	// helper to build a fresh attributes map per attempt to avoid mutation leaks.
+	buildAttributes := func(includeInitHealth bool) map[string]string {
+		attrs := map[string]string{
+			"AWS_INSTANCE_IPV4": parsedIP.To4().String(),
+			"AWS_INSTANCE_PORT": fmt.Sprintf("%d", port),
+			"SERVICE_ID":        serviceId,
+		}
+		if version != "" { // avoid empty attribute values that Cloud Map rejects
+			attrs["INSTANCE_VERSION"] = version
+		}
+		if includeInitHealth {
+			attrs["AWS_INIT_HEALTH_STATUS"] = health
+		}
+		return attrs
+	}
+
+	if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, buildAttributes(true), timeoutDuration...); err != nil {
+		// fallback if service does not support custom health checks
+		if strings.Contains(strings.ToLower(err.Error()), "aws_init_health_status") {
+			if operationId, err = sd.RegisterInstance(serviceId, instanceId, instanceId, buildAttributes(false), timeoutDuration...); err != nil {
+				return "", err
+			}
+		} else {
+			return "", err
+		}
+	}
+
+	// ensure a usable operation id is returned
+	if strings.TrimSpace(operationId) == "" {
+		return "", fmt.Errorf("RegisterInstance succeeded but no operationId was returned")
+	}
+
+	return operationId, nil
+}
+
 // GetOperationStatus will check if a given operationId was successfully completed
 func GetOperationStatus(sd *cloudmap.CloudMap,
 	operationId string,

@@ -31,6 +31,7 @@ import (
 	"github.com/aldelo/connector/notifiergateway/config"
 	"github.com/aldelo/connector/notifiergateway/model"
 	"github.com/aldelo/connector/webserver"
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
@@ -1239,6 +1240,16 @@ const (
 	// cycles.
 	maxDeregistersPerCycle = 3
 
+	// maxReconcileServicesPerCycle bounds how many distinct Cloud Map
+	// services the registration-reconciliation leg inspects per cycle; a
+	// rotating cursor covers the remainder over subsequent cycles.
+	maxReconcileServicesPerCycle = 25
+
+	// maxReRegistersPerCycle bounds how many missing registrations one cycle
+	// may restore — blast-radius symmetry with maxDeregistersPerCycle. Missing
+	// registrations are rediscovered on every cycle, so deferral is harmless.
+	maxReRegistersPerCycle = 5
+
 	// capEscalationCycles is how many consecutive capped cycles must occur
 	// before the per-cycle cap notice escalates from @@@ to the !!! severity
 	// token, so routine backlog drains (mass redeploys, scale-ins) do not page
@@ -1259,6 +1270,18 @@ var (
 	// cap bound, for capEscalationCycles escalation. Guarded by
 	// staleFirstSeenMu.
 	consecutiveCappedCycles int
+
+	// Registration-reconciliation seams, overridable in unit tests.
+	listAllInstances     = model.ListAllInstancesFromDataStore
+	sdListRegisteredFn   = sdListRegistered
+	sdRegisterExistingFn = registry.RegisterExistingInstance
+	sdClientForFn        = sdClientFor
+
+	// reconcileCursor rotates which slice of the (deterministically sorted)
+	// service list the reconciliation leg inspects each cycle. Guarded by
+	// reconcileMu.
+	reconcileCursor int
+	reconcileMu     sync.Mutex
 )
 
 // staleConfirmationWindow returns how long an instance must have been
@@ -1319,33 +1342,48 @@ func updateStaleConfirmations(next map[string]time.Time) {
 // target ("host:port"). Plain "ip:port" (the go-ms service format, from
 // Service.LocalAddress) and URL forms ("https://host:port/...", used by some
 // legacy notifier records) are both accepted.
-func parseDialTarget(hostInfo string) (string, error) {
+// parseHostPort normalizes a health record's HostInfo into its host and port
+// parts. Plain "ip:port" (the go-ms service format, from
+// Service.LocalAddress) and URL forms ("https://host:port/...", used by some
+// legacy notifier records) are both accepted.
+func parseHostPort(hostInfo string) (host string, port string, err error) {
 	s := strings.TrimSpace(hostInfo)
 
 	if s == "" {
-		return "", fmt.Errorf("HostInfo is empty")
+		return "", "", fmt.Errorf("HostInfo is empty")
 	}
 
 	if strings.Contains(s, "://") {
-		u, err := url.Parse(s)
-		if err != nil {
-			return "", fmt.Errorf("HostInfo URL parse failed: %w", err)
+		u, parseErr := url.Parse(s)
+		if parseErr != nil {
+			return "", "", fmt.Errorf("HostInfo URL parse failed: %w", parseErr)
 		}
 
 		if u.Hostname() == "" || u.Port() == "" {
-			return "", fmt.Errorf("HostInfo URL lacks host or port")
+			return "", "", fmt.Errorf("HostInfo URL lacks host or port")
 		}
 
-		return net.JoinHostPort(u.Hostname(), u.Port()), nil
+		return u.Hostname(), u.Port(), nil
 	}
 
-	host, port, err := net.SplitHostPort(s)
+	host, port, err = net.SplitHostPort(s)
 	if err != nil {
-		return "", fmt.Errorf("HostInfo is not host:port: %w", err)
+		return "", "", fmt.Errorf("HostInfo is not host:port: %w", err)
 	}
 
 	if host == "" || port == "" {
-		return "", fmt.Errorf("HostInfo lacks host or port")
+		return "", "", fmt.Errorf("HostInfo lacks host or port")
+	}
+
+	return host, port, nil
+}
+
+// parseDialTarget normalizes a health record's HostInfo into a TCP dial
+// target ("host:port").
+func parseDialTarget(hostInfo string) (string, error) {
+	host, port, err := parseHostPort(hostInfo)
+	if err != nil {
+		return "", err
 	}
 
 	return net.JoinHostPort(host, port), nil
@@ -1354,6 +1392,11 @@ func parseDialTarget(hostInfo string) (string, error) {
 // RunStaleHealthReportRecordsRemoverService starts a go-routine and runs loop to continuously clean up stale records.
 // FIX #3: Uses time.NewTicker inside select so the stop signal is immediately honored,
 // instead of the original busy-wait select/default + time.Sleep which missed the stop signal during sleep.
+//
+// Since the registration-reconciliation leg (reconcileMissingRegistrations) was
+// added, each cycle also restores Cloud Map registrations for instances whose
+// health records are fresh but whose registration has gone missing — the
+// recovery counterpart of the stale sweep, sharing this loop and its cadence.
 func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 	if stopService == nil {
 		log.Println("### RunStaleHealthReportRecordsRemoverService: stopService channel is nil, service not started ###")
@@ -1386,6 +1429,7 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 		// Run immediately on startup before waiting for the first tick
 		log.Println(">>> Stale Health Report Record Remover - Processing Invoked <<<")
 		removeInactiveInstancesFromServiceDiscovery()
+		reconcileMissingRegistrations()
 
 		ticker := time.NewTicker(time.Duration(freq) * time.Second)
 		defer ticker.Stop()
@@ -1399,6 +1443,7 @@ func RunStaleHealthReportRecordsRemoverService(stopService chan bool) {
 			case <-ticker.C:
 				log.Println(">>> Stale Health Report Record Remover - Processing Invoked <<<")
 				removeInactiveInstancesFromServiceDiscovery()
+				reconcileMissingRegistrations()
 			}
 		}
 	})
@@ -1629,6 +1674,225 @@ func removeInactiveInstancesFromServiceDiscovery() {
 	}
 }
 
+// reconcileMissingRegistrations is the recovery half of the sweeper: for every
+// health record whose owner is actively heartbeating (fresh, i.e. NOT stale),
+// it verifies the instance still exists in Cloud Map and re-registers it under
+// its original instance id when missing (registry.RegisterExistingInstance).
+//
+// This bounds any wrongful deregistration — whatever its cause (sweeper
+// defect, manual removal, API anomaly, the other gateway task acting on bad
+// data) — to about one heartbeat interval plus one sweep cycle, instead of
+// requiring a service restart (services only register at startup; incident
+// 2026-11-23 stayed broken for ~6 hours for exactly this reason).
+//
+// Safety properties:
+//   - only FRESH records are considered (stale records belong to the stale
+//     sweep; a data-store outage makes records look staler, never fresher,
+//     so the leg is naturally inert during data-store degradation);
+//   - the endpoint is TCP-verified before its registration is restored, so a
+//     dead endpoint is never resurrected into discovery;
+//   - at most maxReRegistersPerCycle restorations and maxReconcileServicesPerCycle
+//     inspected services per cycle, rotating across cycles.
+//
+// It runs in the same background goroutine as the stale sweep, immediately
+// after it, and carries its own panic recovery so a defect here cannot take
+// the sweep loop down.
+func reconcileMissingRegistrations() {
+	// defensive: a defect in reconciliation must never kill the sweeper loop
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("!!! PANIC in registration reconciliation, recovered: %v\n%s !!!", r, debug.Stack())
+		}
+	}()
+
+	items, e := listAllInstances()
+	if e != nil {
+		log.Println("~~~ Registration Reconciliation Skipped: " + e.Error() + " ~~~")
+		return
+	}
+
+	if len(items) == 0 {
+		return
+	}
+
+	now := time.Now().UTC()
+	freshWindow := time.Duration(model.EffectiveHealthReportRecordStaleMinutes()) * time.Minute
+
+	type svcKey struct {
+		namespaceId string
+		serviceId   string
+		awsRegion   string
+	}
+
+	freshByService := make(map[svcKey][]*model.HealthStatus)
+
+	for _, v := range items {
+		if v == nil || v.LastTimestamp <= 0 {
+			continue
+		}
+
+		// stale records are the stale sweep's domain — never resurrect those
+		if time.Unix(v.LastTimestamp, 0).Before(now.Add(-freshWindow)) {
+			continue
+		}
+
+		if util.LenTrim(v.NamespaceId) == 0 || util.LenTrim(v.ServiceId) == 0 || util.LenTrim(v.AwsRegion) == 0 {
+			continue
+		}
+
+		k := svcKey{
+			namespaceId: v.NamespaceId,
+			serviceId:   v.ServiceId,
+			awsRegion:   v.AwsRegion,
+		}
+
+		freshByService[k] = append(freshByService[k], v)
+	}
+
+	if len(freshByService) == 0 {
+		return
+	}
+
+	// deterministic order so the rotating cursor makes progress across cycles
+	keys := make([]svcKey, 0, len(freshByService))
+	for k := range freshByService {
+		keys = append(keys, k)
+	}
+
+	sort.Slice(keys, func(i, j int) bool {
+		a := keys[i].namespaceId + "|" + keys[i].awsRegion + "|" + keys[i].serviceId
+		b := keys[j].namespaceId + "|" + keys[j].awsRegion + "|" + keys[j].serviceId
+		return a < b
+	})
+
+	reconcileMu.Lock()
+	start := reconcileCursor % len(keys)
+	reconcileMu.Unlock()
+
+	budget := maxReconcileServicesPerCycle
+	if budget > len(keys) {
+		budget = len(keys)
+	}
+
+	for i := 0; i < budget; i++ {
+		k := keys[(start+i)%len(keys)]
+
+		sdMapMu.Lock()
+		sd, serr := sdClientForFn(k.namespaceId, k.awsRegion)
+		sdMapMu.Unlock()
+
+		if serr != nil {
+			log.Printf("~~~ Registration Reconciliation Skipped Service '%s': (Connect Service Discovery Object Error) %s ~~~",
+				escapeUserInput(k.serviceId), escapeUserInput(serr.Error()))
+			continue
+		}
+
+		reconcileService(sd, k.serviceId, freshByService[k])
+	}
+
+	reconcileMu.Lock()
+	reconcileCursor = (start + budget) % len(keys)
+	reconcileMu.Unlock()
+}
+
+// reconcileService restores missing Cloud Map registrations for the fresh
+// health records of one Cloud Map service.
+func reconcileService(sd *cloudmap.CloudMap, serviceId string, rows []*model.HealthStatus) {
+	registered, err := sdListRegisteredFn(sd, serviceId)
+	if err != nil {
+		log.Printf("~~~ Registration Reconciliation Skipped Service '%s': %s ~~~",
+			escapeUserInput(serviceId), escapeUserInput(err.Error()))
+		return
+	}
+
+	timeoutDuration := time.Duration(model.GetServiceDiscoveryTimeoutSeconds()) * time.Second
+	if timeoutDuration < 5*time.Second {
+		timeoutDuration = 5 * time.Second
+	}
+
+	reRegistered := 0
+
+	for _, v := range rows {
+		if v == nil || registered[v.InstanceId] {
+			continue
+		}
+
+		if reRegistered >= maxReRegistersPerCycle {
+			log.Printf("~~~ Registration Reconciliation: Service '%s' has more missing registrations than the per-cycle restore cap of %s — remaining instances deferred to subsequent cycles ~~~",
+				escapeUserInput(serviceId), util.Itoa(maxReRegistersPerCycle))
+			break
+		}
+
+		host, portStr, parseErr := parseHostPort(v.HostInfo)
+		if parseErr != nil {
+			log.Printf("@@@ Registration Reconciliation: Instance '%s' (Service '%s') heartbeat is fresh but HostInfo cannot be parsed (%s) — cannot re-register @@@",
+				escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(parseErr.Error()))
+			continue
+		}
+
+		portNum, convErr := strconv.ParseUint(portStr, 10, 16)
+		if convErr != nil || portNum == 0 {
+			log.Printf("@@@ Registration Reconciliation: Instance '%s' (Service '%s') heartbeat is fresh but HostInfo port '%s' is invalid — cannot re-register @@@",
+				escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(portStr))
+			continue
+		}
+
+		target := net.JoinHostPort(host, portStr)
+
+		// verify the endpoint before restoring its registration — never
+		// resurrect a dead endpoint into discovery
+		conn, dialErr := dialTCP("tcp", target, instanceLivenessDialTimeout)
+		if dialErr != nil {
+			log.Printf("@@@ Registration Reconciliation: Instance '%s' (Service '%s') heartbeat is fresh but endpoint '%s' is unreachable (%s) — NOT re-registering (investigate: heartbeat alive, endpoint down) @@@",
+				escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(target), escapeUserInput(dialErr.Error()))
+			continue
+		}
+
+		_ = conn.Close()
+
+		// version attribute intentionally omitted: the health record does not
+		// carry it, and Cloud Map re-registration would overwrite the value
+		// the owning service set at startup
+		if _, regErr := sdRegisterExistingFn(sd, serviceId, v.InstanceId, host, uint(portNum), true, "", timeoutDuration); regErr != nil {
+			log.Printf("!!! Registration Reconciliation: Re-register Instance '%s' (Service '%s') at '%s' Failed: %s !!!",
+				escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(target), escapeUserInput(regErr.Error()))
+			continue
+		}
+
+		reRegistered++
+
+		log.Printf("@@@ Registration Reconciliation: Instance '%s' (Service '%s') heartbeat is fresh but Cloud Map registration was MISSING — endpoint verified ALIVE at '%s', re-registered under its original instance id @@@",
+			escapeUserInput(v.InstanceId), escapeUserInput(serviceId), escapeUserInput(target))
+	}
+}
+
+// sdListRegistered returns the set of instance ids currently registered for a
+// Cloud Map service.
+func sdListRegistered(sd *cloudmap.CloudMap, serviceId string) (map[string]bool, error) {
+	if sd == nil {
+		return nil, fmt.Errorf("Service Discovery Object is Required for ListInstances")
+	}
+
+	timeoutDuration := time.Duration(model.GetServiceDiscoveryTimeoutSeconds()) * time.Second
+	if timeoutDuration < 5*time.Second {
+		timeoutDuration = 5 * time.Second
+	}
+
+	instances, _, err := sd.ListInstances(serviceId, aws.Int64(100), nil, timeoutDuration)
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make(map[string]bool, len(instances))
+	for _, inst := range instances {
+		if inst != nil && inst.Id != nil {
+			ids[*inst.Id] = true
+		}
+	}
+
+	return ids, nil
+}
+
 // sdDeregisterInstance handles de-register instance action, along with creating and using sd object for various namespaces.
 // FIX #1: Returns errors instead of nil for empty params to prevent silent data deletion.
 // Caller must be holding sdMapMu.
@@ -1649,21 +1913,9 @@ func sdDeregisterInstance(namespaceId string, serviceId string, instanceId strin
 		return fmt.Errorf("AwsRegion is required for de-register")
 	}
 
-	if sdMap == nil {
-		sdMap = make(map[string]*cloudmap.CloudMap)
-	}
-
-	var e error
-	sd, ok := sdMap[namespaceId+awsRegion]
-
-	if !ok {
-		// create new sd
-		// FIX E4: Use %w to preserve error chain for errors.Is/As
-		if sd, e = connectSd(namespaceId, awsRegion); e != nil {
-			return fmt.Errorf("Service Discovery De-Register Instance Failed: (Connect Service Discovery Object Error) %w", e)
-		} else {
-			sdMap[namespaceId+awsRegion] = sd
-		}
+	sd, e := sdClientFor(namespaceId, awsRegion)
+	if e != nil {
+		return fmt.Errorf("Service Discovery De-Register Instance Failed: (Connect Service Discovery Object Error) %w", e)
 	}
 
 	// de-register
@@ -1674,6 +1926,28 @@ func sdDeregisterInstance(namespaceId string, serviceId string, instanceId strin
 
 	// success
 	return nil
+}
+
+// sdClientFor returns the cached CloudMap client for the namespace+region,
+// creating and caching it on first use. Caller must be holding sdMapMu.
+// FIX E4: errors are wrapped with %w by callers to preserve the error chain.
+func sdClientFor(namespaceId string, awsRegion string) (*cloudmap.CloudMap, error) {
+	if sdMap == nil {
+		sdMap = make(map[string]*cloudmap.CloudMap)
+	}
+
+	if sd, ok := sdMap[namespaceId+awsRegion]; ok {
+		return sd, nil
+	}
+
+	sd, err := connectSd(namespaceId, awsRegion)
+	if err != nil {
+		return nil, err
+	}
+
+	sdMap[namespaceId+awsRegion] = sd
+
+	return sd, nil
 }
 
 // connectSd will try to establish service discovery object to struct (used by sdDeregisterInstance)
