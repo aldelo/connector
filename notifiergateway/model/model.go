@@ -447,7 +447,15 @@ var lastInstanceHealthWriteFailureAtUnixNano atomic.Int64
 // MarkLastInstanceHealthWriteFailure records the current time as the most
 // recent instance-health write failure. Safe for concurrent use.
 func MarkLastInstanceHealthWriteFailure() {
-	lastInstanceHealthWriteFailureAtUnixNano.Store(time.Now().UTC().UnixNano())
+	SetLastInstanceHealthWriteFailureAt(time.Now().UTC())
+}
+
+// SetLastInstanceHealthWriteFailureAt records the given time as the most
+// recent instance-health write failure. Intended for operational tooling and
+// tests that need to simulate an aged failure (e.g. verifying the stale
+// sweep's stand-down window lapses). Safe for concurrent use.
+func SetLastInstanceHealthWriteFailureAt(t time.Time) {
+	lastInstanceHealthWriteFailureAtUnixNano.Store(t.UnixNano())
 }
 
 // ResetLastInstanceHealthWriteFailure clears the write-failure marker.
